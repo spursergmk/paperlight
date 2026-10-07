@@ -10,6 +10,7 @@ import react from '@vitejs/plugin-react'
 
 const CONFIG_PATH = '/api/translation-config'
 const DEFAULT_API_BASE_URL = 'https://api.openai.com'
+const DEFAULT_MODEL = 'deepseek-v4.1-flash'
 const ALLOWED_API_HOSTS = new Set(['api.openai.com', 'api.zjuailab.club'])
 const MAX_CONFIG_BYTES = 2_000
 const MAX_TRANSLATION_BYTES = 64_000
@@ -281,7 +282,7 @@ function translationProxy(root: string): Plugin {
             return
           }
 
-          const model = typeof input.model === 'string' && input.model.trim() ? input.model.trim() : 'gpt-5-mini'
+          const model = typeof input.model === 'string' && input.model.trim() ? input.model.trim() : DEFAULT_MODEL
           const response = await fetch(responsesEndpoint(effectiveBaseUrl(root)), {
             method: 'POST',
             headers: {

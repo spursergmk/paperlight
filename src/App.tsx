@@ -23,6 +23,10 @@ interface OutlineItem {
 interface AnchorPoint { x: number; y: number }
 
 const NOTES_KEY = 'paperlight-notes-v1'
+// Bumped so a previously stored model name cannot keep overriding the default.
+const MODEL_KEY = 'paperlight-model-v2'
+const DEFAULT_MODEL = 'deepseek-v4.1-flash'
+const DEFAULT_API_BASE_URL = 'https://api.zjuailab.club'
 
 function readNotes(): SavedNote[] {
   try {
@@ -54,10 +58,10 @@ function App() {
   const [translationError, setTranslationError] = useState('')
   const [anchor, setAnchor] = useState<AnchorPoint | null>(null)
   const [mode, setMode] = useState<TranslateMode>(() => localStorage.getItem('paperlight-mode') === 'openai' ? 'openai' : 'mock')
-  const [model, setModel] = useState(() => localStorage.getItem('paperlight-model') || 'gpt-5-mini')
+  const [model, setModel] = useState(() => localStorage.getItem(MODEL_KEY) || DEFAULT_MODEL)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [apiConfig, setApiConfig] = useState<ApiConfigStatus | null>(null)
-  const [apiBaseUrl, setApiBaseUrl] = useState('https://api.zjuailab.club')
+  const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_BASE_URL)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [apiConfigLoading, setApiConfigLoading] = useState(false)
   const [apiConfigMessage, setApiConfigMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
@@ -81,7 +85,7 @@ function App() {
   }, [])
 
   useEffect(() => { localStorage.setItem('paperlight-mode', mode) }, [mode])
-  useEffect(() => { localStorage.setItem('paperlight-model', model) }, [model])
+  useEffect(() => { localStorage.setItem(MODEL_KEY, model) }, [model])
   useEffect(() => { localStorage.setItem(NOTES_KEY, JSON.stringify(notes)) }, [notes])
 
   useEffect(() => {

@@ -84,7 +84,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .pdf-page-shell { flex: 0 0 auto; position: relative; display: flex; align-items: center; flex-direction: column; scroll-margin-top: 17px; }
 .pdf-page { flex: 0 0 auto; position: relative; overflow: hidden; background: #fff; box-shadow: 0 2px 13px #292b2417, 0 0 0 1px #ecebe7; }
 .pdf-page canvas { position: absolute; inset: 0; display: block; }
-.pdf-page .textLayer { position: absolute; inset: 0; z-index: 2; overflow: hidden; opacity: 1; line-height: 1; text-align: initial; transform-origin: 0 0; }
+.pdf-page .textLayer { position: absolute; inset: 0; z-index: 2; overflow: hidden; opacity: 1; line-height: 1; text-align: initial; transform-origin: 0 0; --user-unit: 1; --total-scale-factor: calc(var(--scale-factor) * var(--user-unit)); }
 .pdf-page .textLayer span, .pdf-page .textLayer br { color: transparent; cursor: text; }
 .pdf-page .textLayer ::selection { background: #91b99c66; }
 .page-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; background: #fff; color: #a1a49e; font-size: 10px; }

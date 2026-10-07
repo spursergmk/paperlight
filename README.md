@@ -36,7 +36,7 @@ npm run dev
 1. 启动 Paperlight，点击右上角“模拟翻译”，选择“OpenAI 兼容 API”。
 2. 填写 API Base URL。ZJUAI 网关使用 `https://api.zjuailab.club`。
 3. 输入 API 密钥并点击“保存配置”。状态显示“API 已配置”后即可翻译。
-4. 填写该网关支持的模型名称；默认值是 `gpt-5-mini`。
+4. 填写该网关支持的模型名称；默认值是 `deepseek-v4.1-flash`。
 
 Base URL 和密钥由本机 Vite 服务写入项目根目录的 `.env.local`，其中密钥文件权限为 `0600`。通过页面保存时，Base URL 必须是没有账号、端口、查询参数或片段的 HTTPS 地址；当前允许 OpenAI 官方地址和 `api.zjuailab.club`，避免页面脚本把密钥转发到其他主机。页面不会回显密钥，也不会把它写入浏览器存储或打包进前端；`.env.local` 已被 Git 忽略。保存接口仅接受同源、本机请求，并使用 CSRF nonce 和原子文件替换。设置页可以更新配置或移除本机保存的密钥。
 
