@@ -1,18 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  BookOpen, Bookmark, Check, ChevronDown, ChevronLeft, ChevronRight, FilePlus2,
-  FileText, FolderOpen, KeyRound, Languages, Minus, MoreHorizontal, PanelLeftClose,
-  PanelRightClose, Plus, RotateCcw, Settings2, StickyNote, Trash2, X,
+  BookOpen, Bookmark, ChevronDown, ChevronLeft, ChevronRight, FilePlus2, FileText,
+  FolderOpen, KeyRound, Languages, Minus, PanelLeftClose, PanelRightClose, Plus, RotateCcw,
+  Settings2, StickyNote, Trash2, X,
 } from 'lucide-react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import PDFPage from './components/PDFPage'
 import PDFThumbnail from './components/PDFThumbnail'
+import SenseCard from './components/SenseCard'
+import NotebookPanel from './components/NotebookPanel'
+import ChatPanel from './components/ChatPanel'
 import { openPdf } from './lib/pdf'
 import {
   getApiConfigStatus, protocolForBaseUrl, removeApiKey, saveApiKey, translateSelection,
 } from './lib/translation'
 import type { ApiConfigStatus } from './lib/translation'
-import type { SavedNote, TextSelection, TranslateMode } from './types'
+import { askSense, expandSenses, lookupSense, sentenceAround, termFromSelection } from './lib/sense'
+import {
+  createNote, loadAtoms, loadChat, loadNotes, relateSense, saveAtoms, saveChat, saveNotes,
+  senseKeyOf, toAtom,
+} from './lib/notebook'
+import type {
+  ChatMessage, NotebookNote, SenseAtom, SensePayload, SenseSummary, TextSelection, TranslateMode,
+} from './types'
 
 interface OutlineItem {
   title: string
@@ -22,7 +32,8 @@ interface OutlineItem {
 
 interface AnchorPoint { x: number; y: number }
 
-const NOTES_KEY = 'paperlight-notes-v1'
+type RightTab = 'sense' | 'notebook' | 'chat'
+
 // Bumped so a previously stored model name cannot keep overriding the default.
 const MODEL_KEY = 'paperlight-model-v2'
 const DEFAULT_MODEL = 'deepseek-flash'
@@ -32,15 +43,12 @@ const API_PRESETS: Array<{ label: string; baseUrl: string; model?: string }> = [
   { label: 'ZJUAI 网关', baseUrl: 'https://api.zjuailab.club' },
 ]
 
-function readNotes(): SavedNote[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(NOTES_KEY) || '[]') as SavedNote[]
-    return Array.isArray(parsed) ? parsed : []
-  } catch { return [] }
-}
-
 function tidyText(value: string) {
   return value.replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim()
+}
+
+function newMessage(role: ChatMessage['role'], content: string): ChatMessage {
+  return { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, role, content, createdAt: new Date().toISOString() }
 }
 
 function App() {
@@ -54,12 +62,9 @@ function App() {
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
   const [leftTab, setLeftTab] = useState<'pages' | 'outline'>('pages')
-  const [rightTab, setRightTab] = useState<'translation' | 'notes'>('translation')
+  const [rightTab, setRightTab] = useState<RightTab>('sense')
   const [outline, setOutline] = useState<OutlineItem[]>([])
   const [selection, setSelection] = useState<TextSelection | null>(null)
-  const [translation, setTranslation] = useState('')
-  const [translationLoading, setTranslationLoading] = useState(false)
-  const [translationError, setTranslationError] = useState('')
   const [anchor, setAnchor] = useState<AnchorPoint | null>(null)
   const [mode, setMode] = useState<TranslateMode>(() => localStorage.getItem('paperlight-mode') === 'openai' ? 'openai' : 'mock')
   const [model, setModel] = useState(() => localStorage.getItem(MODEL_KEY) || DEFAULT_MODEL)
@@ -70,14 +75,40 @@ function App() {
   const [apiConfigLoading, setApiConfigLoading] = useState(false)
   const [apiConfigMessage, setApiConfigMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
   const [dragActive, setDragActive] = useState(false)
-  const [notes, setNotes] = useState<SavedNote[]>(readNotes)
-  const [activeNote, setActiveNote] = useState<string | null>(null)
-  const [noteDraft, setNoteDraft] = useState('')
   const [pageInput, setPageInput] = useState('1')
+
+  // Sense lookup
+  const [queryTerm, setQueryTerm] = useState('')
+  const [sense, setSense] = useState<SensePayload | null>(null)
+  const [senseLoading, setSenseLoading] = useState(false)
+  const [senseError, setSenseError] = useState('')
+  const [allSenses, setAllSenses] = useState<SenseSummary[] | null>(null)
+  const [expanding, setExpanding] = useState(false)
+
+  // Notebook + agent conversation
+  const [atoms, setAtoms] = useState<SenseAtom[]>(loadAtoms)
+  const [notebookNotes, setNotebookNotes] = useState<NotebookNote[]>(loadNotes)
+  const [activeAtomId, setActiveAtomId] = useState<string | null>(null)
+  const [chat, setChat] = useState<Record<string, ChatMessage[]>>(loadChat)
+  const [chatSending, setChatSending] = useState(false)
+  const [chatError, setChatError] = useState('')
+
+  // Sentence translation kept from the original reader
+  const [translation, setTranslation] = useState('')
+  const [translationLoading, setTranslationLoading] = useState(false)
+  const [translationError, setTranslationError] = useState('')
+
   const fileInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const requestIdRef = useRef(0)
+  const translationRequestRef = useRef(0)
+  const senseRequestRef = useRef(0)
+  const lastContextRef = useRef('')
   const scale = useMemo(() => Math.max(0.25, ((viewportWidth - 92) / basePageWidth) * zoom), [basePageWidth, viewportWidth, zoom])
+
+  const senseId = sense ? senseKeyOf(sense) : null
+  const senseInNotebook = Boolean(senseId && atoms.some((atom) => atom.id === senseId))
+  const relations = useMemo(() => (sense ? relateSense(sense, atoms) : []), [sense, atoms])
+  const chatMessages = senseId ? chat[senseId] || [] : []
 
   useEffect(() => {
     const element = scrollRef.current
@@ -90,7 +121,9 @@ function App() {
 
   useEffect(() => { localStorage.setItem('paperlight-mode', mode) }, [mode])
   useEffect(() => { localStorage.setItem(MODEL_KEY, model) }, [model])
-  useEffect(() => { localStorage.setItem(NOTES_KEY, JSON.stringify(notes)) }, [notes])
+  useEffect(() => { saveAtoms(atoms) }, [atoms])
+  useEffect(() => { saveNotes(notebookNotes) }, [notebookNotes])
+  useEffect(() => { saveChat(chat) }, [chat])
 
   useEffect(() => {
     if (!settingsOpen || mode !== 'openai') return
@@ -110,9 +143,7 @@ function App() {
           text: error instanceof Error ? error.message : '无法读取 API 配置状态。',
         })
       })
-      .finally(() => {
-        if (!cancelled) setApiConfigLoading(false)
-      })
+      .finally(() => { if (!cancelled) setApiConfigLoading(false) })
     return () => { cancelled = true }
   }, [mode, settingsOpen])
 
@@ -127,10 +158,7 @@ function App() {
       setApiKeyInput('')
       setApiConfigMessage({ kind: 'success', text: 'API 地址和密钥已安全保存，可以直接使用。' })
     } catch (error) {
-      setApiConfigMessage({
-        kind: 'error',
-        text: error instanceof Error ? error.message : '无法保存 API 密钥。',
-      })
+      setApiConfigMessage({ kind: 'error', text: error instanceof Error ? error.message : '无法保存 API 密钥。' })
     } finally {
       setApiConfigLoading(false)
     }
@@ -147,10 +175,7 @@ function App() {
       setApiKeyInput('')
       setApiConfigMessage({ kind: 'success', text: '本机保存的 API 密钥已移除。' })
     } catch (error) {
-      setApiConfigMessage({
-        kind: 'error',
-        text: error instanceof Error ? error.message : '无法移除 API 密钥。',
-      })
+      setApiConfigMessage({ kind: 'error', text: error instanceof Error ? error.message : '无法移除 API 密钥。' })
     } finally {
       setApiConfigLoading(false)
     }
@@ -175,7 +200,10 @@ function App() {
       setBasePageWidth(firstPage.getViewport({ scale: 1 }).width)
       setOutline((items || []) as OutlineItem[])
       setSelection(null)
-      setTranslation('')
+      setSense(null)
+      setSenseError('')
+      setAllSenses(null)
+      setQueryTerm('')
       setAnchor(null)
       setZoom(1)
       scrollRef.current?.scrollTo({ top: 0 })
@@ -200,20 +228,48 @@ function App() {
   }, [])
 
   const runTranslation = useCallback(async (next: TextSelection, requestedMode = mode, requestedModel = model) => {
-    const requestId = ++requestIdRef.current
+    const requestId = ++translationRequestRef.current
     setTranslationLoading(true)
     setTranslationError('')
     try {
       const result = await translateSelection(next, requestedMode, requestedModel)
-      if (requestId === requestIdRef.current) setTranslation(result)
+      if (requestId === translationRequestRef.current) setTranslation(result)
     } catch (error) {
-      if (requestId === requestIdRef.current) {
+      if (requestId === translationRequestRef.current) {
         setTranslationError(error instanceof Error ? error.message : '翻译失败，请稍后重试。')
       }
     } finally {
-      if (requestId === requestIdRef.current) setTranslationLoading(false)
+      if (requestId === translationRequestRef.current) setTranslationLoading(false)
     }
   }, [mode, model])
+
+  const runSenseLookup = useCallback(async (term: string, context: string) => {
+    const cleaned = term.trim()
+    if (!cleaned) return
+    const requestId = ++senseRequestRef.current
+    lastContextRef.current = context
+    setSenseLoading(true)
+    setSenseError('')
+    setAllSenses(null)
+    setChatError('')
+    try {
+      const result = await lookupSense(cleaned, context, model)
+      if (requestId !== senseRequestRef.current) return
+      setSense({
+        ...result,
+        term: result.term || cleaned,
+        lemma: result.lemma || cleaned,
+        examples: Array.isArray(result.examples) ? result.examples : [],
+      })
+      setRightTab('sense')
+    } catch (error) {
+      if (requestId === senseRequestRef.current) {
+        setSenseError(error instanceof Error ? error.message : '义项查询失败。')
+      }
+    } finally {
+      if (requestId === senseRequestRef.current) setSenseLoading(false)
+    }
+  }, [model])
 
   const selectText = useCallback(() => {
     const browserSelection = window.getSelection()
@@ -238,13 +294,76 @@ function App() {
     setTranslation('')
     setTranslationError('')
     setRightOpen(true)
-    setRightTab('translation')
+    setRightTab('sense')
     setAnchor({
       x: Math.max(174, Math.min(window.innerWidth - 174, rect.left + rect.width / 2)),
       y: Math.max(82, rect.top - 12),
     })
-    void runTranslation(next)
-  }, [runTranslation])
+    const term = termFromSelection(text)
+    setQueryTerm(term)
+    void runSenseLookup(term, sentenceAround(pageText, index, text.length))
+  }, [runSenseLookup])
+
+  function addCurrentSense() {
+    if (!sense) return
+    const atom = toAtom(sense, model)
+    setAtoms((current) => (current.some((item) => item.id === atom.id) ? current : [atom, ...current]))
+    setActiveAtomId(atom.id)
+  }
+
+  async function expandCurrent() {
+    const term = (sense?.lemma || queryTerm).trim()
+    if (!term || expanding) return
+    setExpanding(true)
+    setSenseError('')
+    try {
+      setAllSenses(await expandSenses(term, model))
+    } catch (error) {
+      setSenseError(error instanceof Error ? error.message : '无法获取完整义项。')
+    } finally {
+      setExpanding(false)
+    }
+  }
+
+  function pushChat(message: ChatMessage) {
+    if (!senseId) return
+    setChat((current) => ({ ...current, [senseId]: [...(current[senseId] || []), message] }))
+  }
+
+  async function sendChat(question: string) {
+    if (!sense || !senseId) return
+    const history = (chat[senseId] || []).slice(-8).map((message) => ({ role: message.role, content: message.content }))
+    pushChat(newMessage('user', question))
+    setChatSending(true)
+    setChatError('')
+    try {
+      const answer = await askSense({
+        term: sense.term || sense.lemma,
+        sense: { contextualMeaning: sense.contextualMeaning, definition: sense.definition },
+        question,
+        history,
+        model,
+      })
+      pushChat(newMessage('assistant', answer))
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : '对话失败，请重试。')
+    } finally {
+      setChatSending(false)
+    }
+  }
+
+  // Saving any excerpt also stores the term ↔ sense atom so the link resolves.
+  function saveExcerpt(body: string) {
+    if (!sense) return
+    const atom = toAtom(sense, model)
+    setAtoms((current) => (current.some((item) => item.id === atom.id) ? current : [atom, ...current]))
+    setNotebookNotes((current) => [createNote(body, [atom.id]), ...current])
+  }
+
+  function addNoteToActiveAtom(body: string) {
+    if (!activeAtomId) return
+    setNotebookNotes((current) => [createNote(body, [activeAtomId]), ...current])
+  }
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -278,17 +397,6 @@ function App() {
     void openFile(event.dataTransfer.files[0])
   }
 
-  function saveNote() {
-    if (!selection || !translation) return
-    const id = `${Date.now()}`
-    const saved: SavedNote = { id, text: selection.text, translation, pageNumber: selection.pageNumber, note: noteDraft.trim() }
-    setNotes((current) => [saved, ...current])
-    setActiveNote(id)
-    setRightTab('notes')
-    setNoteDraft('')
-  }
-
-  const currentNote = notes.find((note) => note.id === activeNote)
   const flattenOutline = (items: OutlineItem[], depth = 0): Array<{ item: OutlineItem; depth: number }> =>
     items.flatMap((item) => [{ item, depth }, ...flattenOutline(item.items || [], depth + 1)])
 
@@ -373,9 +481,7 @@ function App() {
                 value={apiKeyInput}
                 placeholder={apiConfig?.configured ? '输入新密钥以替换' : 'sk-…'}
                 onChange={(event) => setApiKeyInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') void configureApiKey()
-                }}
+                onKeyDown={(event) => { if (event.key === 'Enter') void configureApiKey() }}
               />
             </div>
             <div className="api-config-actions">
@@ -387,7 +493,7 @@ function App() {
           <p className="settings-hint">{apiConfig?.source === 'environment' ? <>密钥由启动环境管理，页面不会读取、显示或覆盖它。</> : <>密钥仅写入本机 <code>.env.local</code>，不会保存在浏览器、显示在页面或打包进应用。</>}</p>
           <label className="field-label model-label" htmlFor="model-name">模型名称</label>
           <input id="model-name" className="text-field" value={model} onChange={(event) => setModel(event.target.value)} />
-        </> : <p className="settings-hint">模拟模式展示交互流程，少量常见句子有示例译文；其他内容会标记为占位结果。</p>}
+        </> : <p className="settings-hint">模拟模式只影响整句翻译；义项查询、例句与对话始终使用已配置的 API。</p>}
       </div>}
 
       <div className={`workspace${dragActive ? ' drag-active' : ''}`}>
@@ -460,39 +566,151 @@ function App() {
 
         {rightOpen && <aside className="right-sidebar">
           <div className="right-heading"><div><span className="right-kicker">READING DESK</span><h2>阅读助手</h2></div><button className="tiny-icon" title="收起侧栏" onClick={() => setRightOpen(false)}><X size={16} /></button></div>
-          <div className="right-tabs"><button className={rightTab === 'translation' ? 'selected' : ''} onClick={() => setRightTab('translation')}><Languages size={14} /> 翻译</button><button className={rightTab === 'notes' ? 'selected' : ''} onClick={() => setRightTab('notes')}><StickyNote size={14} /> 笔记{notes.length > 0 && <span className="notes-count">{notes.length}</span>}</button></div>
-          {rightTab === 'translation' ? <div className="translation-panel">
-            {selection ? <>
-              <div className="selection-meta"><span>第 {selection.pageNumber} 页</span><span className="selection-status"><i /> 已选文本</span></div>
-              <div className="selected-text-card"><div className="card-label">原文</div><p>{selection.text}</p></div>
-              {(selection.before || selection.after) && <details className="context-details"><summary>查看上下文 <ChevronDown size={13} /></summary><p>{selection.before && <span>{selection.before} </span>}<mark>{selection.text}</mark>{selection.after && <span> {selection.after}</span>}</p></details>}
-              <div className="translation-label"><span>中文翻译</span><span className="mode-label">{mode === 'mock' ? '模拟模式' : model}</span></div>
-              <div className={`translation-result${translationError ? ' is-error' : ''}`}>
-                {translationLoading ? <div className="loading-copy"><span className="mini-spinner" /> 正在翻译…</div> : translationError ? <><p>{translationError}</p><button className="text-action" onClick={() => void runTranslation(selection)}>重试翻译</button></> : <p>{translation || '译文会出现在这里。'}</p>}
+          <div className="right-tabs">
+            <button className={rightTab === 'sense' ? 'selected' : ''} onClick={() => setRightTab('sense')}><Languages size={14} /> 义项</button>
+            <button className={rightTab === 'notebook' ? 'selected' : ''} onClick={() => setRightTab('notebook')}><StickyNote size={14} /> 记录本{atoms.length > 0 && <span className="notes-count">{atoms.length}</span>}</button>
+            <button className={rightTab === 'chat' ? 'selected' : ''} onClick={() => setRightTab('chat')}><BookOpen size={14} /> 对话{chatMessages.length > 0 && <span className="notes-count">{chatMessages.length}</span>}</button>
+          </div>
+
+          {rightTab === 'sense' && <div className="translation-panel">
+            <div className="query-row">
+              <label className="field-label" htmlFor="query-term">查询词（可键盘修改）</label>
+              <div className="query-input-wrap">
+                <input
+                  id="query-term"
+                  className="text-field"
+                  value={queryTerm}
+                  spellCheck={false}
+                  placeholder="如 within"
+                  onChange={(event) => setQueryTerm(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void runSenseLookup(queryTerm, lastContextRef.current)
+                  }}
+                />
+                <button
+                  type="button"
+                  className="query-go"
+                  disabled={senseLoading || !queryTerm.trim()}
+                  onClick={() => void runSenseLookup(queryTerm, lastContextRef.current)}
+                >
+                  查询
+                </button>
               </div>
-              {translation && !translationError && <button className="save-note-button" onClick={saveNote}><Bookmark size={15} /> 保存为笔记</button>}
-              {mode === 'mock' && <div className="mock-note"><span className="mock-note-dot" />模拟模式用于预览交互，切换兼容 API 可获取实际译文。</div>}
-            </> : <div className="translation-empty"><div><Languages size={20} /></div><strong>选中一段文字</strong><span>PDF 中的英文句子会在这里<br />自动翻译成中文。</span></div>}
-            <div className="translate-footer"><span className={`provider-dot ${mode}`} />{mode === 'mock' ? '模拟翻译 · 离线可用' : '通过本地代理连接兼容 API'}</div>
-          </div> : <div className="notes-panel">
-            {currentNote ? <>
-              <button className="back-to-notes" onClick={() => setActiveNote(null)}><ChevronLeft size={14} /> 所有笔记</button>
-              <div className="note-detail-meta">第 {currentNote.pageNumber} 页 · 摘录</div>
-              <blockquote className="note-quote">{currentNote.text}</blockquote>
-              <div className="note-translation">{currentNote.translation}</div>
-              <label className="field-label note-field-label" htmlFor="note-content">我的笔记</label>
-              <textarea id="note-content" className="note-editor" value={noteDraft} placeholder="写下你的想法…" onChange={(event) => setNoteDraft(event.target.value)} />
-              <div className="note-actions"><button className="delete-note" onClick={() => { setNotes((list) => list.filter((item) => item.id !== currentNote.id)); setActiveNote(null); setNoteDraft('') }}>删除</button><button className="small-save" onClick={() => { setNotes((list) => list.map((item) => item.id === currentNote.id ? { ...item, note: noteDraft } : item)); setNoteDraft('') }}><Check size={13} /> 保存</button></div>
-            </> : notes.length ? <div className="note-list">{notes.map((note) => <button key={note.id} className="note-list-item" onClick={() => { setActiveNote(note.id); setNoteDraft(note.note); scrollToPage(note.pageNumber) }}><span className="note-page-chip">P.{note.pageNumber}</span><strong>{note.text}</strong><span>{note.translation}</span><MoreHorizontal size={15} /></button>)}</div> : <div className="translation-empty notes-empty"><div><StickyNote size={19} /></div><strong>还没有笔记</strong><span>选中并翻译一段文字后，<br />可以将它保存到这里。</span><button className="subtle-button" onClick={() => setRightTab('translation')}>去选一段文字</button></div>}
-            <div className="translate-footer"><Check size={13} /> 笔记仅保存在此浏览器</div>
+              {selection && <span className="query-meta">来自第 {selection.pageNumber} 页的选区 · Enter 重新查询</span>}
+            </div>
+
+            {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在结合上下文判断义项…</div>}
+
+            {senseError && !senseLoading && (
+              <div className="panel-error">
+                <p>{senseError}</p>
+                <button className="text-action" type="button" onClick={() => void runSenseLookup(queryTerm || sense?.term || '', lastContextRef.current)}>重试</button>
+              </div>
+            )}
+
+            {sense && !senseLoading && (
+              <>
+                <SenseCard
+                  sense={sense}
+                  model={model}
+                  added={senseInNotebook}
+                  relations={relations}
+                  onAdd={addCurrentSense}
+                  onJumpToAtom={(id) => { setActiveAtomId(id); setRightTab('notebook') }}
+                />
+
+                <div className="sense-actions">
+                  <button className="text-action" type="button" disabled={expanding} onClick={() => void expandCurrent()}>
+                    {expanding ? '正在获取…' : allSenses ? '重新获取完整义项' : '查看完整词典义项'}
+                  </button>
+                  <button className="text-action" type="button" onClick={() => setRightTab('chat')}>继续和 Agent 对话</button>
+                </div>
+
+                {allSenses && allSenses.length > 0 && (
+                  <section className="sense-block all-senses">
+                    <h4>{sense.lemma} 的全部义项（{allSenses.length}）</h4>
+                    <ul className="all-sense-list">
+                      {allSenses.map((item) => (
+                        <li key={item.senseId} className={item.isContextual ? 'current' : ''}>
+                          <strong>{item.partOfSpeech} · {item.senseId}{item.isContextual ? '（当前上下文）' : ''}</strong>
+                          <p>{item.meaning}</p>
+                          <span>{item.definition}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="sense-plain">以上义项同样由 AI 生成，不是授权词典内容，请自行核对。</p>
+                  </section>
+                )}
+
+                <details className="context-details">
+                  <summary>整句翻译参考 <ChevronDown size={13} /></summary>
+                  {translationLoading ? <div className="loading-copy"><span className="mini-spinner" /> 正在翻译…</div>
+                    : translationError ? <p className="panel-error-text">{translationError}</p>
+                    : translation ? <p>{translation}</p>
+                    : selection ? <button className="text-action" type="button" onClick={() => void runTranslation(selection)}>翻译选中内容</button>
+                    : <p className="sense-plain">先在正文中选中文字。</p>}
+                </details>
+
+                <button className="save-note-button" type="button" onClick={() => saveExcerpt(`${sense.term}（${sense.contextualMeaning}）`)}>
+                  <Bookmark size={15} /> 把这条义项存成笔记
+                </button>
+              </>
+            )}
+
+            {!sense && !senseLoading && !senseError && (
+              <div className="translation-empty">
+                <div><Languages size={20} /></div>
+                <strong>选中一个词</strong>
+                <span>会结合上下文给出准确的义项、例句、<br />使用建议与词根词缀分析。</span>
+              </div>
+            )}
           </div>}
+
+          {rightTab === 'notebook' && <NotebookPanel
+            atoms={atoms}
+            notes={notebookNotes}
+            activeAtomId={activeAtomId}
+            model={model}
+            onSelectAtom={setActiveAtomId}
+            onDeleteAtom={(id) => {
+              setAtoms((current) => current.filter((atom) => atom.id !== id))
+              setNotebookNotes((current) => current.map((note) => ({ ...note, senseIds: note.senseIds.filter((senseId) => senseId !== id) })))
+              setActiveAtomId(null)
+            }}
+            onAddNote={addNoteToActiveAtom}
+            onDeleteNote={(id) => setNotebookNotes((current) => current.filter((note) => note.id !== id))}
+          />}
+
+          {rightTab === 'chat' && <ChatPanel
+            sense={sense}
+            model={model}
+            messages={chatMessages}
+            sending={chatSending}
+            error={chatError}
+            onSend={(question) => void sendChat(question)}
+            onSaveExcerpt={(message) => saveExcerpt(message.content)}
+          />}
         </aside>}
       </div>
 
-      {selection && anchor && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
-        <div className="popover-title"><span className="provider-dot openai" />中文翻译<span className="popover-page">P.{selection.pageNumber}</span></div>
-        {translationLoading ? <div className="popover-loading"><span className="mini-spinner" /> 正在翻译…</div> : translationError ? <div className="popover-error">翻译暂时不可用 <button onClick={() => void runTranslation(selection)}>重试</button></div> : <p>{translation || '已选中文本'}</p>}
-        <button className="popover-close" aria-label="关闭翻译浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
+      {anchor && senseLoading && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
+        <div className="popover-title"><span className="provider-dot openai" />上下文义项<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
+        <div className="popover-loading"><span className="mini-spinner" /> 正在判断义项…</div>
+        <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
+        <span className="popover-pointer" />
+      </div>}
+
+      {anchor && !senseLoading && sense && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
+        <div className="popover-title"><span className="provider-dot openai" />上下文义项{sense.partOfSpeech ? ` · ${sense.partOfSpeech}` : ''}<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
+        <p className="popover-meaning">{sense.contextualMeaning}</p>
+        <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
+        <span className="popover-pointer" />
+      </div>}
+
+      {anchor && !senseLoading && !sense && senseError && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
+        <div className="popover-title"><span className="provider-dot mock" />义项查询失败</div>
+        <p className="popover-meaning">{senseError}</p>
+        <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
       </div>}
     </main>

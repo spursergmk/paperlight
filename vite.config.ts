@@ -220,6 +220,213 @@ function isAllowedLocalRequest(req: IncomingMessage): boolean {
   return /^(?:127\.0\.0\.1|localhost):\d+$/.test(host)
 }
 
+type SenseTask = 'lookup' | 'expand' | 'ask'
+type JsonRecord = Record<string, unknown>
+
+interface SenseRequest {
+  task: SenseTask
+  term: string
+  context: string
+  sense: { contextualMeaning: string; definition: string }
+  question: string
+  history: Array<{ role: 'user' | 'assistant'; content: string }>
+  model?: string
+}
+
+function asRecord(value: unknown): JsonRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : {}
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function parseSenseRequest(value: unknown): SenseRequest {
+  const input = asRecord(value)
+  if (input.task !== 'lookup' && input.task !== 'expand' && input.task !== 'ask') {
+    throw new RequestError(400, '无效的义项查询任务。')
+  }
+  const term = asString(input.term).trim()
+  if (!term || term.length > 120) throw new RequestError(400, '查询词语必须为 1 到 120 个字符。')
+  const question = asString(input.question).trim()
+  if (input.task === 'ask' && (!question || question.length > 2_000)) {
+    throw new RequestError(400, '追问内容必须为 1 到 2,000 个字符。')
+  }
+  const sense = asRecord(input.sense)
+  const rawHistory = Array.isArray(input.history) ? input.history : []
+  const history = rawHistory
+    .filter((item) => {
+      const entry = asRecord(item)
+      return (entry.role === 'user' || entry.role === 'assistant') && typeof entry.content === 'string'
+    })
+    .slice(-8)
+    .map((item) => {
+      const entry = asRecord(item)
+      return {
+        role: entry.role as 'user' | 'assistant',
+        content: asString(entry.content).slice(0, 1_200),
+      }
+    })
+  return {
+    task: input.task,
+    term,
+    context: asString(input.context).slice(0, 1_200),
+    sense: {
+      contextualMeaning: asString(sense.contextualMeaning).slice(0, 1_200),
+      definition: asString(sense.definition).slice(0, 1_200),
+    },
+    question: question.slice(0, 2_000),
+    history,
+    model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : undefined,
+  }
+}
+
+const senseSystemPrompt = `You are Paperlight's English lexical sense assistant. Return exactly one JSON object and no markdown or commentary. Only mark an example sourceType as "verified" when it comes from a widely known, independently verifiable work or source, and citation includes a non-empty work title plus author/year or a URL. If uncertain, use "ai_generated" with citation null. Never invent or guess a citation. Explanations should help a Chinese learner choose accurate, natural expression.`
+
+function senseTaskPrompt(request: SenseRequest): string {
+  if (request.task === 'lookup') {
+    return `Disambiguate the selected term from its context and return {"sense":{"term":string,"lemma":string,"partOfSpeech":string,"senseId":short-slug,"contextualMeaning":one-sentence-Simplified-Chinese,"definition":single-sense-English-definition,"contextSentence":string,"examples":[{"text":string,"translation":string,"sourceType":"verified"|"ai_generated","citation":string|null}],"guidance":{"scenarios":[string],"advice":[string],"frequency":string,"alternatives":[{"term":string,"note":string}],"synonyms":[{"term":string,"contrast":string}],"antonyms":[{"term":string,"contrast":string}],"morphology":{"root":string,"prefix":string,"suffix":string,"note":string}}}}. Focus on exactly one contextual sense. Input: ${JSON.stringify({ term: request.term, context: request.context })}`
+  }
+  if (request.task === 'expand') {
+    return `Return {"senses":[{"senseId":short-slug,"partOfSpeech":string,"definition":English-definition,"meaning":Simplified-Chinese-meaning,"isContextual":boolean}]}. Describe only distinct dictionary senses of this term. Do not mix in content unrelated to the term's senses, examples, or general usage advice. Input: ${JSON.stringify({ term: request.term, context: request.context })}`
+  }
+  return `Answer around the supplied contextual sense to help the user find a good, precise expression. Return {"answer":string} in Simplified Chinese unless the user asks otherwise. Input: ${JSON.stringify({ term: request.term, sense: request.sense, question: request.question, history: request.history })}`
+}
+
+// Closes a truncated JSON payload: unterminated strings, dangling keys and open braces.
+function closeJson(text: string): string {
+  let inString = false
+  let escaped = false
+  const stack: string[] = []
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') inString = true
+    else if (character === '{' || character === '[') stack.push(character)
+    else if (character === '}' || character === ']') stack.pop()
+  }
+  let repaired = text
+  if (inString) repaired += '"'
+  repaired = repaired.replace(/,\s*$/, '').replace(/:\s*$/, ': null')
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    repaired += stack[index] === '{' ? '}' : ']'
+  }
+  return repaired
+}
+
+function extractJsonObject(text: string): JsonRecord {
+  const withoutFence = text.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '')
+  const start = withoutFence.indexOf('{')
+  if (start < 0) throw new RequestError(502, '模型返回的内容无法解析。')
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+  let end = -1
+  for (let index = start; index < withoutFence.length; index += 1) {
+    const character = withoutFence[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') inString = true
+    else if (character === '{') depth += 1
+    else if (character === '}') {
+      depth -= 1
+      if (depth === 0) { end = index; break }
+    }
+  }
+
+  const candidates = end >= 0
+    ? [withoutFence.slice(start, end + 1)]
+    : [closeJson(withoutFence.slice(start))]
+
+  for (const candidate of candidates) {
+    for (const attempt of [candidate, candidate.replace(/,\s*([}\]])/g, '$1')]) {
+      try {
+        return asRecord(JSON.parse(attempt) as unknown)
+      } catch {
+        // Try the next repair variant.
+      }
+    }
+  }
+  throw new RequestError(502, '模型返回的内容无法解析。')
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function termNoteArray(value: unknown, detailKey: 'note' | 'contrast'): Array<Record<string, string>> {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => {
+    const entry = asRecord(item)
+    return { term: asString(entry.term), [detailKey]: asString(entry[detailKey]) }
+  })
+}
+
+function normalizeSensePayload(value: unknown): JsonRecord {
+  const sense = asRecord(value)
+  const guidance = asRecord(sense.guidance)
+  const morphology = asRecord(guidance.morphology)
+  const examples = Array.isArray(sense.examples) ? sense.examples.map((item) => {
+    const example = asRecord(item)
+    const citation = asString(example.citation).trim()
+    const verified = example.sourceType === 'verified' && citation.length > 0
+    return {
+      text: asString(example.text),
+      translation: asString(example.translation),
+      sourceType: verified ? 'verified' : 'ai_generated',
+      citation: verified ? citation : null,
+    }
+  }) : []
+  return {
+    term: asString(sense.term),
+    lemma: asString(sense.lemma),
+    partOfSpeech: asString(sense.partOfSpeech),
+    senseId: asString(sense.senseId),
+    contextualMeaning: asString(sense.contextualMeaning),
+    definition: asString(sense.definition),
+    contextSentence: asString(sense.contextSentence),
+    examples,
+    guidance: {
+      scenarios: stringArray(guidance.scenarios),
+      advice: stringArray(guidance.advice),
+      frequency: asString(guidance.frequency),
+      alternatives: termNoteArray(guidance.alternatives, 'note'),
+      synonyms: termNoteArray(guidance.synonyms, 'contrast'),
+      antonyms: termNoteArray(guidance.antonyms, 'contrast'),
+      morphology: {
+        root: asString(morphology.root),
+        prefix: asString(morphology.prefix),
+        suffix: asString(morphology.suffix),
+        note: asString(morphology.note),
+      },
+    },
+  }
+}
+
+function normalizeSenseSummaries(value: unknown): JsonRecord[] {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => {
+    const sense = asRecord(item)
+    return {
+      senseId: asString(sense.senseId),
+      partOfSpeech: asString(sense.partOfSpeech),
+      definition: asString(sense.definition),
+      meaning: asString(sense.meaning),
+      isContextual: sense.isContextual === true,
+    }
+  })
+}
+
 function translationProxy(root: string): Plugin {
   const csrfNonce = randomBytes(32).toString('base64url')
   return {
@@ -269,6 +476,87 @@ function translationProxy(root: string): Plugin {
             sendJson(res, error.status, { error: error.message })
           } else {
             sendJson(res, 500, { error: '无法安全保存 API 配置。' })
+          }
+        }
+      })
+
+      server.middlewares.use('/api/sense', async (req: IncomingMessage, res: ServerResponse, next) => {
+        if (req.method !== 'POST') return next()
+
+        try {
+          const request = parseSenseRequest(await readJsonBody(req, MAX_TRANSLATION_BYTES))
+          const key = process.env.OPENAI_API_KEY || readLocalSetting(root, 'OPENAI_API_KEY')
+          if (!key) {
+            sendJson(res, 503, { error: '尚未配置 API 密钥。请在翻译设置中完成配置。' })
+            return
+          }
+
+          const baseUrl = effectiveBaseUrl(root)
+          const protocol = protocolFor(baseUrl)
+          const model = request.model || DEFAULT_MODEL
+          const prompt = senseTaskPrompt(request)
+          const requestBody = protocol === 'chat-completions'
+            ? {
+                model,
+                stream: false,
+                messages: [
+                  { role: 'system', content: senseSystemPrompt },
+                  { role: 'user', content: prompt },
+                ],
+              }
+            : { model, instructions: senseSystemPrompt, input: prompt }
+          const response = await fetch(apiEndpoint(baseUrl), {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${key}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestBody),
+          })
+          const payload = await response.json() as {
+            output_text?: string
+            choices?: Array<{ message?: { content?: string } }>
+            error?: { message?: string }
+          }
+          if (!response.ok) {
+            sendJson(res, response.status, { error: payload.error?.message || '义项查询请求未成功。' })
+            return
+          }
+          const modelText = protocol === 'chat-completions'
+            ? payload.choices?.[0]?.message?.content
+            : payload.output_text
+          let parsed: JsonRecord
+          try {
+            parsed = extractJsonObject(modelText || '')
+          } catch (error) {
+            // Diagnostic only: helps explain unparsable model output. Never contains credentials.
+            console.warn(
+              '[paperlight] /api/sense could not parse model output:',
+              JSON.stringify({
+                length: String(modelText || '').length,
+                head: String(modelText || '').slice(0, 300),
+                tail: String(modelText || '').slice(-200),
+              }),
+            )
+            throw error
+          }
+          if (request.task === 'lookup') {
+            if (!parsed.sense || typeof parsed.sense !== 'object' || Array.isArray(parsed.sense)) {
+              throw new RequestError(502, '模型返回的内容无法解析。')
+            }
+            sendJson(res, 200, { sense: normalizeSensePayload(parsed.sense) })
+          } else if (request.task === 'expand') {
+            if (!Array.isArray(parsed.senses)) throw new RequestError(502, '模型返回的内容无法解析。')
+            sendJson(res, 200, { senses: normalizeSenseSummaries(parsed.senses) })
+          } else {
+            if (typeof parsed.answer !== 'string') throw new RequestError(502, '模型返回的内容无法解析。')
+            sendJson(res, 200, { answer: parsed.answer })
+          }
+        } catch (error) {
+          if (error instanceof RequestError) {
+            sendJson(res, error.status, { error: error.message })
+          } else {
+            sendJson(res, 500, { error: '义项查询失败。' })
           }
         }
       })
