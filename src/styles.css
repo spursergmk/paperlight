@@ -312,6 +312,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .chat-messages li.assistant { background: #faf9f5; border: 1px solid #eeede7; }
 .chat-messages p { margin: 0; color: #55604f; font-size: 9.5px; line-height: 1.75; white-space: pre-wrap; }
 .chat-messages button { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 0; border: 0; color: #97a08f; background: transparent; font-size: 8px; cursor: pointer; }
+.chat-messages button.saved { color: #5d7b61; cursor: default; }
+.chat-messages button:disabled { opacity: 1; }
+.chat-save-feedback { display: flex; align-items: center; gap: 6px; margin-top: 9px; padding: 7px 9px; border: 1px solid #dce8d8; border-radius: 7px; color: #5d7b61; background: #f3f8f1; font-size: 8.5px; }
+.chat-save-feedback span { flex: 1; }
+.chat-save-feedback button { padding: 0; border: 0; color: #4d6d53; background: transparent; font-size: 8.5px; text-decoration: underline; cursor: pointer; }
 .chat-typing { margin: 8px 0 0; color: #a0a39a; font-size: 9px; }
 .chat-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .chat-suggestions button { padding: 5px 9px; border: 1px solid #e2e6dd; border-radius: 999px; color: #6d7569; background: #fff; font-size: 8.5px; cursor: pointer; }

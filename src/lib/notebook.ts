@@ -77,7 +77,7 @@ export function noteLabel(note: NotebookNote): string {
   return `${note.date} 第 ${note.dailyOrdinal} 份笔记`
 }
 
-export function createNote(body: string, senseIds: string[], date = new Date()): NotebookNote {
+export function createNote(body: string, senseIds: string[], date = new Date(), sourceMessageId?: string): NotebookNote {
   const dateKey = localDateKey(date)
   const dailyOrdinal = nextDailyOrdinal(dateKey)
   return {
@@ -86,6 +86,7 @@ export function createNote(body: string, senseIds: string[], date = new Date()):
     dailyOrdinal,
     body: body.trim(),
     senseIds: Array.from(new Set(senseIds.filter(Boolean))),
+    ...(sourceMessageId ? { sourceMessageId } : {}),
     createdAt: new Date().toISOString(),
   }
 }

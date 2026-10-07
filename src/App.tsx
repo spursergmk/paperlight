@@ -109,6 +109,9 @@ function App() {
   const senseInNotebook = Boolean(senseId && atoms.some((atom) => atom.id === senseId))
   const relations = useMemo(() => (sense ? relateSense(sense, atoms) : []), [sense, atoms])
   const chatMessages = senseId ? chat[senseId] || [] : []
+  const savedMessageIds = useMemo(() => new Set(
+    notebookNotes.map((note) => note.sourceMessageId).filter((id): id is string => Boolean(id)),
+  ), [notebookNotes])
 
   useEffect(() => {
     const element = scrollRef.current
@@ -353,16 +356,18 @@ function App() {
   }
 
   // Saving any excerpt also stores the term ↔ sense atom so the link resolves.
-  function saveExcerpt(body: string) {
-    if (!sense) return
+  function saveExcerpt(body: string, sourceMessageId?: string) {
+    if (!sense || (sourceMessageId && savedMessageIds.has(sourceMessageId))) return
     const atom = toAtom(sense, model)
+    const note = createNote(body, [atom.id], new Date(), sourceMessageId)
     setAtoms((current) => (current.some((item) => item.id === atom.id) ? current : [atom, ...current]))
-    setNotebookNotes((current) => [createNote(body, [atom.id]), ...current])
+    setNotebookNotes((current) => [note, ...current])
   }
 
   function addNoteToActiveAtom(body: string) {
     if (!activeAtomId) return
-    setNotebookNotes((current) => [createNote(body, [activeAtomId]), ...current])
+    const note = createNote(body, [activeAtomId])
+    setNotebookNotes((current) => [note, ...current])
   }
 
   useEffect(() => {
@@ -687,8 +692,13 @@ function App() {
             messages={chatMessages}
             sending={chatSending}
             error={chatError}
+            savedMessageIds={savedMessageIds}
             onSend={(question) => void sendChat(question)}
-            onSaveExcerpt={(message) => saveExcerpt(message.content)}
+            onSaveExcerpt={(message) => saveExcerpt(message.content, message.id)}
+            onOpenNotebook={() => {
+              setActiveAtomId(senseId)
+              setRightTab('notebook')
+            }}
           />}
         </aside>}
       </div>

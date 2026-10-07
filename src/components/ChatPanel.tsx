@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Send, Sparkles, StickyNote } from 'lucide-react'
+import { Check, Send, Sparkles, StickyNote } from 'lucide-react'
 import SenseCard from './SenseCard'
 import type { ChatMessage, SensePayload } from '../types'
 
@@ -9,8 +9,10 @@ interface ChatPanelProps {
   messages: ChatMessage[]
   sending: boolean
   error: string
+  savedMessageIds: ReadonlySet<string>
   onSend: (question: string) => void
   onSaveExcerpt: (message: ChatMessage) => void
+  onOpenNotebook: () => void
 }
 
 const SUGGESTIONS = [
@@ -20,9 +22,10 @@ const SUGGESTIONS = [
 ]
 
 export default function ChatPanel({
-  sense, model, messages, sending, error, onSend, onSaveExcerpt,
+  sense, model, messages, sending, error, savedMessageIds, onSend, onSaveExcerpt, onOpenNotebook,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState('')
+  const savedCount = messages.filter((message) => savedMessageIds.has(message.id)).length
 
   function submit(question: string) {
     const value = question.trim()
@@ -44,15 +47,32 @@ export default function ChatPanel({
 
       {messages.length > 0 && (
         <ul className="chat-messages">
-          {messages.map((message) => (
-            <li key={message.id} className={message.role}>
-              <p>{message.content}</p>
-              <button type="button" title="把这条内容存成笔记" onClick={() => onSaveExcerpt(message)}>
-                <StickyNote size={11} /> 存为笔记
-              </button>
-            </li>
-          ))}
+          {messages.map((message) => {
+            const saved = savedMessageIds.has(message.id)
+            return (
+              <li key={message.id} className={message.role}>
+                <p>{message.content}</p>
+                <button
+                  type="button"
+                  className={saved ? 'saved' : ''}
+                  title={saved ? '这条消息已存入记录本' : '把这条内容存成笔记'}
+                  disabled={saved}
+                  onClick={() => onSaveExcerpt(message)}
+                >
+                  {saved ? <><Check size={11} /> 已存笔记</> : <><StickyNote size={11} /> 存为笔记</>}
+                </button>
+              </li>
+            )
+          })}
         </ul>
+      )}
+
+      {savedCount > 0 && (
+        <div className="chat-save-feedback" role="status">
+          <Check size={12} />
+          <span>{savedCount} 条对话内容已保存到记录本</span>
+          <button type="button" onClick={onOpenNotebook}>查看记录本</button>
+        </div>
       )}
 
       {sending && <p className="chat-typing">正在思考…</p>}

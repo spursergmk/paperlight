@@ -74,6 +74,7 @@ export interface NotebookNote {
   dailyOrdinal: number
   body: string
   senseIds: string[]
+  sourceMessageId?: string
   createdAt: string
 }
 
