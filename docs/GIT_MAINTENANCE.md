@@ -1,6 +1,8 @@
 # Git 自动维护
 
-`scripts/git-maintain.sh` 用于在一次任务完成并验证后，把明确指定的文件提交并推送到当前分支。
+公开仓库：`https://github.com/spursergmk/paperlight`
+
+`scripts/git-maintain.sh` 用于在一次任务完成并验证后，把明确指定的文件提交并推送到公开 `main` 分支。完整 DSH 任务历史保留在本地 `local/private-history` 分支，脚本禁止从该分支推送。
 
 ## 使用方法
 

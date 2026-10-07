@@ -30,8 +30,8 @@ if ! git diff --cached --quiet; then
 fi
 
 branch=$(git branch --show-current)
-if [ -z "$branch" ]; then
-  echo "Error: detached HEAD is not supported." >&2
+if [ "$branch" != "main" ]; then
+  echo "Error: automated maintenance is allowed only on branch 'main'." >&2
   exit 2
 fi
 
