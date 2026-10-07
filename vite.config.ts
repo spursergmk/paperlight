@@ -217,7 +217,7 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
 
 function isAllowedLocalRequest(req: IncomingMessage): boolean {
   const host = req.headers.host || ''
-  return /^(?:127\.0\.0\.1|localhost):\d+$/.test(host)
+  return /^(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(host)
 }
 
 type SenseTask = 'lookup' | 'expand' | 'ask'
@@ -482,6 +482,10 @@ function translationProxy(root: string): Plugin {
 
       server.middlewares.use('/api/sense', async (req: IncomingMessage, res: ServerResponse, next) => {
         if (req.method !== 'POST') return next()
+        if (!isAllowedLocalRequest(req)) {
+          sendJson(res, 403, { error: '义项查询只允许从本机 Paperlight 访问。' })
+          return
+        }
 
         try {
           const request = parseSenseRequest(await readJsonBody(req, MAX_TRANSLATION_BYTES))
@@ -563,6 +567,10 @@ function translationProxy(root: string): Plugin {
 
       server.middlewares.use('/api/translate', async (req: IncomingMessage, res: ServerResponse, next) => {
         if (req.method !== 'POST') return next()
+        if (!isAllowedLocalRequest(req)) {
+          sendJson(res, 403, { error: '翻译只允许从本机 Paperlight 访问。' })
+          return
+        }
 
         try {
           const input = await readJsonBody(req, MAX_TRANSLATION_BYTES) as {
