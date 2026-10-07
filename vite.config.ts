@@ -9,9 +9,9 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
 const CONFIG_PATH = '/api/translation-config'
-const DEFAULT_API_BASE_URL = 'https://api.openai.com'
-const DEFAULT_MODEL = 'deepseek-v4.1-flash'
-const ALLOWED_API_HOSTS = new Set(['api.openai.com', 'api.zjuailab.club'])
+const DEFAULT_API_BASE_URL = 'https://api.deepseek.com'
+const DEFAULT_MODEL = 'deepseek-flash'
+const ALLOWED_API_HOSTS = new Set(['api.deepseek.com', 'api.openai.com', 'api.zjuailab.club'])
 const MAX_CONFIG_BYTES = 2_000
 const MAX_TRANSLATION_BYTES = 64_000
 const PDFJS_ASSET_ROUTE = '/pdfjs-assets'
@@ -97,7 +97,20 @@ function effectiveBaseUrl(root: string): string {
   return process.env.OPENAI_BASE_URL || readLocalSetting(root, 'OPENAI_BASE_URL') || DEFAULT_API_BASE_URL
 }
 
-function responsesEndpoint(baseUrl: string): string {
+type ApiProtocol = 'responses' | 'chat-completions'
+
+// DeepSeek's official API exposes the OpenAI Chat Completions format
+// (POST /chat/completions); it has no Responses endpoint.
+function protocolFor(baseUrl: string): ApiProtocol {
+  try {
+    return new URL(baseUrl).hostname === 'api.deepseek.com' ? 'chat-completions' : 'responses'
+  } catch {
+    return 'responses'
+  }
+}
+
+function apiEndpoint(baseUrl: string): string {
+  if (protocolFor(baseUrl) === 'chat-completions') return `${baseUrl}/chat/completions`
   return baseUrl.endsWith('/v1') ? `${baseUrl}/responses` : `${baseUrl}/v1/responses`
 }
 
@@ -219,7 +232,7 @@ function translationProxy(root: string): Plugin {
         }
         if (req.method === 'GET') {
           const source = process.env.OPENAI_API_KEY ? 'environment' : readLocalSetting(root, 'OPENAI_API_KEY') ? 'local-file' : null
-          sendJson(res, 200, { configured: source !== null, source, baseUrl: effectiveBaseUrl(root), csrfNonce })
+          sendJson(res, 200, { configured: source !== null, source, baseUrl: effectiveBaseUrl(root), protocol: protocolFor(effectiveBaseUrl(root)), csrfNonce })
           return
         }
         if (req.method !== 'PUT' && req.method !== 'DELETE') return next()
@@ -239,7 +252,7 @@ function translationProxy(root: string): Plugin {
           if (req.method === 'DELETE') {
             const baseUrl = readLocalSetting(root, 'OPENAI_BASE_URL')
             updateLocalConfig(root, undefined, baseUrl)
-            sendJson(res, 200, { configured: false, source: null, baseUrl: effectiveBaseUrl(root), csrfNonce })
+            sendJson(res, 200, { configured: false, source: null, baseUrl: effectiveBaseUrl(root), protocol: protocolFor(effectiveBaseUrl(root)), csrfNonce })
             return
           }
 
@@ -250,7 +263,7 @@ function translationProxy(root: string): Plugin {
           }
           const baseUrl = normalizeBaseUrl(input.baseUrl)
           updateLocalConfig(root, apiKey, baseUrl)
-          sendJson(res, 200, { configured: true, source: 'local-file', baseUrl, csrfNonce })
+          sendJson(res, 200, { configured: true, source: 'local-file', baseUrl, protocol: protocolFor(baseUrl), csrfNonce })
         } catch (error) {
           if (error instanceof RequestError) {
             sendJson(res, error.status, { error: error.message })
@@ -283,32 +296,47 @@ function translationProxy(root: string): Plugin {
           }
 
           const model = typeof input.model === 'string' && input.model.trim() ? input.model.trim() : DEFAULT_MODEL
-          const response = await fetch(responsesEndpoint(effectiveBaseUrl(root)), {
+          const baseUrl = effectiveBaseUrl(root)
+          const protocol = protocolFor(baseUrl)
+          const instructions = 'You are a careful English-to-Chinese translator. Translate the selected English text into clear, natural Simplified Chinese. Use the surrounding text only to resolve meaning and references. Preserve names, numbers, citations, and technical terms where appropriate. Return only the translation, with no preface or explanation.'
+          const context = JSON.stringify({
+            preceding_context: typeof input.before === 'string' ? input.before.slice(-700) : '',
+            selected_text: text,
+            following_context: typeof input.after === 'string' ? input.after.slice(0, 700) : '',
+          })
+          const requestBody = protocol === 'chat-completions'
+            ? {
+                model,
+                stream: false,
+                messages: [
+                  { role: 'system', content: instructions },
+                  { role: 'user', content: context },
+                ],
+              }
+            : { model, instructions, input: context }
+
+          const response = await fetch(apiEndpoint(baseUrl), {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${key}`,
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({
-              model,
-              instructions: 'You are a careful English-to-Chinese translator. Translate the selected English text into clear, natural Simplified Chinese. Use the surrounding text only to resolve meaning and references. Preserve names, numbers, citations, and technical terms where appropriate. Return only the translation, with no preface or explanation.',
-              input: JSON.stringify({
-                preceding_context: typeof input.before === 'string' ? input.before.slice(-700) : '',
-                selected_text: text,
-                following_context: typeof input.after === 'string' ? input.after.slice(0, 700) : '',
-              }),
-            }),
+            body: JSON.stringify(requestBody),
           })
 
           const payload = await response.json() as {
             output_text?: string
+            choices?: Array<{ message?: { content?: string } }>
             error?: { message?: string }
           }
           if (!response.ok) {
             sendJson(res, response.status, { error: payload.error?.message || '翻译请求未成功。' })
             return
           }
-          sendJson(res, 200, { translation: payload.output_text?.trim() || '未收到译文，请重试。' })
+          const translated = (protocol === 'chat-completions'
+            ? payload.choices?.[0]?.message?.content
+            : payload.output_text)?.trim()
+          sendJson(res, 200, { translation: translated || '未收到译文，请重试。' })
         } catch (error) {
           if (error instanceof RequestError) {
             sendJson(res, error.status, { error: error.message })

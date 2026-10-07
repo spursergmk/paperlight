@@ -208,6 +208,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .settings-heading p { margin: 4px 0 0; color: #9a9c94; font-size: 9px; }
 .select-field, .text-field { width: 100%; height: 31px; padding: 0 8px; border: 1px solid #e5e5de; border-radius: 6px; color: #5b6358; background: #fff; font-size: 9px; }
 .model-label { margin-top: 11px; }
+.api-preset-row { display: flex; gap: 6px; margin-top: 11px; }
+.api-preset-button { flex: 1; height: 27px; border: 1px solid #e5e5de; border-radius: 5px; color: #6d7569; background: #fff; font-size: 9px; cursor: pointer; }
+.api-preset-button:hover { background: #f7f8f4; }
+.api-preset-button.selected { border-color: #7d9a83; color: #4f6b55; background: #f1f5ef; }
 .api-config-status { display: flex; align-items: center; gap: 9px; margin-top: 12px; padding: 9px 0; border-top: 1px solid #ecece6; border-bottom: 1px solid #ecece6; }
 .api-status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #c6a16a; }
 .api-config-status.configured .api-status-dot { background: #6e9a74; box-shadow: 0 0 0 3px #6e9a7418; }

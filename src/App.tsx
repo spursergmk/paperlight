@@ -9,7 +9,7 @@ import PDFPage from './components/PDFPage'
 import PDFThumbnail from './components/PDFThumbnail'
 import { openPdf } from './lib/pdf'
 import {
-  getApiConfigStatus, removeApiKey, saveApiKey, translateSelection,
+  getApiConfigStatus, protocolForBaseUrl, removeApiKey, saveApiKey, translateSelection,
 } from './lib/translation'
 import type { ApiConfigStatus } from './lib/translation'
 import type { SavedNote, TextSelection, TranslateMode } from './types'
@@ -25,8 +25,12 @@ interface AnchorPoint { x: number; y: number }
 const NOTES_KEY = 'paperlight-notes-v1'
 // Bumped so a previously stored model name cannot keep overriding the default.
 const MODEL_KEY = 'paperlight-model-v2'
-const DEFAULT_MODEL = 'deepseek-v4.1-flash'
-const DEFAULT_API_BASE_URL = 'https://api.zjuailab.club'
+const DEFAULT_MODEL = 'deepseek-flash'
+const DEFAULT_API_BASE_URL = 'https://api.deepseek.com'
+const API_PRESETS: Array<{ label: string; baseUrl: string; model?: string }> = [
+  { label: 'DeepSeek 官方', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
+  { label: 'ZJUAI 网关', baseUrl: 'https://api.zjuailab.club' },
+]
 
 function readNotes(): SavedNote[] {
   try {
@@ -327,10 +331,26 @@ function App() {
             <span className="api-status-dot" />
             <div>
               <strong>{apiConfigLoading && !apiConfig ? '正在检查配置…' : apiConfig?.configured ? 'API 已配置' : '尚未配置 API'}</strong>
-              <span>{apiConfig?.source === 'environment' ? '由启动环境提供' : apiConfig?.source === 'local-file' ? '安全保存在本机 .env.local' : '输入密钥后即可使用真实翻译'}</span>
+              <span>{apiConfig?.source === 'environment' ? '由启动环境提供' : apiConfig?.source === 'local-file' ? '安全保存在本机 .env.local' : '输入密钥后即可使用真实翻译'}{` · ${protocolForBaseUrl(apiBaseUrl) === 'chat-completions' ? 'Chat Completions' : 'Responses'}`}</span>
             </div>
           </div>
           {apiConfig?.source !== 'environment' && <>
+            <div className="api-preset-row">
+              {API_PRESETS.map((preset) => (
+                <button
+                  key={preset.baseUrl}
+                  type="button"
+                  className={`api-preset-button${apiBaseUrl === preset.baseUrl ? ' selected' : ''}`}
+                  onClick={() => {
+                    setApiBaseUrl(preset.baseUrl)
+                    if (preset.model) setModel(preset.model)
+                    setApiConfigMessage(null)
+                  }}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
             <label className="field-label model-label" htmlFor="api-base-url">API Base URL</label>
             <input
               id="api-base-url"

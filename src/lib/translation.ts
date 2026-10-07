@@ -11,7 +11,18 @@ export interface ApiConfigStatus {
   configured: boolean
   source: 'environment' | 'local-file' | null
   baseUrl: string
+  protocol: 'responses' | 'chat-completions'
   csrfNonce: string
+}
+
+// Mirrors the server-side rule so the settings panel can preview the protocol
+// before saving. The server remains authoritative for the actual request.
+export function protocolForBaseUrl(baseUrl: string): 'responses' | 'chat-completions' {
+  try {
+    return new URL(baseUrl).hostname === 'api.deepseek.com' ? 'chat-completions' : 'responses'
+  } catch {
+    return 'responses'
+  }
 }
 
 async function readApiResponse<T>(response: Response): Promise<T> {

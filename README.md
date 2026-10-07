@@ -34,15 +34,17 @@ npm run dev
 ### 启用兼容 API 翻译
 
 1. 启动 Paperlight，点击右上角“模拟翻译”，选择“OpenAI 兼容 API”。
-2. 填写 API Base URL。ZJUAI 网关使用 `https://api.zjuailab.club`。
-3. 输入 API 密钥并点击“保存配置”。状态显示“API 已配置”后即可翻译。
-4. 填写该网关支持的模型名称；默认值是 `deepseek-v4.1-flash`。
+2. 在设置面板顶部选择服务：**DeepSeek 官方** 或 **ZJUAI 网关**，也可以手动填写 Base URL。
+3. DeepSeek 官方使用 `https://api.deepseek.com`，模型 `deepseek-flash`（即 DeepSeek-V4.1-Flash）。密钥请在 [platform.deepseek.com](https://platform.deepseek.com/api_keys) 申请。
+4. 输入 API 密钥并点击“保存配置”。状态显示“API 已配置”后即可翻译。
 
-Base URL 和密钥由本机 Vite 服务写入项目根目录的 `.env.local`，其中密钥文件权限为 `0600`。通过页面保存时，Base URL 必须是没有账号、端口、查询参数或片段的 HTTPS 地址；当前允许 OpenAI 官方地址和 `api.zjuailab.club`，避免页面脚本把密钥转发到其他主机。页面不会回显密钥，也不会把它写入浏览器存储或打包进前端；`.env.local` 已被 Git 忽略。保存接口仅接受同源、本机请求，并使用 CSRF nonce 和原子文件替换。设置页可以更新配置或移除本机保存的密钥。
+请求协议按 Base URL 自动选择：`api.deepseek.com` 使用 OpenAI Chat Completions（`POST /chat/completions`），OpenAI 官方与 ZJUAI 网关使用 Responses（`POST /v1/responses`）。面板状态行会显示当前使用的协议。切换服务后需要填入该服务的密钥，密钥保存在同一个 `.env.local` 条目中。
+
+Base URL 和密钥由本机 Vite 服务写入项目根目录的 `.env.local`，其中密钥文件权限为 `0600`。通过页面保存时，Base URL 必须是没有账号、端口、查询参数或片段的 HTTPS 地址；当前允许 `api.deepseek.com`、OpenAI 官方地址和 `api.zjuailab.club`，避免页面脚本把密钥转发到其他主机。页面不会回显密钥，也不会把它写入浏览器存储或打包进前端；`.env.local` 已被 Git 忽略。保存接口仅接受同源、本机请求，并使用 CSRF nonce 和原子文件替换。设置页可以更新配置或移除本机保存的密钥。
 
 也可以在启动 Paperlight 前通过 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 环境变量提供配置。环境变量优先级最高；采用这种方式时，页面只显示配置状态，不能覆盖或删除配置。
 
-翻译请求通过本地 `/api/translate` 代理调用所配置网关的 OpenAI Responses 兼容端点。Base URL 可以填写网关根地址或以 `/v1` 结尾的地址。生产构建可运行 `npm run build`；本 MVP 的代理只挂载在 Vite 开发服务器上，正式部署时应将同一 provider 接到受控的服务端 API。
+翻译请求通过本地 `/api/translate` 代理调用所配置网关的兼容端点。Base URL 可以填写网关根地址或以 `/v1` 结尾的地址。生产构建可运行 `npm run build`；本 MVP 的代理只挂载在 Vite 开发服务器上，正式部署时应将同一 provider 接到受控的服务端 API。
 
 ## 阅读与翻译
 
