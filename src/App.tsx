@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BookOpen, Bookmark, Check, ChevronDown, ChevronLeft, ChevronRight, FilePlus2,
-  FileText, FolderOpen, Languages, Minus, MoreHorizontal, PanelLeftClose,
-  PanelRightClose, Plus, RotateCcw, Settings2, StickyNote, X,
+  FileText, FolderOpen, KeyRound, Languages, Minus, MoreHorizontal, PanelLeftClose,
+  PanelRightClose, Plus, RotateCcw, Settings2, StickyNote, Trash2, X,
 } from 'lucide-react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import PDFPage from './components/PDFPage'
 import PDFThumbnail from './components/PDFThumbnail'
 import { openPdf } from './lib/pdf'
-import { translateSelection } from './lib/translation'
+import {
+  getApiConfigStatus, removeApiKey, saveApiKey, translateSelection,
+} from './lib/translation'
+import type { ApiConfigStatus } from './lib/translation'
 import type { SavedNote, TextSelection, TranslateMode } from './types'
 
 interface OutlineItem {
@@ -53,6 +56,11 @@ function App() {
   const [mode, setMode] = useState<TranslateMode>(() => localStorage.getItem('paperlight-mode') === 'openai' ? 'openai' : 'mock')
   const [model, setModel] = useState(() => localStorage.getItem('paperlight-model') || 'gpt-5-mini')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [apiConfig, setApiConfig] = useState<ApiConfigStatus | null>(null)
+  const [apiBaseUrl, setApiBaseUrl] = useState('https://api.zjuailab.club')
+  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [apiConfigLoading, setApiConfigLoading] = useState(false)
+  const [apiConfigMessage, setApiConfigMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [notes, setNotes] = useState<SavedNote[]>(readNotes)
   const [activeNote, setActiveNote] = useState<string | null>(null)
@@ -75,6 +83,70 @@ function App() {
   useEffect(() => { localStorage.setItem('paperlight-mode', mode) }, [mode])
   useEffect(() => { localStorage.setItem('paperlight-model', model) }, [model])
   useEffect(() => { localStorage.setItem(NOTES_KEY, JSON.stringify(notes)) }, [notes])
+
+  useEffect(() => {
+    if (!settingsOpen || mode !== 'openai') return
+    let cancelled = false
+    setApiConfigLoading(true)
+    setApiConfigMessage(null)
+    void getApiConfigStatus()
+      .then((status) => {
+        if (!cancelled) {
+          setApiConfig(status)
+          if (status.source) setApiBaseUrl(status.baseUrl)
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setApiConfigMessage({
+          kind: 'error',
+          text: error instanceof Error ? error.message : '无法读取 API 配置状态。',
+        })
+      })
+      .finally(() => {
+        if (!cancelled) setApiConfigLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [mode, settingsOpen])
+
+  async function configureApiKey() {
+    if (!apiConfig || !apiBaseUrl.trim() || !apiKeyInput.trim()) return
+    setApiConfigLoading(true)
+    setApiConfigMessage(null)
+    try {
+      const status = await saveApiKey(apiKeyInput.trim(), apiBaseUrl.trim(), apiConfig.csrfNonce)
+      setApiConfig(status)
+      setApiBaseUrl(status.baseUrl)
+      setApiKeyInput('')
+      setApiConfigMessage({ kind: 'success', text: 'API 地址和密钥已安全保存，可以直接使用。' })
+    } catch (error) {
+      setApiConfigMessage({
+        kind: 'error',
+        text: error instanceof Error ? error.message : '无法保存 API 密钥。',
+      })
+    } finally {
+      setApiConfigLoading(false)
+    }
+  }
+
+  async function deleteApiKey() {
+    if (!apiConfig || apiConfig.source !== 'local-file') return
+    if (!window.confirm('确定要移除本机保存的 API 密钥吗？')) return
+    setApiConfigLoading(true)
+    setApiConfigMessage(null)
+    try {
+      const status = await removeApiKey(apiConfig.csrfNonce)
+      setApiConfig(status)
+      setApiKeyInput('')
+      setApiConfigMessage({ kind: 'success', text: '本机保存的 API 密钥已移除。' })
+    } catch (error) {
+      setApiConfigMessage({
+        kind: 'error',
+        text: error instanceof Error ? error.message : '无法移除 API 密钥。',
+      })
+    } finally {
+      setApiConfigLoading(false)
+    }
+  }
 
   const openFile = useCallback(async (file?: File) => {
     if (!file) return
@@ -228,7 +300,7 @@ function App() {
           <button className="icon-button" title={leftOpen ? '收起缩略图' : '展开缩略图'} onClick={() => setLeftOpen((value) => !value)}><PanelLeftClose size={17} /></button>
           <button className="icon-button" title="打开 PDF（⌘/Ctrl + O）" onClick={chooseFile}><FolderOpen size={17} /></button>
           <button className={`provider-pill ${mode === 'openai' ? 'provider-openai' : ''}`} onClick={() => setSettingsOpen((value) => !value)} title="翻译设置">
-            <span className={`provider-dot ${mode}`} />{mode === 'mock' ? '模拟翻译' : 'OpenAI'}<ChevronDown size={13} />
+            <span className={`provider-dot ${mode}`} />{mode === 'mock' ? '模拟翻译' : '兼容 API'}<ChevronDown size={13} />
           </button>
           <button className="icon-button" title={rightOpen ? '收起侧栏' : '展开侧栏'} onClick={() => setRightOpen((value) => !value)}><PanelRightClose size={17} /></button>
           <button className="icon-button" title="设置" onClick={() => setSettingsOpen((value) => !value)}><Settings2 size={17} /></button>
@@ -244,12 +316,53 @@ function App() {
           if (selection) void runTranslation(selection, nextMode)
         }}>
           <option value="mock">模拟模式 · 无需密钥</option>
-          <option value="openai">OpenAI API</option>
+          <option value="openai">OpenAI 兼容 API</option>
         </select>
         {mode === 'openai' ? <>
+          <div className={`api-config-status${apiConfig?.configured ? ' configured' : ''}`}>
+            <span className="api-status-dot" />
+            <div>
+              <strong>{apiConfigLoading && !apiConfig ? '正在检查配置…' : apiConfig?.configured ? 'API 已配置' : '尚未配置 API'}</strong>
+              <span>{apiConfig?.source === 'environment' ? '由启动环境提供' : apiConfig?.source === 'local-file' ? '安全保存在本机 .env.local' : '输入密钥后即可使用真实翻译'}</span>
+            </div>
+          </div>
+          {apiConfig?.source !== 'environment' && <>
+            <label className="field-label model-label" htmlFor="api-base-url">API Base URL</label>
+            <input
+              id="api-base-url"
+              className="text-field"
+              type="url"
+              spellCheck={false}
+              value={apiBaseUrl}
+              placeholder="https://api.example.com"
+              onChange={(event) => setApiBaseUrl(event.target.value)}
+            />
+            <label className="field-label model-label" htmlFor="openai-api-key">API 密钥</label>
+            <div className="api-key-input-wrap">
+              <KeyRound size={13} />
+              <input
+                id="openai-api-key"
+                className="text-field api-key-input"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={apiKeyInput}
+                placeholder={apiConfig?.configured ? '输入新密钥以替换' : 'sk-…'}
+                onChange={(event) => setApiKeyInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void configureApiKey()
+                }}
+              />
+            </div>
+            <div className="api-config-actions">
+              {apiConfig?.source === 'local-file' && <button className="api-remove-button" type="button" disabled={apiConfigLoading} onClick={() => void deleteApiKey()} title="移除已保存的 API 密钥"><Trash2 size={13} /> 移除</button>}
+              <button className="api-save-button" type="button" disabled={apiConfigLoading || !apiConfig || !apiBaseUrl.trim() || !apiKeyInput.trim()} onClick={() => void configureApiKey()}><KeyRound size={13} /> {apiConfig?.configured ? '更新配置' : '保存配置'}</button>
+            </div>
+          </>}
+          {apiConfigMessage && <p className={`api-config-message ${apiConfigMessage.kind}`} role="status">{apiConfigMessage.text}</p>}
+          <p className="settings-hint">{apiConfig?.source === 'environment' ? <>密钥由启动环境管理，页面不会读取、显示或覆盖它。</> : <>密钥仅写入本机 <code>.env.local</code>，不会保存在浏览器、显示在页面或打包进应用。</>}</p>
           <label className="field-label model-label" htmlFor="model-name">模型名称</label>
           <input id="model-name" className="text-field" value={model} onChange={(event) => setModel(event.target.value)} />
-          <p className="settings-hint">在项目根目录创建 <code>.env.local</code>，添加 <code>OPENAI_API_KEY=...</code>。密钥只由本地开发服务器读取。</p>
         </> : <p className="settings-hint">模拟模式展示交互流程，少量常见句子有示例译文；其他内容会标记为占位结果。</p>}
       </div>}
 
@@ -334,9 +447,9 @@ function App() {
                 {translationLoading ? <div className="loading-copy"><span className="mini-spinner" /> 正在翻译…</div> : translationError ? <><p>{translationError}</p><button className="text-action" onClick={() => void runTranslation(selection)}>重试翻译</button></> : <p>{translation || '译文会出现在这里。'}</p>}
               </div>
               {translation && !translationError && <button className="save-note-button" onClick={saveNote}><Bookmark size={15} /> 保存为笔记</button>}
-              {mode === 'mock' && <div className="mock-note"><span className="mock-note-dot" />模拟模式用于预览交互，切换 OpenAI 可获取实际译文。</div>}
+              {mode === 'mock' && <div className="mock-note"><span className="mock-note-dot" />模拟模式用于预览交互，切换兼容 API 可获取实际译文。</div>}
             </> : <div className="translation-empty"><div><Languages size={20} /></div><strong>选中一段文字</strong><span>PDF 中的英文句子会在这里<br />自动翻译成中文。</span></div>}
-            <div className="translate-footer"><span className={`provider-dot ${mode}`} />{mode === 'mock' ? '模拟翻译 · 离线可用' : '通过本地代理连接 OpenAI'}</div>
+            <div className="translate-footer"><span className={`provider-dot ${mode}`} />{mode === 'mock' ? '模拟翻译 · 离线可用' : '通过本地代理连接兼容 API'}</div>
           </div> : <div className="notes-panel">
             {currentNote ? <>
               <button className="back-to-notes" onClick={() => setActiveNote(null)}><ChevronLeft size={14} /> 所有笔记</button>

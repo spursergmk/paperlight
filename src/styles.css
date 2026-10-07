@@ -198,12 +198,29 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .popover-close { position: absolute; top: 8px; right: 8px; display: grid; place-items: center; width: 17px; height: 17px; padding: 0; border: 0; border-radius: 4px; color: #a0a39c; background: transparent; cursor: pointer; }
 .popover-close:hover { color: #586353; background: #f1f2ed; }
 .popover-pointer { position: absolute; left: calc(50% - 5px); bottom: -5px; width: 9px; height: 9px; border-right: 1px solid #e8e8e1; border-bottom: 1px solid #e8e8e1; background: #fffefa; transform: rotate(45deg); }
-.settings-popover { position: absolute; z-index: 30; top: 51px; right: 67px; width: 260px; padding: 14px; border: 1px solid #e7e7e1; border-radius: 10px; background: #fffefa; box-shadow: 0 10px 32px #26291e1c; }
+.settings-popover { position: absolute; z-index: 30; top: 51px; right: 67px; width: 300px; padding: 14px; border: 1px solid #e7e7e1; border-radius: 8px; background: #fffefa; box-shadow: 0 10px 32px #26291e1c; }
 .settings-heading { display: flex; align-items: flex-start; justify-content: space-between; }
 .settings-heading strong { color: #40483e; font-size: 11px; }
 .settings-heading p { margin: 4px 0 0; color: #9a9c94; font-size: 9px; }
 .select-field, .text-field { width: 100%; height: 31px; padding: 0 8px; border: 1px solid #e5e5de; border-radius: 6px; color: #5b6358; background: #fff; font-size: 9px; }
 .model-label { margin-top: 11px; }
+.api-config-status { display: flex; align-items: center; gap: 9px; margin-top: 12px; padding: 9px 0; border-top: 1px solid #ecece6; border-bottom: 1px solid #ecece6; }
+.api-status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #c6a16a; }
+.api-config-status.configured .api-status-dot { background: #6e9a74; box-shadow: 0 0 0 3px #6e9a7418; }
+.api-config-status div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.api-config-status strong { color: #4e574d; font-size: 9px; }
+.api-config-status span:last-child { color: #969990; font-size: 8px; overflow-wrap: anywhere; }
+.api-key-input-wrap { position: relative; }
+.api-key-input-wrap > svg { position: absolute; z-index: 1; left: 8px; top: 9px; color: #92998f; pointer-events: none; }
+.api-key-input { padding-left: 27px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; }
+.api-config-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 8px; }
+.api-config-actions button { height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px; border-radius: 5px; font-size: 9px; cursor: pointer; }
+.api-config-actions button:disabled { opacity: .45; cursor: default; }
+.api-save-button { border: 0; color: #fff; background: #607c66; }
+.api-remove-button { border: 1px solid #eadfd9; color: #9a6657; background: #fff; }
+.api-config-message { margin: 8px 0 0; font-size: 8px; line-height: 1.5; }
+.api-config-message.success { color: #5d7b61; }
+.api-config-message.error { color: #a46151; }
 .settings-hint { margin: 9px 0 0; color: #96988f; font-size: 8px; line-height: 1.75; }
 .settings-hint code { padding: 1px 3px; border-radius: 3px; color: #71816d; background: #f1f2ed; font-size: 8px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; clip-path: inset(50%); border: 0; }

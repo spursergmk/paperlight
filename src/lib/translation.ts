@@ -7,6 +7,56 @@ const demoTranslations = new Map<string, string>([
   ['in this section, we discuss the main findings.', '本节将讨论主要研究发现。'],
 ])
 
+export interface ApiConfigStatus {
+  configured: boolean
+  source: 'environment' | 'local-file' | null
+  baseUrl: string
+  csrfNonce: string
+}
+
+async function readApiResponse<T>(response: Response): Promise<T> {
+  let payload: { error?: string } & Partial<T> = {}
+  try {
+    payload = await response.json() as { error?: string } & Partial<T>
+  } catch {
+    if (response.ok) throw new Error('本地服务返回了无法识别的响应。')
+  }
+  if (!response.ok) throw new Error(payload.error || '本地 API 配置请求失败。')
+  return payload as T
+}
+
+export async function getApiConfigStatus(): Promise<ApiConfigStatus> {
+  const response = await fetch('/api/translation-config', {
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  })
+  return readApiResponse<ApiConfigStatus>(response)
+}
+
+export async function saveApiKey(apiKey: string, baseUrl: string, csrfNonce: string): Promise<ApiConfigStatus> {
+  const response = await fetch('/api/translation-config', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Paperlight-CSRF': csrfNonce,
+    },
+    body: JSON.stringify({ apiKey, baseUrl }),
+  })
+  return readApiResponse<ApiConfigStatus>(response)
+}
+
+export async function removeApiKey(csrfNonce: string): Promise<ApiConfigStatus> {
+  const response = await fetch('/api/translation-config', {
+    method: 'DELETE',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Paperlight-CSRF': csrfNonce,
+    },
+    body: '{}',
+  })
+  return readApiResponse<ApiConfigStatus>(response)
+}
+
 export async function translateSelection(
   selection: TextSelection,
   mode: TranslateMode,
@@ -17,7 +67,7 @@ export async function translateSelection(
     const normalized = selection.text.trim().toLowerCase().replace(/\s+/g, ' ')
     const exact = demoTranslations.get(normalized)
     if (exact) return exact
-    return `（模拟译文）${selection.text.trim()}\n\n这是离线演示结果。切换到 OpenAI 模式并配置密钥，即可获取实际中文翻译。`
+    return `（模拟译文）${selection.text.trim()}\n\n这是离线演示结果。切换到兼容 API 模式并配置密钥，即可获取实际中文翻译。`
   }
 
   const response = await fetch('/api/translate', {
