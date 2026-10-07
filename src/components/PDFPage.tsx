@@ -15,6 +15,8 @@ export default function PDFPage({ pdf, pageNumber, scale, onVisible }: PDFPagePr
   const [inRange, setInRange] = useState(pageNumber === 1)
   const [ratio, setRatio] = useState(0.77)
   const [rendered, setRendered] = useState(false)
+  const [renderError, setRenderError] = useState('')
+  const [attempt, setAttempt] = useState(0)
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null)
 
   useEffect(() => {
@@ -95,11 +97,13 @@ export default function PDFPage({ pdf, pageNumber, scale, onVisible }: PDFPagePr
       } catch (error) {
         if (!cancelled && !(error instanceof Error && error.name === 'RenderingCancelledException')) {
           console.error(`Could not render PDF page ${pageNumber}`, error)
+          setRenderError(error instanceof Error ? error.message : String(error))
         }
       }
     }
 
     setRendered(false)
+    setRenderError('')
     void renderPage()
     return () => {
       cancelled = true
@@ -111,7 +115,7 @@ export default function PDFPage({ pdf, pageNumber, scale, onVisible }: PDFPagePr
       }
       textLayerRef.current?.replaceChildren()
     }
-  }, [inRange, pageNumber, pdf, scale])
+  }, [attempt, inRange, pageNumber, pdf, scale])
 
   const width = pageSize?.width ?? Math.max(200, (document.querySelector('.reader-scroll')?.clientWidth ?? 840) - 92)
   const height = pageSize?.height ?? width / ratio
@@ -121,7 +125,13 @@ export default function PDFPage({ pdf, pageNumber, scale, onVisible }: PDFPagePr
       <div className="pdf-page" style={{ width: `${width}px`, height: `${height}px` }}>
         <canvas ref={canvasRef} aria-label={`PDF 第 ${pageNumber} 页`} />
         <div className="textLayer" ref={textLayerRef} />
-        {!rendered && <div className="page-loading"><span className="mini-spinner" /> 正在载入第 {pageNumber} 页</div>}
+        {!rendered && (renderError
+          ? <div className="page-error">
+            <span>第 {pageNumber} 页无法渲染</span>
+            <span className="page-error-detail">{renderError}</span>
+            <button type="button" onClick={() => setAttempt((value) => value + 1)}>重试</button>
+          </div>
+          : <div className="page-loading"><span className="mini-spinner" /> 正在载入第 {pageNumber} 页</div>)}
       </div>
       <div className="page-caption">{pageNumber}</div>
     </article>

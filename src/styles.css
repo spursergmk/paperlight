@@ -89,6 +89,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .pdf-page .textLayer ::selection { background: #91b99c66; }
 .page-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; background: #fff; color: #a1a49e; font-size: 10px; }
 .pdf-page:has(.textLayer span) .page-loading { display: none; }
+.page-error { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: 24px; text-align: center; background: #fffdfa; color: #8d6a60; font-size: 10px; }
+.page-error-detail { max-width: 320px; color: #b0a49c; font-size: 8px; line-height: 1.6; overflow-wrap: anywhere; }
+.page-error button { height: 25px; padding: 0 12px; border: 1px solid #e6dcd6; border-radius: 5px; color: #8a6154; background: #fff; font-size: 9px; cursor: pointer; }
+.page-error button:hover { background: #faf4f0; }
 .page-caption { padding-top: 7px; color: #a0a39c; font-size: 9px; }
 .mini-spinner { width: 12px; height: 12px; border: 1.5px solid #dfe5dd; border-top-color: #65816b; border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

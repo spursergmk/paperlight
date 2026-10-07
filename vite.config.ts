@@ -1,9 +1,9 @@
 import {
-  chmodSync, closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync,
-  renameSync, unlinkSync, writeSync,
+  chmodSync, closeSync, createReadStream, existsSync, fsyncSync, lstatSync, openSync,
+  readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeSync,
 } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { resolve } from 'node:path'
+import { relative, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -13,6 +13,61 @@ const DEFAULT_API_BASE_URL = 'https://api.openai.com'
 const ALLOWED_API_HOSTS = new Set(['api.openai.com', 'api.zjuailab.club'])
 const MAX_CONFIG_BYTES = 2_000
 const MAX_TRANSLATION_BYTES = 64_000
+const PDFJS_ASSET_ROUTE = '/pdfjs-assets'
+const PDFJS_ASSET_DIRS = ['cmaps', 'standard_fonts', 'wasm', 'iccs'] as const
+
+function pdfjsAssets(root: string): Plugin {
+  const source = resolve(root, 'node_modules/pdfjs-dist')
+  const contentType = (file: string) => {
+    if (file.endsWith('.wasm')) return 'application/wasm'
+    if (file.endsWith('.js') || file.endsWith('.txt') || file.endsWith('LICENSE')) return 'text/plain; charset=utf-8'
+    return 'application/octet-stream'
+  }
+  const eachAsset = (visit: (dir: string, name: string, filePath: string) => void) => {
+    for (const dir of PDFJS_ASSET_DIRS) {
+      const dirPath = resolve(source, dir)
+      if (!existsSync(dirPath)) continue
+      for (const name of readdirSync(dirPath)) {
+        const filePath = resolve(dirPath, name)
+        if (statSync(filePath).isFile()) visit(dir, name, filePath)
+      }
+    }
+  }
+
+  return {
+    name: 'paperlight-pdfjs-assets',
+    configureServer(server) {
+      server.middlewares.use(PDFJS_ASSET_ROUTE, (req, res, next) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') return next()
+        const requested = decodeURIComponent((req.url || '').split('?')[0]).replace(/^\/+/, '')
+        const target = resolve(source, requested)
+        if (relative(source, target).startsWith('..') || !existsSync(target) || !statSync(target).isFile()) {
+          next()
+          return
+        }
+        res.writeHead(200, {
+          'Content-Type': contentType(target),
+          'Cache-Control': 'no-cache',
+        })
+        if (req.method === 'HEAD') {
+          res.end()
+          return
+        }
+        createReadStream(target).pipe(res)
+      })
+    },
+    generateBundle() {
+      eachAsset((dir, name, filePath) => {
+        this.emitFile({
+          type: 'asset',
+          fileName: `${PDFJS_ASSET_ROUTE.slice(1)}/${dir}/${name}`,
+          source: readFileSync(filePath),
+        })
+      })
+    },
+  }
+}
+
 
 class RequestError extends Error {
   constructor(public status: number, message: string) {
@@ -268,7 +323,7 @@ function translationProxy(root: string): Plugin {
 export default defineConfig(() => {
   const root = process.cwd()
   return {
-    plugins: [react(), translationProxy(root)],
+    plugins: [react(), pdfjsAssets(root), translationProxy(root)],
     server: { host: '127.0.0.1' },
   }
 })
