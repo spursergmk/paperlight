@@ -85,7 +85,7 @@ export default function PDFPage({ pdf, pageNumber, scale, onVisible }: PDFPagePr
         })
         await renderTask.promise
         if (cancelled) return
-        const { TextLayer } = await import('pdfjs-dist')
+        const { TextLayer } = await import('pdfjs-dist/legacy/build/pdf.mjs')
         if (cancelled) return
         textLayer = new TextLayer({
           textContentSource: page.streamTextContent(),
