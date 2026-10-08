@@ -10,6 +10,22 @@ Paperlight 的版本号规则：**整数部分 = 大版本功能变更，小数�
 
 每次更新：先写清楚改动，然后 `npm run release -- minor "一句话摘要"`（或 `major` / `patch`）——脚本会改版本号、把这次改动写进本文件、提交、打 `vX.Y.Z` 标签并推送 GitHub。
 
+## [1.0.2] - 2026-10-08
+
+### 改进
+
+- 修复 GitHub Actions 的 macOS 打包：GitHub 会把缺失的签名 secret 展开成空变量，electron-builder 因此用空证书签名并失败（v1.0.0 的 macOS job 就是如此）；现在先清掉空值，并在打包失败时打印日志尾部
+
+<details>
+<summary>改动文件（2）</summary>
+
+**根目录**
+
+- `github/workflows/release.yml`（修改）
+- `AGENTS.md`（修改）
+
+</details>
+
 ## [1.0.1] - 2026-10-08
 
 ### 改进

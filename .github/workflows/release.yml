@@ -56,7 +56,13 @@ jobs:
         run: npm run check
 
       - name: Package
-        run: npx electron-builder ${{ matrix.args }} --publish never
+        # No signing secrets are configured by default. GitHub expands a missing
+        # secret into a *defined but empty* environment variable, and
+        # electron-builder then tries to code-sign with an empty certificate and
+        # dies with "… not a file". Clear the empty ones first so an unsigned
+        # (ad-hoc signed on macOS) build is produced; providing the secrets makes
+        # the very same step sign and notarize for real.
+        shell: bash
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -65,6 +71,19 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: |
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID WIN_CSC_LINK WIN_CSC_KEY_PASSWORD; do
+            if [ -z "$(printenv "$name" || true)" ]; then unset "$name"; fi
+          done
+          echo "signing secrets present: $(printenv CSC_LINK >/dev/null && echo mac || echo none)"
+          set -o pipefail
+          npx electron-builder ${{ matrix.args }} --publish never 2>&1 | tee electron-builder.log
+
+      - name: Show the packaging log when it failed
+        if: failure()
+        shell: bash
+        run: tail -n 60 electron-builder.log || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

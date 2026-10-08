@@ -141,6 +141,7 @@ electron-builder.yml     macOS（dmg+zip，universal）/ Windows（nsis+zip）/ 
 - 内置 HTTP 服务只监听 `127.0.0.1`，默认端口 `4178`（被占用时自动换端口）。
 - `/api/*` 只接受 loopback 请求；写配置还要求同源 Origin + CSRF nonce。除 `translation-config` / `sense` / `translate` 外，新增 `vault-chat`（严格 grounded 对话）、`note`（AI 完整笔记）、`daily-summary`（日报：`records` + `findings`），三者同样只接受 loopback 请求并校验输入长度；vault 摘录预算 8 份 × 6000 字、合计 24000 字，专项发现预算 6 份 × 2500 字、合计 12000 字（`src/lib/vault.ts` 与 `server/api.mjs` 两侧常量要一致）。
 - 冒烟测试会给进程一个本地假密钥（`sk-paperlight-smoke-stub`）以打开 AI 代码路径，所有 AI 端点都在渲染进程里被打桩，因此不会联网。
+- **CI 的签名变量坑（v1.0.0 的 macOS job 就是这样挂的）**：GitHub 会把仓库里不存在的 secret 展开成「已定义但为空」的环境变量，electron-builder 见到空的 `CSC_LINK` 会拿空证书去签名，报 `empty password will be used for code signing` + `⨯ <项目目录> not a file` 并失败。本地没定义这些变量，所以本地打包正常、只有 CI 暴露。`.github/workflows/release.yml` 的 `Package` 步骤必须先清掉空值（并 `shell: bash`，三个 runner 都有 bash）。本地复现命令：`CSC_LINK= CSC_KEY_PASSWORD= APPLE_ID= npx electron-builder --mac --dir`。
 - 打包产物在 `release/`；macOS 的 app 会同时放到仓库根 `./Paperlight.app`（`scripts/expose-mac-app.mjs` 用 rename 而不是 copy，避免破坏 framework 的符号链接）。
 - 分发包是 ad-hoc 签名（`electron-builder.yml` 里 `mac.identity: '-'`）：`codesign --verify` 通过，因此不会出现"已损坏"，但未公证，对方第一次打开要右键→打开。配置 `CSC_LINK`/`WIN_CSC_LINK` 等 secrets 后即为正式签名 + 公证。
 
