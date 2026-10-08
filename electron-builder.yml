@@ -1,0 +1,145 @@
+# electron-builder configuration — Paperlight ships to macOS, Windows and Linux
+# from this single file. `npm run dist:*` builds; GitHub Actions runs the same
+# build on each platform's own runner (see .github/workflows/release.yml).
+#
+# The bundle deliberately contains only the built renderer, the Electron main
+# process and the shared API module: the renderer bundle is self-contained and
+# the main process uses Node built-ins only, so node_modules is never shipped.
+
+appId: com.paperlight.reader
+productName: Paperlight
+copyright: Copyright © 2026 Paperlight
+
+directories:
+  output: release
+  buildResources: build
+
+asar: true
+npmRebuild: false
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+# electron-builder always pulls production dependencies in, so they are excluded
+# explicitly: the renderer is pre-bundled by Vite, the main process only uses
+# Node built-ins, and shipping node_modules would drag in pdfjs-dist's optional
+# per-arch native canvas build (which also breaks universal macOS builds).
+files:
+  - electron/**
+  - server/**
+  - dist/**
+  - package.json
+  - '!node_modules/**'
+  - '!**/*.map'
+
+# Signing/notarization is opt-in through environment variables so unsigned
+# builds keep working for personal sharing:
+#   mac:  CSC_LINK + CSC_KEY_PASSWORD, then APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
+#   win:  WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD
+mac:
+  category: public.app-category.productivity
+  icon: build/icon.icns
+  # Hardened runtime is what notarization requires, but it also requires a real
+  # identity; keep it off until a Developer ID certificate is configured.
+  hardenedRuntime: false
+  # "-" = ad-hoc signing. It needs no certificate and makes the bundle pass
+  # `codesign --verify`, so a downloaded copy shows the normal "unidentified
+  # developer" prompt instead of "已损坏，无法打开". Set CSC_LINK/CSC_KEY_PASSWORD
+  # (Developer ID) to replace it with a real signature.
+  identity: '-'
+  gatekeeperAssess: false
+  darkModeSupport: true
+  extendInfo:
+    CFBundleDisplayName: Paperlight PDF 阅读器
+    NSHighResolutionCapable: true
+    NSAppTransportSecurity:
+      NSAllowsLocalNetworking: true
+    CFBundleDocumentTypes:
+      - CFBundleTypeName: PDF
+        CFBundleTypeRole: Viewer
+        LSHandlerRank: Alternate
+        LSItemContentTypes:
+          - com.adobe.pdf
+      - CFBundleTypeName: EPUB
+        CFBundleTypeRole: Viewer
+        LSHandlerRank: Alternate
+        LSItemContentTypes:
+          - org.idpf.epub-container
+      - CFBundleTypeName: Plain text and Markdown
+        CFBundleTypeRole: Viewer
+        LSHandlerRank: Alternate
+        LSItemContentTypes:
+          - public.plain-text
+          - net.daringfireball.markdown
+  target:
+    - target: dmg
+      arch: [universal]
+    - target: zip
+      arch: [universal]
+
+dmg:
+  title: Paperlight ${version}
+  contents:
+    - x: 140
+      y: 200
+      type: file
+    - x: 400
+      y: 200
+      type: link
+      path: /Applications
+    - x: 140
+      y: 420
+      type: file
+      path: build/安装说明.txt
+
+win:
+  icon: build/icon.ico
+  # Offer Paperlight as an "open with" target. Deliberately not .txt/.md: taking
+  # over the default handler for plain text would be rude.
+  fileAssociations:
+    - ext: pdf
+      name: PDF Document
+      role: Viewer
+    - ext: epub
+      name: EPUB Book
+      role: Viewer
+  extraFiles:
+    - from: build/安装说明.txt
+      to: 使用说明.txt
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Paperlight
+  artifactName: ${productName}-${version}-windows-${arch}-setup.${ext}
+
+linux:
+  icon: build/icon.png
+  category: Office
+  maintainer: spursergmk
+  syncDesktopName: true
+  extraFiles:
+    - from: build/安装说明.txt
+      to: 使用说明.txt
+  synopsis: 本地优先的英文 PDF 阅读器
+  description: >-
+    Paperlight 是一个本地优先的 PDF 阅读 app：像 IDE 一样浏览文件夹、多标签阅读，
+    右侧随时查询义项、追问与记笔记。
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  desktop:
+    entry:
+      Name: Paperlight
+      Comment: 本地优先的英文 PDF 阅读器
+      Categories: Office;Viewer;
+
+publish: null

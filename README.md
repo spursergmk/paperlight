@@ -1,100 +1,272 @@
 # Paperlight PDF 阅读器
 
-一个本地运行的英文 PDF 阅读器 MVP。使用 PDF.js 显示 PDF 原页与可选中文本；选中英文后，页面旁的轻量浮层和右侧面板会立即显示中文翻译与原文上下文。
+一个本地优先的**桌面 app**，用来精读英文文档并沉淀知识：左侧像 IDE 一样浏览本机文件夹，双击即在标签页里打开；右侧「阅读助手」随手查询义项、追问、记笔记。阅读区与助手之间的分界线可以随时拖动。
 
-## 项目结构
+除了「阅读空间」，还有并列的**笔记空间**（Obsidian 式的本地 Markdown vault）和**对话空间**（只针对 vault 内容做知识挖掘，选中内容后严格 grounded）。
 
-```text
-.
-├── index.html
-├── vite.config.ts              # 本地开发服务器与 OpenAI 翻译代理
-├── src/
-│   ├── App.tsx                  # 阅读器布局、文件打开、选区、笔记和快捷键
-│   ├── components/
-│   │   ├── PDFPage.tsx          # PDF.js 页面渲染与文字选择层
-│   │   └── PDFThumbnail.tsx     # 页面缩略图
-│   ├── lib/translation.ts       # 模拟 / OpenAI provider 接口
-│   ├── types.ts
-│   └── styles.css
-├── .env.example
-└── README.md
-```
+支持 **PDF**、**EPUB**、**TXT**、**Markdown**（同一次会话里可以混着开）。
 
-## 本地运行
+> 项目约定与长期记忆见 [AGENTS.md](AGENTS.md)。所有改动都以 app 形态为准。
 
-需要 Node.js 20.19+ 或 22.12+。在项目目录运行：
+## 快速开始
+
+需要 Node.js 20.19+ / 22.12+（本机验证于 v24.18）。
 
 ```bash
 npm install
-npm run dev
+npm run app          # 构建并以 app 形态运行（日常使用）
 ```
 
-开发服务器会显示本地地址，通常是 `http://127.0.0.1:5173`。用浏览器打开即可。无需密钥就能使用模拟翻译模式，PDF 文件由浏览器本地读取。
+其他命令：
 
-### 测试
+| 命令 | 作用 |
+| --- | --- |
+| `npm run app:dev` | 开发模式：Vite dev server + Electron 窗口，前端热更新 |
+| `npm run dev` | 仅在浏览器里调试（没有文件夹浏览权限时会退化为文件选择器） |
+| `npm run check` | 类型检查 + 生产构建 + 单元测试 + JS 语法检查 |
+| `npm run smoke` | Electron 端到端冒烟测试（含 PDF/EPUB/TXT/Markdown 四种格式），截图输出到 `tests/artifacts/` |
+| `npm run dist:mac` | 打包 macOS（universal 的 `./Paperlight.app` + `release/*.dmg`、`*.zip`） |
+| `npm run dist:win` | 打包 Windows（`release/*-setup.exe` 安装版 + 免安装 `*.zip`） |
+| `npm run dist:linux` | 打包 Linux AppImage（`*.deb` 需要 Linux 环境或在 CI 上出） |
+| `npm run dist` | 一次出 macOS + Windows + Linux 三平台产物到 `release/` |
 
-```bash
-npm test
+## 界面
+
+三个空间共用一个窗口：最左侧的竖排 rail（阅读 / 笔记 / 对话 / Vault）随时切换，⌘⌥1 / ⌘⌥2 / ⌘⌥3 也可以；阅读助手右上角的按钮直接进入笔记空间。
+
+```
+┌ 标题栏（macOS 交通灯 + 品牌 + 打开文件/文件夹 + 翻译设置）──────────────┐
+│ 阅读空间：标签页（⌘W 关闭，⌘1…⌘9 切换）                                │
+├──┬─────────────┬──────────────────────────────┬────────────────────────┤
+│空│ 文件/页面/目录 │◀ 分界线 ▶│   阅读区（虚拟化） │◀ 分界线 ▶│  阅读助手    │
+│间│ 文件夹浏览    │           │                    │           │ 义项/记录本/对话│
+└──┴─────────────┴──────────────────────────────┴────────────────────────┘
+
+┌ 笔记空间：vault 文件夹树 │◀ 分界线 ▶│ 笔记标签 + 编辑/预览 │◀ ▶│ 笔记信息 ┐
+┌ 对话空间：对话记录 │◀ 分界线 ▶│ vault 内容选择（勾选）│◀ ▶│ 严格 grounded 对话 ┐
 ```
 
-使用 Node 内置测试运行器，无需额外依赖，覆盖笔记序号（删除后不复用）、对话来源去重、义项关系判定与选区词语/句子提取。
+- **文件**：打开系统文件夹后逐层浏览，双击文件夹进入、双击文档在新标签页打开（PDF / EPUB / TXT / Markdown，列表里带格式标签）；支持筛选、收藏、最近文件/文件夹、在访达中显示。
+- **页面 / 目录**：PDF 显示缩略图；PDF 内置书签、EPUB 目录、Markdown 标题都会出现在「目录」里，点击即跳转。
+- **阅读助手**：义项（结合上下文的词义消歧）、记录本（词语 ↔ 含义原子 + 笔记）、对话（围绕当前义项追问，任意消息可存为笔记）。右上角 `⤢` 可一键把助手加宽，或直接拖动分界线。标题栏的「笔记空间」按钮、义项卡下方的「义项存入 vault / 生成 AI 完整笔记」都会直接进入笔记空间。
+- 分界线支持拖动、方向键微调、双击恢复默认；宽度会记住。
 
-### 网络边界
+## 三个空间
 
-`/api/translate`、`/api/sense` 与 `/api/translation-config` 都只接受本机（loopback）请求，且只把 API 密钥发送到设置中允许的地址。这三个端点仅在 Vite 开发服务器上生效，生产构建不包含它们。
+### 阅读空间
 
-### 启用兼容 API 翻译
+上面「界面」里的那套：文件夹浏览、多标签阅读、选词查义项、追问、记笔记。
 
-1. 启动 Paperlight，点击右上角“模拟翻译”，选择“OpenAI 兼容 API”。
-2. 在设置面板顶部选择服务：**DeepSeek 官方** 或 **ZJUAI 网关**，也可以手动填写 Base URL。
-3. DeepSeek 官方使用 `https://api.deepseek.com`，模型 `deepseek-flash`（即 DeepSeek-V4.1-Flash）。密钥请在 [platform.deepseek.com](https://platform.deepseek.com/api_keys) 申请。
-4. 输入 API 密钥并点击“保存配置”。状态显示“API 已配置”后即可翻译。
+### 笔记空间（vault）
 
-请求协议按 Base URL 自动选择：`api.deepseek.com` 使用 OpenAI Chat Completions（`POST /chat/completions`），OpenAI 官方与 ZJUAI 网关使用 Responses（`POST /v1/responses`）。面板状态行会显示当前使用的协议。切换服务后需要填入该服务的密钥，密钥保存在同一个 `.env.local` 条目中。
+和 Obsidian 一样的排布：左边是 vault 文件夹树，中间是笔记标签 + 一种铺满的显示模式，右边是这份笔记的信息（类型、字数、关联义项、链接到的笔记、今日记录、日报、最近改动）。
 
-Base URL 和密钥由本机 Vite 服务写入项目根目录的 `.env.local`，其中密钥文件权限为 `0600`。通过页面保存时，Base URL 必须是没有账号、端口、查询参数或片段的 HTTPS 地址；当前允许 `api.deepseek.com`、OpenAI 官方地址和 `api.zjuailab.club`，避免页面脚本把密钥转发到其他主机。页面不会回显密钥，也不会把它写入浏览器存储或打包进前端；`.env.local` 已被 Git 忽略。保存接口仅接受同源、本机请求，并使用 CSRF nonce 和原子文件替换。设置页可以更新配置或移除本机保存的密钥。
+- **vault 就是一个文件夹**：首次进入点「选择文件夹」（或菜单 `文件 → 打开笔记 vault…`、⌘⇧V）。vault 路径与最近使用会记住，切换 vault 后各 vault 的阅读状态互不影响。第一次用某个 vault 时会自动建好下面这四个目录（已存在的不动）。
+- **编辑 / 浏览二选一**（右上角切换，⌘E）：编辑模式整屏是 Markdown 源码，浏览模式整屏是渲染结果，不做左右分栏；模式会记住。
+- **新建空白笔记**：笔记标签栏右侧的 `+`（或任意空间按 `⌘N`）会直接在 `notes/` 下建一份空白笔记并打开；阅读空间的标签栏 `+` 是一个小菜单（打开文档… / 新建空白笔记）。
+- **vault 结构**（自动建立、可自由扩展）：
 
-也可以在启动 Paperlight 前通过 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 环境变量提供配置。环境变量优先级最高；采用这种方式时，页面只显示配置状态，不能覆盖或删除配置。
+  ```text
+  vault/
+    materials/…            原始阅读资料，你自己组织（materials/books/、materials/articles/…）
+    notes/…                笔记与义项，自动镜像 materials/ 的目录
+    enlightenment/…        你自己的「专项发现」，日报会读这里
+    Daily/<日期>.md         当天记录清单（随笔记实时更新）
+    Daily/<日期>-report.md  当天日报（每天固定时间生成，覆盖上一版）
+  ```
 
-翻译请求通过本地 `/api/translate` 代理调用所配置网关的兼容端点。Base URL 可以填写网关根地址或以 `/v1` 结尾的地址。生产构建可运行 `npm run build`；本 MVP 的代理只挂载在 Vite 开发服务器上，正式部署时应将同一 provider 接到受控的服务端 API。
+- **materials → notes 的镜像**：`materials/books/book1.pdf` 或 `materials/books/book1/ch1.pdf` 都对应 `notes/books/book1/`；在 vault 里新建资料夹会自动创建对应的 `notes/` 目录。读书时收藏的义项、记录本笔记、AI 完整笔记都会落到这本书自己的 `notes/<资料夹>/` 里；没有资料上下文的笔记（对话空间存回来的、随手新建的）进 `notes/_inbox/`。
+- **在 vault 里直接读书**：`materials/` 下的 PDF/EPUB/TXT 会出现在树里（斜体书名图标），点一下就在阅读空间打开；阅读助手会告诉你「这条会话的笔记会存到 notes/<资料夹>/」。
+- **所有笔记都是 `.md`**（frontmatter 只用安全子集：`title`/`kind`/`date`/`tags`/`senses`/`hash` 等），支持 `[[另一份笔记]]` 跳转，自动保存（停顿 1.2 秒落盘，⌘S 立即保存），写入是「临时文件 + rename」，断电不会截断笔记。
+- **每天的记录清单**（`Daily/<日期>.md`）是本地即时整理的：义项、记录本笔记、当天新建或修改的 vault 文件（含 `enlightenment/` 里的发现）都会带 `[[链接]]` 列进去；`## 我的补充` 是你自己的空间，重写时不会被动。
+- **日报**（`Daily/<日期>-report.md`）在设置里指定的时间生成（默认 20:00，可在「设置 → 日报生成时间」改，也可以关掉自动生成、只手动生成）。生成时会读当天的记录清单和你写在 `enlightenment/` 里的专项发现，输出「概览 + 主题脉络 + 待跟进」，**每次覆盖上一版、不留历史**。记录在日报生成之后又变了，右侧会提示「可以重新生成」。
+- vault 之外的文件夹不会被改动；删除笔记会真的删掉磁盘上的 `.md` 文件（有二次确认）。旧版的 `Paperlight/Daily/*.md` 会在首次打开时迁移到 `Daily/`（原来的汇总整理成独立的日报文件，`## 我的补充` 原样保留）。
+
+### 对话空间
+
+专门为 vault 知识挖掘与管理设计的对话：
+
+- **左栏两列**：一列是**对话记录**（多段对话、标题可改、可删），另一列是 **vault 内容选择**（只列 Markdown 笔记，勾选笔记或整个文件夹，也可以先筛选；`materials/` 里的原始资料不会混进来）。
+- **严格 grounded**：勾选内容会成为这段对话的固定上下文（最多 8 份、每份截取前 6000 字，合计 24000 字上限），请求把它们一起送给模型，并明确要求「只依据这些摘录作答、每条结论用 `[[文件名]]` 标注出处、摘录里没有就直说没有」；回答上方显示 `grounded` 徽标与来源笔记，点来源可以跳到笔记空间。
+- 没有勾选任何内容时会明确提示「未限定 vault 内容」，回答不受 vault 约束。
+- 每条回答都能一键**存回 vault**（`notes/_inbox/`），复制，或点开引用到的笔记。
+
+## 它解决的核心问题
+
+- **打开就能读**：启动后恢复上次的文件夹、标签页、每本书的阅读位置与缩放，不用每次重新导入。
+- **大文档不卡**：只渲染视口附近的页面（120 页文档常年只挂 2–3 个 canvas），实测首次出字约 130 ms。
+- **空间可分配**：阅读、查询、追问、记笔记的比例由你拖出来，而不是写死。
+- **笔记归你自己**：所有笔记都是 vault 文件夹里的普通 Markdown，Obsidian / VS Code / 其它编辑器随时能打开；义项收藏、AI 完整笔记、日记与每日汇总都落成 `.md`。
+- **知识能被追问**：对话空间只看你勾选的 vault 内容，回答必须标注来源笔记，不拿模型的一般知识冒充你的笔记。
+- **一切本地**：文件夹读取、状态保存、笔记都在本机；App 不会主动联网，只有你触发翻译/义项/对话/汇总时才调用已配置的 API。
+
+## 目录结构
+
+```text
+electron/main.mjs       主进程：窗口、菜单、内置 127.0.0.1 服务（dist + /api）、IPC 文件能力
+                        （含 vault 读写：路径必须落在所选文件夹内，含符号链接检查）
+electron/preload.cjs    contextBridge 暴露 window.paperlight
+electron/smoke.mjs      端到端冒烟测试（真实窗口 + 真实 IPC + 截图）
+server/api.mjs          本地 AI 代理（配置 / 义项 / 翻译 / vault 对话 / 笔记 / 日记汇总），
+                        Vite dev 与 app 共用
+server/api.d.mts        类型声明
+src/App.tsx             编排：三个空间的切换、阅读会话、标签页、分栏、选区、笔记与对话
+src/components/         Splitter, TabStrip, FileExplorer, PageStack, PDFPage,
+                        AssistantPanel(SenseCard, NotebookPanel, ChatPanel), WelcomeScreen,
+                        SpaceRail, VaultTree, MarkdownPreview, NotesSpace, ChatSpace, useVault
+src/lib/vault.ts        vault 纯逻辑（路径限制、frontmatter 子集、笔记模板、日记汇总、文件树）
+src/lib/vaultfs.ts      vault 文件端口（Electron bridge / 浏览器调试虚拟 vault）
+src/lib/vaultai.ts      vault 对话、笔记生成、日记汇总的本地 API 客户端
+src/lib/pagelayout.ts   分页几何（纯函数）
+src/lib/persist.ts      应用状态读写、遗留数据迁移
+src/lib/fsaccess.ts     文件系统适配层（app 桥接 / 浏览器 / 兜底）
+src/lib/documents.ts    PDF 文档缓存与引用计数
+scripts/                app-dev.mjs（开发启动）、package-mac.mjs（打包）
+tests/                  单元测试 + fixtures + 冒烟产物（artifacts/）
+```
+
+## 支持的格式
+
+| 格式 | 渲染方式 | 能选词 → 义项 / 追问 / 笔记吗 | 位置记忆 |
+| --- | --- | --- | --- |
+| PDF | pdf.js 逐页渲染 + 文字层 | 有文字层就能（扫描版不能，未接 OCR） | 页码 + 页内位置 |
+| EPUB 2 / 3 | 解压 → 解析 OPF/spine/nav → 章节 XHTML 经 DOMPurify 清洗后在 DOM 里排版（不用 iframe，所以选中文本和 PDF 一样自然） | 能 | 章节 + 章内进度 |
+| TXT | 纯文本按空行分段，可读性排版 | 能 | 全文滚动进度 |
+| Markdown | 内置的安全子集渲染器（标题/列表/引用/代码块/加粗斜体/链接/分隔线；不支持的语法按纯文本显示） | 能 | 同上（标题会进入「目录」） |
+
+EPUB 的原始 CSS 会被丢弃，统一使用阅读器自己的排版；书内图片会从压缩包里取出并以 blob URL 显示，外链在系统浏览器打开。
 
 ## 阅读与翻译
 
-- 点击“打开 PDF”或把 `.pdf` 拖入窗口。
-- 在 PDF 中拖选一个词，右侧“义项”面板会结合上下文给出**这一处的准确含义**；选区浮层显示同样的结论。
-- “查询词”输入框可以直接用键盘改写要查的词，按 Enter 重新查询。
-- 左侧“页面”列出缩略图，“目录”显示 PDF 内置书签（如果文件带有目录）。点缩略图或目录项可跳转。
-- 拖入 PDF 与页面渲染都在浏览器端完成。扫描版 PDF 没有文本层时无法选词，需要 OCR 后续支持。
+- 拖选一个词（PDF / EPUB / TXT / Markdown 都一样）：右侧「义项」结合上下文给出这一处的准确含义，选区旁浮层同步显示。
+- 「查询词」可直接用键盘改写，Enter 重新查询。
+- 「整句翻译参考」折叠区可翻译选中的整句。
+- 扫描版 PDF 没有文本层时只能翻页阅读，无法选词（尚未接入 OCR）；文字层偶尔会加载超时，此时页面会出现「重试 / 重新载入文档」，不会一直卡在载入中。
 
-## 阅读助手（义项 / 记录本 / 对话）
+## 翻译 / AI 服务配置
 
-右侧三个面板：
+1. 右上角「模拟翻译」→「OpenAI 兼容 API」。
+2. 选择服务（DeepSeek 官方 / ZJUAI 网关）或手动填写 Base URL，输入密钥并保存。
+3. 请求协议按 Base URL 自动选择：`api.deepseek.com` 用 Chat Completions，其他用 Responses。
 
-1. **义项**：针对选区上下文消歧，给出中文含义、英文释义、例句、使用场景、使用建议、使用频率、替代表达、近反义词辨析与词根词缀。点“查看完整词典义项”可展开该词的全部义项。
-2. **记录本**：核心记录是**不可自由编辑的「词语 ↔ 具体含义」原子**，而不是整个单词的全部义项。点“加入记录本”保存一条；每条原子下可以不断追加笔记。
-3. **对话**：当前义项卡是对话的**固定首条输出**，之后可以自由提问。任意消息都能“存为笔记”。
+所有 AI 能力都走同一个本地代理（`server/api.mjs`），只有 loopback 可以访问：
 
-笔记按本地日期编号为“某日期第 N 份笔记”，删除后序号不复用；每份笔记都带跳转到相关「词语 ↔ 含义」的链接。
+| 端点 | 用途 |
+| --- | --- |
+| `POST /api/sense` | 义项查询 / 全部义项 / 围绕义项的追问 |
+| `POST /api/translate` | 整句翻译参考 |
+| `POST /api/vault-chat` | 对话空间：带所选 vault 摘录的提问（严格 grounded） |
+| `POST /api/note` | 由义项 / 摘录 / 主题生成一份完整的 Markdown 笔记 |
+| `POST /api/daily-summary` | 生成当天日报（读记录清单 + `enlightenment/` 专项发现） |
 
-## 关于内容来源与 AI 标记
+未配置密钥时，义项、AI 笔记、vault 对话这些需要模型的功能会明确提示去设置里配置；笔记空间的本地整理与日记汇总不依赖网络。
 
-- 例句分为两类并明确标注：**有出处**（给出作品/作者/年份或 URL）与 **AI 生成例句**。服务端强制校验：标记为“有出处”却缺少出处信息的例句会被自动降级为 AI 生成，避免伪造出处。
-- 义项、用法建议与“完整词典义项”均由模型生成，**不是授权词典内容**，界面会明确提示自行核对。项目当前没有接入任何授权词典/语料，因此不承诺词典级权威性。
+安全边界：
+
+- 密钥写入本机文件（开发模式：项目根 `.env.local`，权限 `0600`；打包后：app 的 userData 目录），**不会**进入前端 bundle、浏览器存储或 git。
+- 打包后的 `Paperlight.app` 首次启动时，如果它还放在项目目录里且项目根存在 `.env.local`，会自动把该配置复制到 app 自己的数据目录（权限 `0600`），这样已有的密钥在 app 里可以直接用；把 app 移到别处则不会复制。
+- 只有 `127.0.0.1` 的请求能访问 `/api/*`；写配置额外要求同源 Origin 与 CSRF nonce，Base URL 只允许白名单主机。
+- 也可用环境变量 `OPENAI_API_KEY` / `OPENAI_BASE_URL` 提供配置，此时页面只能查看状态，不能覆盖或删除。
+- 渲染进程启用 `contextIsolation`、禁用 `nodeIntegration`，并施加严格 CSP。
+
+## 数据与状态
+
+- 应用状态：`<userData>/paperlight-state.json`（当前空间、标签页、阅读位置、文件夹、最近记录、分栏宽度、义项/笔记/对话、vault 路径、打开的笔记、对话空间的多段对话）。
+  - 打包后位于 `~/Library/Application Support/Paperlight/`。
+  - 首次启动会自动迁移旧版 localStorage 数据（`paperlight-senses-v1`、`paperlight-notebook-v2`、`paperlight-chat-v1`）。
+- 笔记按本地日期编号「某日期第 N 份笔记」，删除后序号不复用。
+- **笔记本体在 vault 里**（不在状态文件里）：`materials/`（原始资料）、`notes/`（义项与笔记，镜像 `materials/`）、`enlightenment/`（专项发现）、`Daily/`（记录清单 + 日报）。每份笔记都带一小段 frontmatter（`title` / `kind` / `date` / `tags` / `senses` / `hash` / `folder` 等，只支持单行值与 `[a, b]` 列表），正文是普通 Markdown，外部编辑器可以直接改。
+- vault 的读写只通过主进程的 `vault:*` IPC 进行：路径必须是相对路径、不能有 `..`、解析后必须落在 vault 内（并额外检查符号链接），写入用临时文件 + rename，单个笔记上限 4 MB，单个 vault 最多列出 4000 个条目。
+- 浏览器里 `npm run dev` 没有 Electron 桥：此时 vault 退化为浏览器存储里的**虚拟 vault**（可完整体验笔记/对话界面，但不写磁盘），app 里才是真实文件夹。
+
+## 关于内容来源
+
+- 例句分「有出处」与「AI 生成」两类并明确标注；服务端会强制校验，缺少出处的例句自动降级为 AI 生成。
+- 义项、用法建议与完整义项均由模型生成，**不是授权词典内容**，请自行核对。
+
+## 版本与更新记录
+
+当前版本 **v1.0.0**（见 [CHANGELOG.md](CHANGELOG.md)）。版本号规则：**整数部分 = 大版本功能变更，小数部分 = 修复式小更新**（1.0.0 → 1.1.0 是修复，→ 2.0.0 是大功能）。
+
+发布一条更新：
+
+```bash
+npm run check && npm run smoke          # 先验证
+npm run release -- minor "修复 XXX"      # 或 major / patch
+```
+
+脚本会改版本号、把这次改动写进 `CHANGELOG.md`、提交、打 `vX.Y.Z` 标签并推送 GitHub（`--no-push` 只留在本地；`--keep` 发布 `package.json` 里已写好的版本；`--no-changelog` 用于已经手写好条目时）。它拒绝提交 `.env*`、`release/`、`dist/`、`node_modules/`、`Paperlight.app` 以及超过 5 MB 的文件。
+
+## 测试与验收
+
+```bash
+npm run check    # tsc + vite build + node --test
+npm run smoke    # Electron 真实窗口端到端：文件夹浏览、120 页文档渲染、
+                 # 虚拟化、跳页、多标签、拖动分界线、状态持久化、关闭标签、
+                 # 笔记空间（选 vault、materials/notes 镜像、编辑/浏览单栏模式、
+                 # [[链接]]、记录清单、日报独立成文件）、
+                 # 对话空间（勾选 vault 内容、严格 grounded、回答存回 vault）
+```
+
+冒烟测试会生成 120 页与 24 页的测试 PDF 和一个临时 vault（`materials/books/book1/`、`enlightenment/`），截图写入 `tests/artifacts/`，结论写入 `tests/artifacts/smoke-report.json`；失败时退出码非 0。所有 AI 端点（义项、对话、笔记、日报）在测试里都被本地打桩，所以冒烟即使配置了密钥也不会联网、不会花钱。
 
 ## 快捷键
 
 | 操作 | 快捷键 |
 | --- | --- |
-| 打开 PDF | `⌘ O`（macOS）或 `Ctrl O` |
-| 放大 / 缩小 | `⌘ +` / `⌘ -` 或 `Ctrl +` / `Ctrl -` |
-| 上一页 / 下一页 | `←` / `→` |
+| 打开 PDF | `⌘O` |
+| 打开文件夹 | `⌘⇧O` |
+| 打开笔记 vault | `⌘⇧V` |
+| 新建空白笔记 | `⌘N` |
+| 切换空间：阅读 / 笔记 / 对话 | `⌘⌥1` / `⌘⌥2` / `⌘⌥3` |
+| 保存当前笔记（笔记空间） | `⌘S` |
+| 编辑 / 浏览切换（笔记空间） | `⌘E` |
+| 关闭当前标签页 | `⌘W` |
+| 切换标签页 | `⌘1` … `⌘9` |
+| 放大 / 缩小 / 适宽 | `⌘+` / `⌘-` / `⌘0` |
+| 上一页 / 下一页 | `←` / `→`（或 `⌘↑` / `⌘↓`） |
 | 关闭浮层或设置 | `Esc` |
 
-页码输入框支持输入页码后按 Enter 跳转；工具栏的“适宽”按钮恢复适合阅读区宽度。
+## 分发给别人（macOS / Windows / Linux）
 
-## 翻译 provider
+产物都在 `release/`（打完包后 mac 的 app 会同时放到仓库根目录的 `./Paperlight.app`）：
 
-- 整句翻译：`src/lib/translation.ts` 的 `translateSelection`；`mock` 不访问网络，`openai` 请求 Vite 侧的 `/api/translate`。
-- 义项查询与对话：`src/lib/sense.ts` 请求 `/api/sense`，服务端按 provider 协议构造请求并强制 JSON 结构。
-- 本地记录：`src/lib/notebook.ts`，保存在浏览器 localStorage（`paperlight-senses-v1`、`paperlight-notebook-v2`、`paperlight-chat-v1`）。
-- 旧版整段译文笔记（`paperlight-notes-v1`）仍保留在浏览器中但不再展示，未自动迁移到新记录本。
+| 平台 | 文件 | 对方要做什么 |
+| --- | --- | --- |
+| macOS 13+，M 系与 Intel 通用 | `Paperlight-<版本>-mac-universal.dmg` | 拖进「应用程序」，第一次**右键 →「打开」**（作者没有 Apple 开发者证书，系统会提示"无法验证开发者"；若提示"已损坏"，执行 `xattr -dr com.apple.quarantine /Applications/Paperlight.app`） |
+| Windows 10/11 x64 | `Paperlight-<版本>-windows-x64-setup.exe` | 双击安装；首次运行若出现"Windows 已保护你的电脑"，点「更多信息」→「仍要运行」 |
+| Windows 免安装 | `Paperlight-<版本>-win-x64.zip` | 解压后直接运行 `Paperlight.exe` |
+| Linux x64 | `Paperlight-<版本>-linux-x86_64.AppImage` | `chmod +x` 后直接运行 |
+
+DMG 与 Windows 目录里都带了 `安装说明.txt`，把上面这些步骤写给了对方。
+
+### 想做到「双击就能开、零提示」
+
+需要代码签名证书（当前 `release/` 里的包是 ad-hoc 签名：`codesign --verify` 通过，所以不会出现"已损坏"，但未公证，首次打开仍需确认一次）：
+
+1. **macOS**：加入 Apple Developer Program（$99/年），签发 `Developer ID Application` 证书，然后构建时提供
+   `CSC_LINK`、`CSC_KEY_PASSWORD`，以及 `APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID` 用于公证。
+   electron-builder 会自动签名 + 公证 + staple；同时把 `electron-builder.yml` 里的 `mac.hardenedRuntime` 改成 `true`。
+2. **Windows**：购买 OV/EV 代码签名证书，构建时提供 `WIN_CSC_LINK`、`WIN_CSC_KEY_PASSWORD`，即可消除 SmartScreen 提示。
+
+### 只推源码（零签名成本）
+
+```bash
+git clone https://github.com/spursergmk/paperlight.git
+cd paperlight && npm install && npm run app
+```
+
+需要 Node.js 20.19+ / 22.12+；对方要自己填 API key 才能用义项/追问/翻译。
+
+### 用 GitHub Actions 自动出全平台包
+
+仓库里已带 [.github/workflows/release.yml](.github/workflows/release.yml)：
+
+- 推送 `v*` 标签（如 `git tag v0.2.0 && git push origin v0.2.0`）→ 三个平台的 runner 各自构建，产物自动附到 draft Release；
+- 也可以在 Actions 页面手动「Run workflow」，产物从运行页面下载。
+
+签名证书通过仓库 Secrets 提供（`CSC_LINK`、`APPLE_ID`… / `WIN_CSC_LINK`），不配也能出未签名包。`.deb` 只在 Linux runner 上构建（需要 GNU tar）。
+
+## 从旧版本升级
+
+旧版是「Swift 启动器 + 单文档网页阅读器」。现在只有一个 app：`npm run app` 或打包后的 `Paperlight.app`。旧的 `Paperlight.app`（Swift 启动器）与 `dsh_inputs/` 任务台账已从项目目录移除（详见 `~/.paperlight-archive/`），不再维护第二套入口。

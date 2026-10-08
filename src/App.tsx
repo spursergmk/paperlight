@@ -1,42 +1,84 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  BookOpen, Bookmark, ChevronDown, ChevronLeft, ChevronRight, FilePlus2, FileText,
-  FolderOpen, KeyRound, Languages, Minus, PanelLeftClose, PanelRightClose, Plus, RotateCcw,
-  Settings2, StickyNote, Trash2, X,
+  BookOpen, ChevronDown, ChevronLeft, ChevronRight, Files, FilePlus2, FileText, FolderOpen,
+  KeyRound, Layers, List, Minus, PanelLeftClose, PanelLeftOpen, PanelRightClose,
+  PanelRightOpen, Plus, RotateCcw, Settings2, Trash2, X,
 } from 'lucide-react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
-import PDFPage from './components/PDFPage'
+import AssistantPanel, { type AssistantTab } from './components/AssistantPanel'
+import ChatSpace from './components/ChatSpace'
+import EpubReader from './components/EpubReader'
+import FileExplorer from './components/FileExplorer'
+import NotesSpace from './components/NotesSpace'
+import PageStack, { type PageStackApi } from './components/PageStack'
 import PDFThumbnail from './components/PDFThumbnail'
-import SenseCard from './components/SenseCard'
-import NotebookPanel from './components/NotebookPanel'
-import ChatPanel from './components/ChatPanel'
-import { openPdf } from './lib/pdf'
+import SpaceRail from './components/SpaceRail'
+import TextReader from './components/TextReader'
+import type { FlowReaderApi, FlowScrollState } from './components/useFlowReader'
+import { useVault } from './components/useVault'
+import Splitter from './components/Splitter'
+import TabStrip from './components/TabStrip'
+import WelcomeScreen from './components/WelcomeScreen'
+import type { DirListing, QuickRoot } from './lib/bridge'
+import { getBridge } from './lib/bridge'
+import {
+  acquireDocument, documentKeyFor, readDocumentMeta, releaseDocument,
+  type DocumentOutlineItem,
+} from './lib/documents'
+import {
+  documentKindFor, isMarkdownPath, positionLabel, type DocumentKind,
+} from './lib/documentKind'
+import { openEpub, type EpubBook, type EpubOutlineItem } from './lib/epub'
+import { displayNameForPath, fileSystem } from './lib/fsaccess'
+import {
+  outlineFromBlocks, parseTextDocument, type MarkdownBlock, type TextOutlineItem,
+} from './lib/textdoc'
+import {
+  DEFAULT_HISTORY_WIDTH, DEFAULT_LEFT_WIDTH, DEFAULT_PICKER_WIDTH, DEFAULT_RIGHT_WIDTH,
+  DEFAULT_SIDE_WIDTH, DEFAULT_TREE_WIDTH, MIN_HISTORY_WIDTH, MIN_LEFT_WIDTH, MIN_PICKER_WIDTH,
+  MIN_READER_WIDTH, MIN_RIGHT_WIDTH, MIN_SIDE_WIDTH, MIN_TREE_WIDTH,
+  flushState, loadState, loadStateSync, saveState,
+  type PersistedState, type ReaderTabState, type RecentFile,
+} from './lib/persist'
+import { askSense, expandSenses, lookupSense, sentenceAround, termFromSelection } from './lib/sense'
+import {
+  createNote, relateSense, senseKeyOf, toAtom,
+} from './lib/notebook'
+import {
+  absoluteVaultPath, isValidTimeOfDay, mirrorFolderForMaterial, noteFolderPath, remapLegacyNotePath,
+} from './lib/vault'
 import {
   getApiConfigStatus, protocolForBaseUrl, removeApiKey, saveApiKey, translateSelection,
 } from './lib/translation'
 import type { ApiConfigStatus } from './lib/translation'
-import { askSense, expandSenses, lookupSense, sentenceAround, termFromSelection } from './lib/sense'
-import {
-  createNote, loadAtoms, loadChat, loadNotes, relateSense, saveAtoms, saveChat, saveNotes,
-  senseKeyOf, toAtom,
-} from './lib/notebook'
 import type {
-  ChatMessage, NotebookNote, SenseAtom, SensePayload, SenseSummary, TextSelection, TranslateMode,
+  AppSpace, ChatMessage, ChatThread, NoteViewMode, NotebookNote, SensePayload, SenseSummary,
+  TextSelection, TranslateMode,
 } from './types'
 
-interface OutlineItem {
-  title: string
-  dest: unknown
-  items?: OutlineItem[]
+type LeftTab = 'files' | 'pages' | 'outline'
+
+type FlowOutlineItem = TextOutlineItem | EpubOutlineItem
+
+interface LoadedDocument {
+  kind: DocumentKind
+  status: 'loading' | 'ready' | 'error'
+  progress: number
+  error: string
+  // PDF
+  pdf: PDFDocumentProxy | null
+  pageCount: number
+  basePageWidth: number
+  firstPageRatio: number
+  outline: DocumentOutlineItem[]
+  // ref lowed documents (text / Markdown)
+  blocks: MarkdownBlock[]
+  flowOutline: FlowOutlineItem[]
+  // EPUB
+  epub: EpubBook | null
 }
 
-interface AnchorPoint { x: number; y: number }
-
-type RightTab = 'sense' | 'notebook' | 'chat'
-
-// Bumped so a previously stored model name cannot keep overriding the default.
 const MODEL_KEY = 'paperlight-model-v2'
-const DEFAULT_MODEL = 'deepseek-flash'
 const DEFAULT_API_BASE_URL = 'https://api.deepseek.com'
 const API_PRESETS: Array<{ label: string; baseUrl: string; model?: string }> = [
   { label: 'DeepSeek 官方', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
@@ -51,31 +93,71 @@ function newMessage(role: ChatMessage['role'], content: string): ChatMessage {
   return { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, role, content, createdAt: new Date().toISOString() }
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max)
+}
+
+function touchRecent(list: RecentFile[], entry: RecentFile, limit = 12): RecentFile[] {
+  const without = list.filter((item) => item.path !== entry.path)
+  return [entry, ...without].slice(0, limit)
+}
+
+function touchStrings(list: string[], value: string, limit = 12): string[] {
+  if (!value) return list
+  return [value, ...list.filter((item) => item !== value)].slice(0, limit)
+}
+
+function emptyDocument(kind: DocumentKind = 'pdf'): LoadedDocument {
+  return {
+    kind,
+    status: 'loading', progress: 0, error: '',
+    pdf: null, pageCount: 0, basePageWidth: 612, firstPageRatio: 0.773, outline: [],
+    blocks: [], flowOutline: [], epub: null,
+  }
+}
+
+const TEXT_DECODER_LABELS = ['utf-8', 'gb18030', 'big5']
+
+/** Decodes a text file, falling back for legacy Chinese encodings. */
+function decodeDocumentText(bytes: Uint8Array): string {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder('utf-8').decode(bytes.subarray(3))
+  }
+  const utf8 = new TextDecoder('utf-8').decode(bytes)
+  const replacementRatio = (utf8.match(/\uFFFD/g)?.length ?? 0) / Math.max(1, utf8.length)
+  if (replacementRatio < 0.005) return utf8
+  for (const label of TEXT_DECODER_LABELS.slice(1)) {
+    try {
+      const decoded = new TextDecoder(label).decode(bytes)
+      const ratio = (decoded.match(/\uFFFD/g)?.length ?? 0) / Math.max(1, decoded.length)
+      if (ratio < replacementRatio) return decoded
+    } catch {
+      // Encoding not supported by this build; try the next one.
+    }
+  }
+  return utf8
+}
+
 function App() {
-  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
-  const [fileName, setFileName] = useState('')
-  const [pageCount, setPageCount] = useState(0)
-  const [pageNumber, setPageNumber] = useState(1)
-  const [basePageWidth, setBasePageWidth] = useState(612)
-  const [viewportWidth, setViewportWidth] = useState(900)
-  const [zoom, setZoom] = useState(1)
-  const [leftOpen, setLeftOpen] = useState(true)
-  const [rightOpen, setRightOpen] = useState(true)
-  const [leftTab, setLeftTab] = useState<'pages' | 'outline'>('pages')
-  const [rightTab, setRightTab] = useState<RightTab>('sense')
-  const [outline, setOutline] = useState<OutlineItem[]>([])
-  const [selection, setSelection] = useState<TextSelection | null>(null)
-  const [anchor, setAnchor] = useState<AnchorPoint | null>(null)
-  const [mode, setMode] = useState<TranslateMode>(() => localStorage.getItem('paperlight-mode') === 'openai' ? 'openai' : 'mock')
-  const [model, setModel] = useState(() => localStorage.getItem(MODEL_KEY) || DEFAULT_MODEL)
+  const [state, setState] = useState<PersistedState>(loadStateSync)
+  const [hydrated, setHydrated] = useState(false)
+  const [docs, setDocs] = useState<Record<string, LoadedDocument>>({})
+  const [leftTab, setLeftTab] = useState<LeftTab>('files')
+  const [rightTab, setRightTab] = useState<AssistantTab>('sense')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [apiConfig, setApiConfig] = useState<ApiConfigStatus | null>(null)
-  const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_BASE_URL)
-  const [apiKeyInput, setApiKeyInput] = useState('')
-  const [apiConfigLoading, setApiConfigLoading] = useState(false)
-  const [apiConfigMessage, setApiConfigMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
   const [dragActive, setDragActive] = useState(false)
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window === 'undefined' ? 1440 : window.innerWidth))
   const [pageInput, setPageInput] = useState('1')
+  const [flowLocation, setFlowLocation] = useState('')
+
+  const [explorer, setExplorer] = useState<{
+    root: string | null
+    current: string
+    listing: DirListing | null
+    loading: boolean
+    error: string
+  }>({ root: null, current: '', listing: null, loading: false, error: '' })
+  const [roots, setRoots] = useState<QuickRoot[]>([])
 
   // Sense lookup
   const [queryTerm, setQueryTerm] = useState('')
@@ -84,12 +166,9 @@ function App() {
   const [senseError, setSenseError] = useState('')
   const [allSenses, setAllSenses] = useState<SenseSummary[] | null>(null)
   const [expanding, setExpanding] = useState(false)
-
-  // Notebook + agent conversation
-  const [atoms, setAtoms] = useState<SenseAtom[]>(loadAtoms)
-  const [notebookNotes, setNotebookNotes] = useState<NotebookNote[]>(loadNotes)
+  const [selection, setSelection] = useState<TextSelection | null>(null)
+  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null)
   const [activeAtomId, setActiveAtomId] = useState<string | null>(null)
-  const [chat, setChat] = useState<Record<string, ChatMessage[]>>(loadChat)
   const [chatSending, setChatSending] = useState(false)
   const [chatError, setChatError] = useState('')
 
@@ -98,13 +177,43 @@ function App() {
   const [translationLoading, setTranslationLoading] = useState(false)
   const [translationError, setTranslationError] = useState('')
 
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const scrollRef = useRef<HTMLDivElement>(null)
+  // Provider configuration
+  const [apiConfig, setApiConfig] = useState<ApiConfigStatus | null>(null)
+  const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_BASE_URL)
+  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [apiConfigLoading, setApiConfigLoading] = useState(false)
+  const [apiConfigMessage, setApiConfigMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
+
+  const stateRef = useRef(state)
+  stateRef.current = state
+  const docsRef = useRef(docs)
+  docsRef.current = docs
+  const loadTokens = useRef(new Map<string, number>())
+  const loadTokenRef = useRef(0)
+  const scrollPositions = useRef<Record<string, number>>({})
+  const scrollRatios = useRef<Record<string, number>>({})
+  const flowApiRef = useRef<FlowReaderApi | null>(null)
+  const scrollDirty = useRef(false)
+  const pageApiRef = useRef<PageStackApi | null>(null)
+  const restoredRef = useRef(false)
   const translationRequestRef = useRef(0)
   const senseRequestRef = useRef(0)
   const lastContextRef = useRef('')
-  const scale = useMemo(() => Math.max(0.25, ((viewportWidth - 92) / basePageWidth) * zoom), [basePageWidth, viewportWidth, zoom])
 
+  const session = state.session
+  const layout = state.layout
+  const notebook = state.notebook
+  const activePath = session.activePath
+  const activeTab = session.tabs.find((tab) => tab.path === activePath) || null
+  const activeDoc = activePath ? docs[activePath] : undefined
+  const activePdf = activeDoc?.status === 'ready' ? activeDoc.pdf : null
+  const openPaths = useMemo(() => session.tabs.map((tab) => tab.path), [session.tabs])
+
+  const mode = state.settings.mode
+  const model = state.settings.model
+  const atoms = notebook.atoms
+  const notebookNotes = notebook.notes
+  const chat = notebook.chat
   const senseId = sense ? senseKeyOf(sense) : null
   const senseInNotebook = Boolean(senseId && atoms.some((atom) => atom.id === senseId))
   const relations = useMemo(() => (sense ? relateSense(sense, atoms) : []), [sense, atoms])
@@ -113,20 +222,855 @@ function App() {
     notebookNotes.map((note) => note.sourceMessageId).filter((id): id is string => Boolean(id)),
   ), [notebookNotes])
 
-  useEffect(() => {
-    const element = scrollRef.current
-    if (!element) return
-    const observer = new ResizeObserver(() => setViewportWidth(element.clientWidth))
-    observer.observe(element)
-    setViewportWidth(element.clientWidth)
-    return () => observer.disconnect()
+  const setSession = useCallback((updater: (current: PersistedState['session']) => PersistedState['session']) => {
+    setState((prev) => ({ ...prev, session: updater(prev.session) }))
   }, [])
 
-  useEffect(() => { localStorage.setItem('paperlight-mode', mode) }, [mode])
-  useEffect(() => { localStorage.setItem(MODEL_KEY, model) }, [model])
-  useEffect(() => { saveAtoms(atoms) }, [atoms])
-  useEffect(() => { saveNotes(notebookNotes) }, [notebookNotes])
-  useEffect(() => { saveChat(chat) }, [chat])
+  const updateTab = useCallback((path: string, patch: Partial<ReaderTabState>) => {
+    setSession((current) => ({ ...current, tabs: current.tabs.map((tab) => (tab.path === path ? { ...tab, ...patch } : tab)) }))
+  }, [setSession])
+
+  const setNotebook = useCallback((updater: (current: PersistedState['notebook']) => PersistedState['notebook']) => {
+    setState((prev) => ({ ...prev, notebook: updater(prev.notebook) }))
+  }, [])
+
+  // --------------------------------------------------------------- spaces
+
+  const activeSpace = state.activeSpace
+  const vaultState = state.vault
+  const notesSpace = state.notesSpace
+  const chatSpace = state.chatSpace
+
+  const setVaultState = useCallback((updater: (current: PersistedState['vault']) => PersistedState['vault']) => {
+    setState((prev) => ({ ...prev, vault: updater(prev.vault) }))
+  }, [])
+
+  const setNotesSpace = useCallback((updater: (current: PersistedState['notesSpace']) => PersistedState['notesSpace']) => {
+    setState((prev) => ({ ...prev, notesSpace: updater(prev.notesSpace) }))
+  }, [])
+
+  const setChatSpace = useCallback((updater: (current: PersistedState['chatSpace']) => PersistedState['chatSpace']) => {
+    setState((prev) => ({ ...prev, chatSpace: updater(prev.chatSpace) }))
+  }, [])
+
+  const switchSpace = useCallback((space: AppSpace) => {
+    setState((prev) => (prev.activeSpace === space ? prev : { ...prev, activeSpace: space }))
+  }, [])
+
+  const rememberVaultRoot = useCallback((root: string) => {
+    setVaultState((current) => ({
+      ...current,
+      root,
+      recentRoots: touchStrings(current.recentRoots, root, 8),
+    }))
+  }, [setVaultState])
+
+  const vaultApi = useVault({
+    root: vaultState.root,
+    atoms: notebook.atoms,
+    notes: notebook.notes,
+    model,
+    reportTime: state.settings.dailyReportTime,
+    reportAuto: state.settings.dailyReportAuto,
+    onRootChange: rememberVaultRoot,
+  })
+  const vaultRef = useRef(vaultApi)
+  vaultRef.current = vaultApi
+
+  // While a document from `materials/` is open, its notes mirror tells us where
+  // every sense and note of this reading session belongs.
+  const readingMirror = useMemo(
+    () => (activePath ? mirrorFolderForMaterial(activePath, vaultState.root) : null),
+    [activePath, vaultState.root],
+  )
+  const readerNotesFolder = readingMirror || ''
+  const readingContext = useMemo(
+    () => (readingMirror && activePath
+      ? { document: displayNameForPath(activePath), notesFolder: noteFolderPath(readingMirror) }
+      : null),
+    [activePath, readingMirror],
+  )
+
+  /** Opens a vault note and brings the notes desk to the front. */
+  const openNoteInNotesSpace = useCallback((path: string) => {
+    setNotesSpace((current) => ({
+      ...current,
+      openPaths: current.openPaths.includes(path) ? current.openPaths : [...current.openPaths, path],
+      activePath: path,
+    }))
+    setState((prev) => ({ ...prev, activeSpace: 'notes' }))
+  }, [setNotesSpace])
+
+  const openNote = useCallback((path: string, options?: { background?: boolean }) => {
+    if (!path) return
+    setNotesSpace((current) => ({
+      ...current,
+      openPaths: current.openPaths.includes(path) ? current.openPaths : [...current.openPaths, path],
+      activePath: options?.background ? (current.activePath ?? path) : path,
+    }))
+  }, [setNotesSpace])
+
+  const closeNote = useCallback((path: string) => {
+    setNotesSpace((current) => {
+      const index = current.openPaths.indexOf(path)
+      const openPaths = current.openPaths.filter((item) => item !== path)
+      let activePath = current.activePath
+      if (activePath === path) {
+        const neighbour = openPaths[Math.min(Math.max(index, 0), openPaths.length - 1)]
+        activePath = neighbour ?? null
+      }
+      return { ...current, openPaths, activePath }
+    })
+  }, [setNotesSpace])
+
+  const activateNote = useCallback((path: string) => {
+    setNotesSpace((current) => ({ ...current, activePath: path }))
+  }, [setNotesSpace])
+
+  const setNoteView = useCallback((view: NoteViewMode) => {
+    setNotesSpace((current) => ({ ...current, view }))
+  }, [setNotesSpace])
+
+  const resizeNoteTree = useCallback((delta: number) => {
+    setNotesSpace((current) => ({ ...current, treeWidth: clamp(current.treeWidth + delta, MIN_TREE_WIDTH, 560) }))
+  }, [setNotesSpace])
+
+  const resizeNoteSide = useCallback((delta: number) => {
+    setNotesSpace((current) => ({ ...current, sideWidth: clamp(current.sideWidth - delta, MIN_SIDE_WIDTH, 560) }))
+  }, [setNotesSpace])
+
+  const toggleNoteSide = useCallback(() => {
+    setNotesSpace((current) => ({ ...current, sideOpen: !current.sideOpen }))
+  }, [setNotesSpace])
+
+  const toggleVaultCollapsed = useCallback((path: string) => {
+    setVaultState((current) => ({
+      ...current,
+      collapsed: current.collapsed.includes(path)
+        ? current.collapsed.filter((item) => item !== path)
+        : [...current.collapsed, path],
+    }))
+  }, [setVaultState])
+
+  // ------------------------------------------------------------ chat space
+
+  const createThread = useCallback((): string => {
+    const now = new Date().toISOString()
+    const thread: ChatThread = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      title: '新的对话',
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+      contextPaths: [],
+    }
+    setChatSpace((current) => ({ ...current, threads: [thread, ...current.threads], activeThreadId: thread.id }))
+    return thread.id
+  }, [setChatSpace])
+
+  const activateThread = useCallback((id: string) => {
+    setChatSpace((current) => ({ ...current, activeThreadId: id }))
+  }, [setChatSpace])
+
+  const updateThread = useCallback((id: string, updater: (thread: ChatThread) => ChatThread) => {
+    setChatSpace((current) => ({
+      ...current,
+      threads: current.threads.map((thread) => (thread.id === id ? updater(thread) : thread)),
+    }))
+  }, [setChatSpace])
+
+  const deleteThread = useCallback((id: string) => {
+    setChatSpace((current) => {
+      const threads = current.threads.filter((thread) => thread.id !== id)
+      return {
+        ...current,
+        threads,
+        activeThreadId: current.activeThreadId === id ? (threads[0]?.id ?? null) : current.activeThreadId,
+      }
+    })
+  }, [setChatSpace])
+
+  const resizeHistory = useCallback((delta: number) => {
+    setChatSpace((current) => ({ ...current, historyWidth: clamp(current.historyWidth + delta, MIN_HISTORY_WIDTH, 420) }))
+  }, [setChatSpace])
+
+  const resizePicker = useCallback((delta: number) => {
+    setChatSpace((current) => ({ ...current, pickerWidth: clamp(current.pickerWidth + delta, MIN_PICKER_WIDTH, 520) }))
+  }, [setChatSpace])
+
+  const toggleChatColumn = useCallback((column: 'history' | 'picker') => {
+    setChatSpace((current) => (column === 'history'
+      ? { ...current, historyOpen: !current.historyOpen }
+      : { ...current, pickerOpen: !current.pickerOpen }))
+  }, [setChatSpace])
+
+  // Reader-only overlays must not follow the user into another desk.
+  useEffect(() => {
+    setAnchor(null)
+    setDragActive(false)
+  }, [activeSpace])
+
+  // One conversation is always ready, so the composer is never dead on arrival.
+  useEffect(() => {
+    if (!hydrated || activeSpace !== 'chat') return
+    if (chatSpace.threads.length === 0) createThread()
+  }, [activeSpace, chatSpace.threads.length, createThread, hydrated])
+
+  // Validate a restored vault once, so a moved folder shows up instead of failing later.
+  const vaultCheckedRef = useRef(false)
+  useEffect(() => {
+    if (!hydrated || vaultCheckedRef.current || !vaultState.root) return
+    vaultCheckedRef.current = true
+    void vaultRef.current.useVaultPath(vaultState.root)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, vaultState.root])
+
+  // The day's record list is rebuilt locally (no model call) whenever the
+  // senses or notes change; the AI report is written once per day slot instead.
+  useEffect(() => {
+    if (!hydrated || !vaultState.root) return
+    const timer = window.setTimeout(() => {
+      void vaultRef.current.refreshDaily(undefined, { silent: true })
+    }, 2500)
+    return () => window.clearTimeout(timer)
+  }, [hydrated, notebook.atoms, notebook.notes, vaultState.root])
+
+  // Report scheduler: one check per minute, one attempt per day slot.
+  useEffect(() => {
+    if (!hydrated || !vaultState.root) return
+    const tick = () => { void vaultRef.current.maybeGenerateReport() }
+    tick()
+    const timer = window.setInterval(tick, 60_000)
+    return () => window.clearInterval(timer)
+  }, [hydrated, vaultState.root, state.settings.dailyReportAuto, state.settings.dailyReportTime])
+
+  // Notes opened before the restructure (`Paperlight/Daily/…`) move to `Daily/`.
+  useEffect(() => {
+    if (!vaultApi.ready) return
+    setNotesSpace((current) => {
+      const openPaths = current.openPaths.map(remapLegacyNotePath)
+      const activeMapped = current.activePath ? remapLegacyNotePath(current.activePath) : null
+      const uniqueOpen = Array.from(new Set(openPaths))
+      if (activeMapped === current.activePath && uniqueOpen.join('|') === current.openPaths.join('|')) return current
+      return { ...current, openPaths: uniqueOpen, activePath: activeMapped }
+    })
+  }, [vaultApi.ready, vaultApi.entries, setNotesSpace])
+
+  // ------------------------------------------------------- reader → vault
+
+  const [vaultActionBusy, setVaultActionBusy] = useState(false)
+  const [vaultActionMessage, setVaultActionMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
+
+  const runVaultAction = useCallback(async (action: () => Promise<string>, successText: (path: string) => string) => {
+    if (!vaultRef.current.ready) {
+      setVaultActionMessage({ kind: 'error', text: '先在笔记空间里选择一个 vault 文件夹。' })
+      return
+    }
+    setVaultActionBusy(true)
+    setVaultActionMessage(null)
+    try {
+      const path = await action()
+      setVaultActionMessage({ kind: 'success', text: successText(path) })
+      openNoteInNotesSpace(path)
+    } catch (error) {
+      setVaultActionMessage({ kind: 'error', text: error instanceof Error ? error.message : '写入 vault 失败。' })
+    } finally {
+      setVaultActionBusy(false)
+    }
+  }, [openNoteInNotesSpace])
+
+  const saveSenseToVault = useCallback(() => {
+    if (!sense) return
+    const atom = toAtom(sense, model, readerNotesFolder)
+    void runVaultAction(
+      async () => {
+        const path = await vaultRef.current.saveSenseNote(atom)
+        setNotebook((current) => {
+          const existing = current.atoms.find((item) => item.id === atom.id)
+          // An atom collected before the material context existed keeps its
+          // history but learns where its note now lives.
+          const stored = existing
+            ? { ...existing, notesFolder: atom.notesFolder, notePath: path }
+            : { ...atom, notePath: path }
+          return {
+            ...current,
+            atoms: existing
+              ? current.atoms.map((item) => (item.id === atom.id ? stored : item))
+              : [stored, ...current.atoms],
+          }
+        })
+        setActiveAtomId(atom.id)
+        return path
+      },
+      (path) => `义项已写入 vault：${path}`,
+    )
+  }, [model, readerNotesFolder, runVaultAction, sense, setNotebook])
+
+  const generateCompleteNote = useCallback(() => {
+    if (!sense) return
+    void runVaultAction(
+      () => vaultRef.current.generateSenseNote(sense, lastContextRef.current, senseId ? [senseId] : [], readerNotesFolder),
+      (path) => `AI 完整笔记已生成：${path}`,
+    )
+  }, [readerNotesFolder, runVaultAction, sense, senseId])
+
+  // A sense needs archiving when it has no file yet — or when the file it was
+  // written to is gone (deleted or moved outside the notes tree).
+  const vaultFilePaths = useMemo(() => new Set(vaultApi.files.map((file) => file.path)), [vaultApi.files])
+  const pendingSenseAtoms = useMemo(
+    () => atoms.filter((atom) => !atom.notePath || !vaultFilePaths.has(atom.notePath)),
+    [atoms, vaultFilePaths],
+  )
+
+  /** Notes collected before the vault existed are written on demand. */
+  const savePendingSenses = useCallback(() => {
+    if (pendingSenseAtoms.length === 0) return
+    void runVaultAction(
+      async () => {
+        const written: Array<{ id: string; path: string }> = []
+        for (const atom of pendingSenseAtoms) {
+          written.push({ id: atom.id, path: await vaultRef.current.saveSenseNote(atom) })
+        }
+        setNotebook((current) => ({
+          ...current,
+          atoms: current.atoms.map((item) => {
+            const match = written.find((entry) => entry.id === item.id)
+            return match ? { ...item, notePath: match.path } : item
+          }),
+        }))
+        return written[written.length - 1].path
+      },
+      (path) => `${pendingSenseAtoms.length} 条义项已写入 vault（最后一份：${path}）`,
+    )
+  }, [pendingSenseAtoms, runVaultAction, setNotebook])
+
+  const saveNotebookNoteToVault = useCallback((note: NotebookNote) => {
+    void runVaultAction(
+      async () => {
+        const path = await vaultRef.current.saveNotebookNote(note, atoms)
+        setNotebook((current) => ({
+          ...current,
+          notes: current.notes.map((item) => (item.id === note.id ? { ...item, notePath: path } : item)),
+        }))
+        return path
+      },
+      (path) => `笔记已写入 vault：${path}`,
+    )
+  }, [atoms, runVaultAction, setNotebook])
+
+  // ------------------------------------------------------------- persistence
+
+  // Persist only after hydration. Writing before `state:get` resolves could
+  // overwrite a good state file with this renderer's empty default.
+  useEffect(() => {
+    if (hydrated) saveState(state)
+  }, [hydrated, state])
+
+  useEffect(() => {
+    const onHide = () => flushState(stateRef.current)
+    window.addEventListener('pagehide', onHide)
+    window.addEventListener('beforeunload', onHide)
+    return () => {
+      window.removeEventListener('pagehide', onHide)
+      window.removeEventListener('beforeunload', onHide)
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void loadState().then((loaded) => {
+      if (cancelled) return
+      setState(loaded)
+      setHydrated(true)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // Keep the persisted model name in sync with the legacy key for older builds.
+  useEffect(() => {
+    try { localStorage.setItem(MODEL_KEY, model) } catch { /* ignore */ }
+  }, [model])
+
+  // ------------------------------------------------------------- documents
+
+  const loadDocument = useCallback(async (path: string, name: string) => {
+    const kind = documentKindFor(path)
+    if (!kind) {
+      setDocs((prev) => ({
+        ...prev,
+        [path]: { ...emptyDocument(), status: 'error', error: '暂不支持这种文件格式（支持 PDF、EPUB、TXT、Markdown）。' },
+      }))
+      return
+    }
+    const existing = docsRef.current[path]
+    if (existing?.status === 'ready' && existing.kind === kind) return
+
+    // A generation token per path: closing (and reopening) a tab while its file
+    // is still loading must not let the stale load write into the new tab.
+    const token = ++loadTokenRef.current
+    loadTokens.current.set(path, token)
+    const isCurrent = () => loadTokens.current.get(path) === token
+    const port = fileSystem()
+    let acquired = false
+    const documentKey = documentKeyFor(path, name)
+    setDocs((prev) => {
+      // Closing a replaced document must not leak its blob URLs.
+      const previous = prev[path]
+      if (previous?.epub) previous.epub.revokeAll()
+      return { ...prev, [path]: emptyDocument(kind) }
+    })
+
+    try {
+      if (kind === 'pdf') {
+        const pdf = await acquireDocument(
+          documentKey,
+          () => port.read(path),
+          (ratio) => {
+            if (isCurrent()) setDocs((prev) => (prev[path] ? { ...prev, [path]: { ...prev[path], progress: ratio } } : prev))
+          },
+        )
+        acquired = true
+        const meta = await readDocumentMeta(pdf)
+        if (!isCurrent()) return
+        setDocs((prev) => ({
+          ...prev,
+          [path]: {
+            ...emptyDocument('pdf'),
+            status: 'ready', progress: 1, pdf, error: '',
+            pageCount: meta.pageCount, basePageWidth: meta.basePageWidth,
+            firstPageRatio: meta.firstPageRatio, outline: meta.outline,
+          },
+        }))
+        return
+      }
+
+      const bytes = await port.read(path)
+      if (!isCurrent()) return
+      if (kind === 'text') {
+        const marks = isMarkdownPath(path)
+        const blocks = parseTextDocument(decodeDocumentText(bytes), marks)
+        if (!isCurrent()) return
+        setDocs((prev) => ({
+          ...prev,
+          [path]: {
+            ...emptyDocument('text'),
+            status: 'ready', progress: 1, error: '',
+            blocks, flowOutline: outlineFromBlocks(blocks),
+          },
+        }))
+        return
+      }
+
+      const epub = await openEpub(bytes)
+      if (!isCurrent()) {
+        epub.revokeAll()
+        return
+      }
+      setDocs((prev) => ({
+        ...prev,
+        [path]: {
+          ...emptyDocument('epub'),
+          status: 'ready', progress: 1, error: '',
+          epub, flowOutline: epub.outline, pageCount: epub.chapters.length,
+        },
+      }))
+    } catch (error) {
+      console.error('document could not be opened', path, error)
+      // Balance the acquire: without this the cached document is never released
+      // and every 重试 would leak another reference.
+      if (acquired && isCurrent()) releaseDocument(documentKey)
+      if (!isCurrent()) return
+      setDocs((prev) => ({
+        ...prev,
+        [path]: {
+          ...emptyDocument(kind),
+          status: 'error',
+          error: error instanceof Error ? error.message : '无法读取这个文件。它可能已损坏、受密码保护或已被移动。',
+        },
+      }))
+    }
+  }, [])
+
+  const openDocument = useCallback((path: string, options?: { background?: boolean }) => {
+    if (!path) return
+    const name = displayNameForPath(path)
+    setState((prev) => {
+      const exists = prev.session.tabs.some((tab) => tab.path === path)
+      const tabs = exists ? prev.session.tabs : [...prev.session.tabs, { path, name, pageNumber: 1, zoom: 1, scrollTop: 0 }]
+      return {
+        ...prev,
+        session: {
+          ...prev.session,
+          tabs,
+          activePath: options?.background ? (prev.session.activePath ?? path) : path,
+          recentFiles: touchRecent(prev.session.recentFiles, { path, name, openedAt: Date.now() }),
+        },
+      }
+    })
+    void loadDocument(path, name)
+  }, [loadDocument])
+
+  /** The `+` on any tab strip: a new blank note in the vault, opened for editing. */
+  const createBlankNote = useCallback(async () => {
+    if (!vaultRef.current.ready) {
+      const picked = await vaultRef.current.chooseVault()
+      if (!picked) return
+    }
+    try {
+      const path = await vaultRef.current.createNote(noteFolderPath(null), '未命名')
+      openNoteInNotesSpace(path)
+    } catch (error) {
+      setVaultActionMessage({ kind: 'error', text: error instanceof Error ? error.message : '无法新建笔记。' })
+    }
+  }, [openNoteInNotesSpace])
+
+  /** Opens a material from the vault in the reading desk. */
+  const openVaultSource = useCallback((relativePath: string) => {
+    const root = stateRef.current.vault.root
+    if (!root) return
+    switchSpace('reader')
+    openDocument(absoluteVaultPath(root, relativePath))
+  }, [openDocument, switchSpace])
+
+
+  const commitScroll = useCallback(() => {
+    if (!scrollDirty.current) return
+    scrollDirty.current = false
+    const positions = { ...scrollPositions.current }
+    const ratios = { ...scrollRatios.current }
+    setSession((current) => ({
+      ...current,
+      tabs: current.tabs.map((tab) => {
+        if (!(tab.path in positions)) return tab
+        return {
+          ...tab,
+          scrollTop: positions[tab.path],
+          ...(tab.path in ratios ? { scrollRatio: ratios[tab.path] } : {}),
+        }
+      }),
+    }))
+  }, [setSession])
+
+  const closeTab = useCallback((path: string) => {
+    commitScroll()
+    // Drop any in-flight load for this path so it cannot resolve into a closed tab.
+    loadTokens.current.delete(path)
+    releaseDocument(documentKeyFor(path, displayNameForPath(path)))
+    delete scrollPositions.current[path]
+    setDocs((prev) => {
+      if (!(path in prev)) return prev
+      const closing = prev[path]
+      if (closing?.epub) closing.epub.revokeAll()
+      const next = { ...prev }
+      delete next[path]
+      return next
+    })
+    setSession((current) => {
+      const index = current.tabs.findIndex((tab) => tab.path === path)
+      const tabs = current.tabs.filter((tab) => tab.path !== path)
+      let nextActive = current.activePath
+      if (nextActive === path) {
+        const neighbour = tabs[Math.min(Math.max(index, 0), tabs.length - 1)]
+        nextActive = neighbour ? neighbour.path : null
+      }
+      return { ...current, tabs, activePath: nextActive }
+    })
+  }, [commitScroll, setSession])
+
+  const activateTab = useCallback((path: string) => {
+    commitScroll()
+    setSession((current) => ({ ...current, activePath: path }))
+  }, [commitScroll, setSession])
+
+  // Restore the previous session: folder, open tabs and reading positions.
+  useEffect(() => {
+    if (!hydrated || restoredRef.current) return
+    restoredRef.current = true
+    const restored = stateRef.current.session
+    if (restored.activeFolder) void openFolderInternal(restored.activeFolder)
+    const paths = restored.tabs.map((tab) => tab.path)
+    if (paths.length === 0) return
+    const ordered = restored.activePath && paths.includes(restored.activePath)
+      ? [restored.activePath, ...paths.filter((path) => path !== restored.activePath)]
+      : paths
+    void (async () => {
+      for (const path of ordered) {
+        const info = await fileSystem().stat(path).catch(() => ({ exists: false }))
+        if (info.exists) await loadDocument(path, displayNameForPath(path))
+        else closeTab(path)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated])
+
+  // Periodically persist the reading position without re-rendering per scroll.
+  useEffect(() => {
+    const timer = window.setInterval(() => commitScroll(), 5000)
+    return () => window.clearInterval(timer)
+  }, [commitScroll])
+
+  // ------------------------------------------------------------- file browser
+
+  const openFolderInternal = useCallback(async (path: string, options?: { asRoot?: boolean }) => {
+    if (!path) return
+    setExplorer((prev) => ({ ...prev, loading: true, error: '' }))
+    try {
+      const listing = await fileSystem().list(path)
+      setExplorer((prev) => ({
+        ...prev,
+        current: listing.path,
+        root: options?.asRoot ? listing.path : (prev.root ?? listing.path),
+        listing,
+        loading: false,
+        error: '',
+      }))
+      setSession((current) => ({
+        ...current,
+        activeFolder: listing.path,
+        recentFolders: touchStrings(current.recentFolders, listing.path),
+      }))
+    } catch (error) {
+      setExplorer((prev) => ({
+        ...prev,
+        loading: false,
+        error: error instanceof Error ? error.message : '无法读取这个文件夹。',
+      }))
+    }
+  }, [setSession])
+
+  const pickFolder = useCallback(async () => {
+    const port = fileSystem()
+    if (!port.canBrowse) {
+      window.alert('当前运行环境无法浏览文件夹。请在 Paperlight app 中使用此功能。')
+      return
+    }
+    const picked = await port.pickFolder()
+    if (picked) await openFolderInternal(picked, { asRoot: true })
+  }, [openFolderInternal])
+
+  const pickFiles = useCallback(async () => {
+    const paths = await fileSystem().pickDocuments()
+    paths.forEach((path: string, index: number) => openDocument(path, { background: index > 0 }))
+  }, [openDocument])
+
+  const goUpFolder = useCallback(() => {
+    const parent = explorer.listing?.parent
+    if (parent && parent !== explorer.current) void openFolderInternal(parent)
+  }, [explorer.current, explorer.listing, openFolderInternal])
+
+  const toggleFavoriteFolder = useCallback((path: string) => {
+    setSession((current) => ({
+      ...current,
+      favorites: current.favorites.includes(path)
+        ? current.favorites.filter((item) => item !== path)
+        : [path, ...current.favorites].slice(0, 12),
+    }))
+  }, [setSession])
+
+  useEffect(() => {
+    void fileSystem().roots().then(setRoots).catch(() => setRoots([]))
+  }, [])
+
+  // ------------------------------------------------------------- bridge events
+
+  useEffect(() => {
+    const bridge = getBridge()
+    if (!bridge) return
+    const offPaths = bridge.on.openPaths((paths) => {
+      paths.forEach((path, index) => openDocument(path, { background: index > 0 }))
+    })
+    const offFolder = bridge.on.openFolder((path) => { void openFolderInternal(path, { asRoot: true }) })
+    const offVault = bridge.on.setVault((path) => {
+      void vaultRef.current.useVaultPath(path).then((ok) => { if (ok) switchSpace('notes') })
+    })
+    const offCommand = bridge.on.command((command) => {
+      const current = stateRef.current
+      if (command === 'space-reader' || command === 'space-notes' || command === 'space-chat') {
+        switchSpace(command === 'space-reader' ? 'reader' : command === 'space-notes' ? 'notes' : 'chat')
+        return
+      }
+      if (command === 'pick-vault') {
+        void vaultRef.current.chooseVault()
+        return
+      }
+      const path = current.session.activePath
+      if (!path) return
+      const tab = current.session.tabs.find((item) => item.path === path)
+      if (command === 'close-tab') closeTab(path)
+      else if (command === 'zoom-in') updateTab(path, { zoom: clamp(Number(((tab?.zoom ?? 1) + 0.1).toFixed(2)), 0.5, 3) })
+      else if (command === 'zoom-out') updateTab(path, { zoom: clamp(Number(((tab?.zoom ?? 1) - 0.1).toFixed(2)), 0.5, 3) })
+      else if (command === 'zoom-fit') updateTab(path, { zoom: 1 })
+      else if (command === 'next-page') pageApiRef.current?.scrollToPage((tab?.pageNumber ?? 1) + 1)
+      else if (command === 'prev-page') pageApiRef.current?.scrollToPage((tab?.pageNumber ?? 1) - 1)
+    })
+    return () => { offPaths(); offFolder(); offVault(); offCommand() }
+  }, [closeTab, openDocument, openFolderInternal, switchSpace, updateTab])
+
+  // ------------------------------------------------------------- sense + chat
+
+  const runTranslation = useCallback(async (next: TextSelection, requestedMode = mode, requestedModel = model) => {
+    const requestId = ++translationRequestRef.current
+    setTranslationLoading(true)
+    setTranslationError('')
+    try {
+      const result = await translateSelection(next, requestedMode, requestedModel)
+      if (requestId === translationRequestRef.current) setTranslation(result)
+    } catch (error) {
+      if (requestId === translationRequestRef.current) {
+        setTranslationError(error instanceof Error ? error.message : '翻译失败，请稍后重试。')
+      }
+    } finally {
+      if (requestId === translationRequestRef.current) setTranslationLoading(false)
+    }
+  }, [mode, model])
+
+  const runSenseLookup = useCallback(async (term: string, context: string) => {
+    const cleaned = term.trim()
+    if (!cleaned) return
+    const requestId = ++senseRequestRef.current
+    lastContextRef.current = context
+    setSenseLoading(true)
+    setSenseError('')
+    setAllSenses(null)
+    setChatError('')
+    try {
+      const result = await lookupSense(cleaned, context, model)
+      if (requestId !== senseRequestRef.current) return
+      setSense({
+        ...result,
+        term: result.term || cleaned,
+        lemma: result.lemma || cleaned,
+        examples: Array.isArray(result.examples) ? result.examples : [],
+      })
+      setRightTab('sense')
+    } catch (error) {
+      if (requestId === senseRequestRef.current) {
+        setSenseError(error instanceof Error ? error.message : '义项查询失败。')
+      }
+    } finally {
+      if (requestId === senseRequestRef.current) setSenseLoading(false)
+    }
+  }, [model])
+
+  const selectText = useCallback(() => {
+    const browserSelection = window.getSelection()
+    const rawText = browserSelection?.toString() || ''
+    const text = tidyText(rawText)
+    if (text.length < 2 || !browserSelection || browserSelection.rangeCount === 0) return
+    const range = browserSelection.getRangeAt(0)
+    const startNode = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
+    // Works for every reader: PDF pages, reflowed text and EPUB chapters all
+    // expose their selectable content under [data-page-number].
+    const pageElement = startNode?.closest<HTMLElement>('[data-page-number]')
+    if (!pageElement) return
+    const pageLayer = pageElement.querySelector('.textLayer') || pageElement
+    const pageText = tidyText(pageLayer.textContent || '')
+    const index = pageText.indexOf(text)
+    const rect = range.getBoundingClientRect()
+    const next: TextSelection = {
+      text,
+      before: index >= 0 ? pageText.slice(Math.max(0, index - 500), index) : '',
+      after: index >= 0 ? pageText.slice(index + text.length, index + text.length + 500) : '',
+      pageNumber: Number(pageElement.dataset.pageNumber || 1),
+      locationLabel: pageElement.dataset.location || undefined,
+      documentName: activeTab?.name,
+      documentPath: activePath || undefined,
+    }
+    setSelection(next)
+    setTranslation('')
+    setTranslationError('')
+    setLayout((current) => ({ ...current, rightOpen: true }))
+    setRightTab('sense')
+    setAnchor({
+      x: Math.max(174, Math.min(window.innerWidth - 174, rect.left + rect.width / 2)),
+      y: Math.max(82, rect.top - 12),
+    })
+    const term = termFromSelection(text)
+    setQueryTerm(term)
+    void runSenseLookup(term, sentenceAround(pageText, index, text.length))
+  }, [activePath, activeTab?.name, runSenseLookup])
+
+  const setLayout = useCallback((updater: (current: PersistedState['layout']) => PersistedState['layout']) => {
+    setState((prev) => ({ ...prev, layout: updater(prev.layout) }))
+  }, [])
+
+  function addCurrentSense() {
+    if (!sense) return
+    const atom = toAtom(sense, model, readerNotesFolder)
+    setNotebook((current) => ({
+      ...current,
+      atoms: current.atoms.some((item) => item.id === atom.id) ? current.atoms : [atom, ...current.atoms],
+    }))
+    setActiveAtomId(atom.id)
+  }
+
+  async function expandCurrent() {
+    const term = (sense?.lemma || queryTerm).trim()
+    if (!term || expanding) return
+    setExpanding(true)
+    setSenseError('')
+    try {
+      setAllSenses(await expandSenses(term, model))
+    } catch (error) {
+      setSenseError(error instanceof Error ? error.message : '无法获取完整义项。')
+    } finally {
+      setExpanding(false)
+    }
+  }
+
+  function pushChat(message: ChatMessage) {
+    if (!senseId) return
+    setNotebook((current) => ({ ...current, chat: { ...current.chat, [senseId]: [...(current.chat[senseId] || []), message] } }))
+  }
+
+  async function sendChat(question: string) {
+    if (!sense || !senseId) return
+    const history = (chat[senseId] || []).slice(-8).map((message) => ({ role: message.role, content: message.content }))
+    pushChat(newMessage('user', question))
+    setChatSending(true)
+    setChatError('')
+    try {
+      const answer = await askSense({
+        term: sense.term || sense.lemma,
+        sense: { contextualMeaning: sense.contextualMeaning, definition: sense.definition },
+        question,
+        history,
+        model,
+      })
+      pushChat(newMessage('assistant', answer))
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : '对话失败，请重试。')
+    } finally {
+      setChatSending(false)
+    }
+  }
+
+  // Saving any excerpt also stores the term ↔ sense atom so the link resolves.
+  function saveExcerpt(body: string, sourceMessageId?: string) {
+    if (!sense || (sourceMessageId && savedMessageIds.has(sourceMessageId))) return
+    const atom = toAtom(sense, model, readerNotesFolder)
+    const note = createNote(body, [atom.id], new Date(), sourceMessageId, readerNotesFolder)
+    setNotebook((current) => ({
+      ...current,
+      atoms: current.atoms.some((item) => item.id === atom.id) ? current.atoms : [atom, ...current.atoms],
+      notes: [note, ...current.notes],
+    }))
+  }
+
+  function addNoteToActiveAtom(body: string) {
+    if (!activeAtomId) return
+    const activeAtom = atoms.find((atom) => atom.id === activeAtomId)
+    const note = createNote(body, [activeAtomId], new Date(), undefined, activeAtom?.notesFolder || readerNotesFolder)
+    setNotebook((current) => ({ ...current, notes: [note, ...current.notes] }))
+  }
+
+  // ------------------------------------------------------------- provider config
 
   useEffect(() => {
     if (!settingsOpen || mode !== 'openai') return
@@ -184,256 +1128,263 @@ function App() {
     }
   }
 
-  const openFile = useCallback(async (file?: File) => {
-    if (!file) return
-    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-      window.alert('请选择 PDF 文件。')
-      return
-    }
-    try {
-      const bytes = new Uint8Array(await file.arrayBuffer())
-      const document = await openPdf(bytes)
-      const firstPage = await document.getPage(1)
-      const [items] = await Promise.all([document.getOutline()])
-      setPdf(document)
-      setFileName(file.name)
-      setPageCount(document.numPages)
-      setPageNumber(1)
-      setPageInput('1')
-      setBasePageWidth(firstPage.getViewport({ scale: 1 }).width)
-      setOutline((items || []) as OutlineItem[])
-      setSelection(null)
-      setSense(null)
-      setSenseError('')
-      setAllSenses(null)
-      setQueryTerm('')
-      setAnchor(null)
-      setZoom(1)
-      scrollRef.current?.scrollTo({ top: 0 })
-    } catch (error) {
-      console.error('PDF could not be opened', error)
-      window.alert('无法读取这个 PDF。文件可能已损坏或受到密码保护。')
-    }
-  }, [])
-
-  const chooseFile = () => fileInputRef.current?.click()
-
-  const scrollToPage = useCallback((number: number) => {
-    const target = Math.min(pageCount, Math.max(1, number))
-    document.querySelector(`[data-page-number="${target}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    setPageNumber(target)
-    setPageInput(String(target))
-  }, [pageCount])
-
-  const onPageVisible = useCallback((number: number) => {
-    setPageNumber(number)
-    setPageInput(String(number))
-  }, [])
-
-  const runTranslation = useCallback(async (next: TextSelection, requestedMode = mode, requestedModel = model) => {
-    const requestId = ++translationRequestRef.current
-    setTranslationLoading(true)
-    setTranslationError('')
-    try {
-      const result = await translateSelection(next, requestedMode, requestedModel)
-      if (requestId === translationRequestRef.current) setTranslation(result)
-    } catch (error) {
-      if (requestId === translationRequestRef.current) {
-        setTranslationError(error instanceof Error ? error.message : '翻译失败，请稍后重试。')
-      }
-    } finally {
-      if (requestId === translationRequestRef.current) setTranslationLoading(false)
-    }
-  }, [mode, model])
-
-  const runSenseLookup = useCallback(async (term: string, context: string) => {
-    const cleaned = term.trim()
-    if (!cleaned) return
-    const requestId = ++senseRequestRef.current
-    lastContextRef.current = context
-    setSenseLoading(true)
-    setSenseError('')
-    setAllSenses(null)
-    setChatError('')
-    try {
-      const result = await lookupSense(cleaned, context, model)
-      if (requestId !== senseRequestRef.current) return
-      setSense({
-        ...result,
-        term: result.term || cleaned,
-        lemma: result.lemma || cleaned,
-        examples: Array.isArray(result.examples) ? result.examples : [],
-      })
-      setRightTab('sense')
-    } catch (error) {
-      if (requestId === senseRequestRef.current) {
-        setSenseError(error instanceof Error ? error.message : '义项查询失败。')
-      }
-    } finally {
-      if (requestId === senseRequestRef.current) setSenseLoading(false)
-    }
-  }, [model])
-
-  const selectText = useCallback(() => {
-    const browserSelection = window.getSelection()
-    const rawText = browserSelection?.toString() || ''
-    const text = tidyText(rawText)
-    if (text.length < 2 || !browserSelection || browserSelection.rangeCount === 0) return
-    const range = browserSelection.getRangeAt(0)
-    const startNode = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
-    const pageElement = startNode?.closest<HTMLElement>('.pdf-page-shell')
-    if (!pageElement) return
-    const pageLayer = pageElement.querySelector('.textLayer')
-    const pageText = tidyText(pageLayer?.textContent || '')
-    const index = pageText.indexOf(text)
-    const rect = range.getBoundingClientRect()
-    const next: TextSelection = {
-      text,
-      before: index >= 0 ? pageText.slice(Math.max(0, index - 500), index) : '',
-      after: index >= 0 ? pageText.slice(index + text.length, index + text.length + 500) : '',
-      pageNumber: Number(pageElement.dataset.pageNumber || 1),
-    }
-    setSelection(next)
-    setTranslation('')
-    setTranslationError('')
-    setRightOpen(true)
-    setRightTab('sense')
-    setAnchor({
-      x: Math.max(174, Math.min(window.innerWidth - 174, rect.left + rect.width / 2)),
-      y: Math.max(82, rect.top - 12),
-    })
-    const term = termFromSelection(text)
-    setQueryTerm(term)
-    void runSenseLookup(term, sentenceAround(pageText, index, text.length))
-  }, [runSenseLookup])
-
-  function addCurrentSense() {
-    if (!sense) return
-    const atom = toAtom(sense, model)
-    setAtoms((current) => (current.some((item) => item.id === atom.id) ? current : [atom, ...current]))
-    setActiveAtomId(atom.id)
-  }
-
-  async function expandCurrent() {
-    const term = (sense?.lemma || queryTerm).trim()
-    if (!term || expanding) return
-    setExpanding(true)
-    setSenseError('')
-    try {
-      setAllSenses(await expandSenses(term, model))
-    } catch (error) {
-      setSenseError(error instanceof Error ? error.message : '无法获取完整义项。')
-    } finally {
-      setExpanding(false)
-    }
-  }
-
-  function pushChat(message: ChatMessage) {
-    if (!senseId) return
-    setChat((current) => ({ ...current, [senseId]: [...(current[senseId] || []), message] }))
-  }
-
-  async function sendChat(question: string) {
-    if (!sense || !senseId) return
-    const history = (chat[senseId] || []).slice(-8).map((message) => ({ role: message.role, content: message.content }))
-    pushChat(newMessage('user', question))
-    setChatSending(true)
-    setChatError('')
-    try {
-      const answer = await askSense({
-        term: sense.term || sense.lemma,
-        sense: { contextualMeaning: sense.contextualMeaning, definition: sense.definition },
-        question,
-        history,
-        model,
-      })
-      pushChat(newMessage('assistant', answer))
-    } catch (error) {
-      setChatError(error instanceof Error ? error.message : '对话失败，请重试。')
-    } finally {
-      setChatSending(false)
-    }
-  }
-
-  // Saving any excerpt also stores the term ↔ sense atom so the link resolves.
-  function saveExcerpt(body: string, sourceMessageId?: string) {
-    if (!sense || (sourceMessageId && savedMessageIds.has(sourceMessageId))) return
-    const atom = toAtom(sense, model)
-    const note = createNote(body, [atom.id], new Date(), sourceMessageId)
-    setAtoms((current) => (current.some((item) => item.id === atom.id) ? current : [atom, ...current]))
-    setNotebookNotes((current) => [note, ...current])
-  }
-
-  function addNoteToActiveAtom(body: string) {
-    if (!activeAtomId) return
-    const note = createNote(body, [activeAtomId])
-    setNotebookNotes((current) => [note, ...current])
-  }
+  // ------------------------------------------------------------- keyboard
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null
       const editing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'o') {
+      const modifier = event.metaKey || event.ctrlKey
+      const current = stateRef.current
+      const space = current.activeSpace
+      const path = current.session.activePath
+      const tab = current.session.tabs.find((item) => item.path === path)
+      if (modifier && event.altKey && (event.key === '1' || event.key === '2' || event.key === '3')) {
         event.preventDefault()
-        chooseFile()
-      } else if ((event.metaKey || event.ctrlKey) && (event.key === '+' || event.key === '=')) {
+        switchSpace(event.key === '1' ? 'reader' : event.key === '2' ? 'notes' : 'chat')
+      } else if (modifier && event.key.toLowerCase() === 'n') {
         event.preventDefault()
-        setZoom((value) => Math.min(2, value + 0.1))
-      } else if ((event.metaKey || event.ctrlKey) && event.key === '-') {
+        void createBlankNote()
+      } else if (modifier && event.shiftKey && event.key.toLowerCase() === 'v') {
         event.preventDefault()
-        setZoom((value) => Math.max(0.5, value - 0.1))
+        void vaultRef.current.chooseVault()
+      } else if (modifier && event.key.toLowerCase() === 'o') {
+        event.preventDefault()
+        if (event.shiftKey) void pickFolder()
+        else void pickFiles()
+      } else if (modifier && event.key.toLowerCase() === 'w') {
+        event.preventDefault()
+        if (path) closeTab(path)
+      } else if (modifier && (event.key === '+' || event.key === '=') && space === 'reader') {
+        event.preventDefault()
+        if (path) updateTab(path, { zoom: clamp(Number(((tab?.zoom ?? 1) + 0.1).toFixed(2)), 0.5, 3) })
+      } else if (modifier && event.key === '-' && space === 'reader') {
+        event.preventDefault()
+        if (path) updateTab(path, { zoom: clamp(Number(((tab?.zoom ?? 1) - 0.1).toFixed(2)), 0.5, 3) })
+      } else if (modifier && event.key === '0' && space === 'reader') {
+        event.preventDefault()
+        if (path) updateTab(path, { zoom: 1 })
+      } else if (modifier && /^[1-9]$/.test(event.key) && space === 'reader') {
+        const target = current.session.tabs[Number(event.key) - 1]
+        if (target) {
+          event.preventDefault()
+          activateTab(target.path)
+        }
       } else if (event.key === 'Escape') {
         setAnchor(null)
         setSettingsOpen(false)
-      } else if (!editing && event.key === 'ArrowRight' && pdf) {
-        scrollToPage(pageNumber + 1)
-      } else if (!editing && event.key === 'ArrowLeft' && pdf) {
-        scrollToPage(pageNumber - 1)
+      } else if (!editing && space === 'reader' && event.key === 'ArrowRight' && path) {
+        pageApiRef.current?.scrollToPage((tab?.pageNumber ?? 1) + 1)
+      } else if (!editing && space === 'reader' && event.key === 'ArrowLeft' && path) {
+        pageApiRef.current?.scrollToPage((tab?.pageNumber ?? 1) - 1)
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [pageNumber, pdf, scrollToPage])
+  }, [activateTab, closeTab, createBlankNote, pickFiles, pickFolder, switchSpace, updateTab])
 
   function handleDrop(event: React.DragEvent) {
     event.preventDefault()
     setDragActive(false)
-    void openFile(event.dataTransfer.files[0])
+    const files = Array.from(event.dataTransfer.files || [])
+    const port = fileSystem()
+    const paths = files.map((file) => port.pathForFile(file)).filter(Boolean)
+    if (paths.length === 0) {
+      window.alert('无法读取拖入的文件。请使用“打开文档”或“打开文件夹”。')
+      return
+    }
+    // Dropping a document always means reading it, whichever desk is on screen.
+    switchSpace('reader')
+    paths.forEach((path, index) => openDocument(path, { background: index > 0 }))
   }
 
-  const flattenOutline = (items: OutlineItem[], depth = 0): Array<{ item: OutlineItem; depth: number }> =>
+  // ------------------------------------------------------------- layout maths
+
+  const leftMax = Math.min(560, Math.max(MIN_LEFT_WIDTH, Math.round(viewportWidth * 0.42)))
+  const rightMax = Math.max(MIN_RIGHT_WIDTH, viewportWidth - layout.leftWidth - MIN_READER_WIDTH - 16)
+  const platform = getBridge()?.platform || ''
+  const isMacApp = platform === 'darwin'
+
+  const resizeLeft = useCallback((delta: number) => {
+    setLayout((current) => ({ ...current, leftWidth: clamp(current.leftWidth + delta, MIN_LEFT_WIDTH, leftMax) }))
+  }, [leftMax, setLayout])
+
+  const resizeRight = useCallback((delta: number) => {
+    setLayout((current) => ({ ...current, rightWidth: clamp(current.rightWidth - delta, MIN_RIGHT_WIDTH, rightMax), assistantWide: false }))
+  }, [rightMax, setLayout])
+
+  const toggleAssistantWide = useCallback(() => {
+    setLayout((current) => {
+      if (current.assistantWide) return { ...current, assistantWide: false, rightWidth: DEFAULT_RIGHT_WIDTH }
+      const wide = clamp(Math.round(viewportWidth * 0.56), MIN_RIGHT_WIDTH, rightMax)
+      return { ...current, assistantWide: true, rightWidth: wide }
+    })
+  }, [rightMax, setLayout, viewportWidth])
+
+  const updateActiveTab = useCallback((patch: Partial<ReaderTabState>) => {
+    if (!activePath) return
+    setSession((current) => {
+      const tab = current.tabs.find((item) => item.path === activePath)
+      if (!tab) return current
+      const unchanged = Object.entries(patch).every(
+        ([key, value]) => (tab as unknown as Record<string, unknown>)[key] === value,
+      )
+      if (unchanged) return current
+      return { ...current, tabs: current.tabs.map((item) => (item.path === activePath ? { ...item, ...patch } : item)) }
+    })
+  }, [activePath, setSession])
+
+  const handlePageChange = useCallback((page: number) => {
+    setPageInput(String(page))
+    updateActiveTab({ pageNumber: page })
+  }, [updateActiveTab])
+
+  const handleChapterChange = useCallback((chapterIndex: number) => {
+    setPageInput(String(chapterIndex + 1))
+    // A new chapter starts at the top; the previous chapter's offset is stale.
+    scrollPositions.current[activePath || ''] = 0
+    // `pageNumber` mirrors the chapter so the toolbar indicator stays in step.
+    updateActiveTab({ chapterIndex, pageNumber: chapterIndex + 1, scrollTop: 0, scrollRatio: 0 })
+  }, [activePath, updateActiveTab])
+
+  // PDF reports a pixel offset; the reflowing readers report a ratio as well so
+  // the position survives window/splitter resizes that change the text height.
+  const handleScrollPosition = useCallback((position: number | FlowScrollState) => {
+    if (!activePath) return
+    const state = typeof position === 'number'
+      ? { scrollTop: position, ratio: scrollRatios.current[activePath] ?? 0 }
+      : position
+    scrollPositions.current[activePath] = state.scrollTop
+    scrollRatios.current[activePath] = state.ratio
+    scrollDirty.current = true
+  }, [activePath])
+
+  const handleFlowProgress = useCallback((state: FlowScrollState) => {
+    if (!activePath) return
+    scrollRatios.current[activePath] = state.ratio
+    scrollDirty.current = true
+  }, [activePath])
+
+  useEffect(() => {
+    if (activeTab) setPageInput(String((activeTab.chapterIndex ?? 0) + 1 || activeTab.pageNumber))
+    setFlowLocation('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePath])
+
+  // Position paging works for every document kind: PDF pages, EPUB chapters
+  // (the reflowing readers have no pages) and free scrolling in plain text.
+  const positionTotal = activeDoc?.kind === 'text' ? 0 : (activeDoc?.pageCount ?? 0)
+  const positionIndex = activeDoc?.kind === 'epub'
+    ? (activeTab?.chapterIndex ?? 0) + 1
+    : (activeTab?.pageNumber ?? 1)
+
+  const navigatePosition = useCallback((delta: number) => {
+    if (!activeDoc) return
+    if (activeDoc.kind === 'pdf') {
+      pageApiRef.current?.scrollToPage((activeTab?.pageNumber ?? 1) + delta)
+      return
+    }
+    if (activeDoc.kind === 'epub') {
+      const next = clamp((activeTab?.chapterIndex ?? 0) + delta, 0, Math.max(0, activeDoc.pageCount - 1))
+      if (next !== (activeTab?.chapterIndex ?? 0)) handleChapterChange(next)
+      return
+    }
+    flowApiRef.current?.scrollBy(delta * 480)
+  }, [activeDoc, activeTab?.chapterIndex, activeTab?.pageNumber, handleChapterChange])
+
+  const jumpToPosition = useCallback((value: number) => {
+    if (!activeDoc) return
+    if (activeDoc.kind === 'pdf') {
+      pageApiRef.current?.scrollToPage(value)
+      return
+    }
+    if (activeDoc.kind === 'epub') {
+      handleChapterChange(clamp(value - 1, 0, Math.max(0, activeDoc.pageCount - 1)))
+      return
+    }
+    flowApiRef.current?.scrollToTop()
+  }, [activeDoc, handleChapterChange])
+
+  const flattenOutline = (items: DocumentOutlineItem[], depth = 0): Array<{ item: DocumentOutlineItem; depth: number }> =>
     items.flatMap((item) => [{ item, depth }, ...flattenOutline(item.items || [], depth + 1)])
 
+  const tabsForStrip = session.tabs.map((tab) => ({
+    path: tab.path,
+    name: tab.name,
+    kind: docs[tab.path]?.kind ?? documentKindFor(tab.path) ?? undefined,
+    loading: docs[tab.path]?.status === 'loading',
+    failed: docs[tab.path]?.status === 'error',
+  }))
+
+  const retryActive = useCallback(() => {
+    const path = stateRef.current.session.activePath
+    if (!path) return
+    setDocs((prev) => {
+      const next = { ...prev }
+      delete next[path]
+      return next
+    })
+    void loadDocument(path, displayNameForPath(path))
+  }, [loadDocument])
+
+  // Rebuilds the PDF from scratch (new loading task and worker). Releasing first
+  // matters: `acquireDocument` would otherwise hand back the wedged document.
+  const reloadActiveDocument = useCallback(() => {
+    const path = stateRef.current.session.activePath
+    if (!path) return
+    const name = displayNameForPath(path)
+    releaseDocument(documentKeyFor(path, name))
+    setDocs((prev) => {
+      const next = { ...prev }
+      delete next[path]
+      return next
+    })
+    void loadDocument(path, name)
+  }, [loadDocument])
+
   return (
-    <main className="app-shell" onDragOver={(event) => { event.preventDefault(); setDragActive(true) }} onDragLeave={(event) => {
-      if (event.target === event.currentTarget) setDragActive(false)
-    }} onDrop={handleDrop}>
-      <input ref={fileInputRef} className="visually-hidden" type="file" accept="application/pdf,.pdf" onChange={(event) => void openFile(event.target.files?.[0])} />
+    <main
+      className={`app-shell${isMacApp ? ' is-app mac' : ''}`}
+      onDragOver={(event) => { event.preventDefault(); setDragActive(true) }}
+      onDragLeave={(event) => { if (event.target === event.currentTarget) setDragActive(false) }}
+      onDrop={handleDrop}
+    >
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark"><BookOpen size={17} strokeWidth={1.8} /></div>
           <div className="brand-name">paperlight<span>PDF</span></div>
-          <span className="topbar-divider" />
-          {fileName ? <div className="document-title"><FileText size={15} /> <span>{fileName}</span></div> : <div className="document-title muted-title">轻盈阅读，随选随译</div>}
         </div>
         <div className="topbar-actions">
-          <button className="icon-button" title={leftOpen ? '收起缩略图' : '展开缩略图'} onClick={() => setLeftOpen((value) => !value)}><PanelLeftClose size={17} /></button>
-          <button className="icon-button" title="打开 PDF（⌘/Ctrl + O）" onClick={chooseFile}><FolderOpen size={17} /></button>
+          <button className="icon-button" title={layout.leftOpen ? '收起左侧栏' : '展开左侧栏'} onClick={() => setLayout((current) => ({ ...current, leftOpen: !current.leftOpen }))}>
+            {layout.leftOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
+          </button>
+          <button className="icon-button" title="打开文档（PDF / EPUB / TXT / Markdown，⌘O）" onClick={() => void pickFiles()}><FilePlus2 size={17} /></button>
+          <button className="icon-button" title="打开文件夹（⌘⇧O）" onClick={() => void pickFolder()}><FolderOpen size={17} /></button>
           <button className={`provider-pill ${mode === 'openai' ? 'provider-openai' : ''}`} onClick={() => setSettingsOpen((value) => !value)} title="翻译设置">
             <span className={`provider-dot ${mode}`} />{mode === 'mock' ? '模拟翻译' : '兼容 API'}<ChevronDown size={13} />
           </button>
-          <button className="icon-button" title={rightOpen ? '收起侧栏' : '展开侧栏'} onClick={() => setRightOpen((value) => !value)}><PanelRightClose size={17} /></button>
+          <button className="icon-button" title={layout.rightOpen ? '收起阅读助手' : '展开阅读助手'} onClick={() => setLayout((current) => ({ ...current, rightOpen: !current.rightOpen }))}>
+            {layout.rightOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
+          </button>
           <button className="icon-button" title="设置" onClick={() => setSettingsOpen((value) => !value)}><Settings2 size={17} /></button>
         </div>
       </header>
 
+      {activeSpace === 'reader' && <TabStrip
+        tabs={tabsForStrip}
+        activePath={activePath}
+        onActivate={activateTab}
+        onClose={closeTab}
+        onOpenPicker={() => void pickFiles()}
+        onNewNote={() => void createBlankNote()}
+      />}
+
       {settingsOpen && <div className="settings-popover">
-        <div className="settings-heading"><div><strong>翻译设置</strong><p>选择翻译服务</p></div><button className="tiny-icon" onClick={() => setSettingsOpen(false)}><X size={15} /></button></div>
+        <div className="settings-heading"><div><strong>设置</strong><p>翻译服务与日报</p></div><button className="tiny-icon" onClick={() => setSettingsOpen(false)}><X size={15} /></button></div>
         <label className="field-label" htmlFor="provider-mode">翻译方式</label>
         <select id="provider-mode" className="select-field" value={mode} onChange={(event) => {
           const nextMode = event.target.value as TranslateMode
-          setMode(nextMode)
+          setState((prev) => ({ ...prev, settings: { ...prev.settings, mode: nextMode } }))
           if (selection) void runTranslation(selection, nextMode)
         }}>
           <option value="mock">模拟模式 · 无需密钥</option>
@@ -444,7 +1395,7 @@ function App() {
             <span className="api-status-dot" />
             <div>
               <strong>{apiConfigLoading && !apiConfig ? '正在检查配置…' : apiConfig?.configured ? 'API 已配置' : '尚未配置 API'}</strong>
-              <span>{apiConfig?.source === 'environment' ? '由启动环境提供' : apiConfig?.source === 'local-file' ? '安全保存在本机 .env.local' : '输入密钥后即可使用真实翻译'}{` · ${protocolForBaseUrl(apiBaseUrl) === 'chat-completions' ? 'Chat Completions' : 'Responses'}`}</span>
+              <span>{apiConfig?.source === 'environment' ? '由启动环境提供' : apiConfig?.source === 'local-file' ? '安全保存在本机配置文件' : '输入密钥后即可使用真实翻译'}{` · ${protocolForBaseUrl(apiBaseUrl) === 'chat-completions' ? 'Chat Completions' : 'Responses'}`}</span>
             </div>
           </div>
           {apiConfig?.source !== 'environment' && <>
@@ -456,7 +1407,7 @@ function App() {
                   className={`api-preset-button${apiBaseUrl === preset.baseUrl ? ' selected' : ''}`}
                   onClick={() => {
                     setApiBaseUrl(preset.baseUrl)
-                    if (preset.model) setModel(preset.model)
+                    if (preset.model) setState((prev) => ({ ...prev, settings: { ...prev.settings, model: preset.model as string } }))
                     setApiConfigMessage(null)
                   }}
                 >
@@ -495,229 +1446,396 @@ function App() {
             </div>
           </>}
           {apiConfigMessage && <p className={`api-config-message ${apiConfigMessage.kind}`} role="status">{apiConfigMessage.text}</p>}
-          <p className="settings-hint">{apiConfig?.source === 'environment' ? <>密钥由启动环境管理，页面不会读取、显示或覆盖它。</> : <>密钥仅写入本机 <code>.env.local</code>，不会保存在浏览器、显示在页面或打包进应用。</>}</p>
+          <p className="settings-hint">{apiConfig?.source === 'environment' ? <>密钥由启动环境管理，页面不会读取、显示或覆盖它。</> : <>密钥仅写入本机配置文件，不会保存在浏览器、显示在页面或打包进应用。</>}</p>
           <label className="field-label model-label" htmlFor="model-name">模型名称</label>
-          <input id="model-name" className="text-field" value={model} onChange={(event) => setModel(event.target.value)} />
+          <input id="model-name" className="text-field" value={model} onChange={(event) => setState((prev) => ({ ...prev, settings: { ...prev.settings, model: event.target.value } }))} />
         </> : <p className="settings-hint">模拟模式只影响整句翻译；义项查询、例句与对话始终使用已配置的 API。</p>}
+
+        <div className="settings-section">
+          <label className="field-label" htmlFor="report-time">日报生成时间</label>
+          <div className="report-time-row">
+            <input
+              id="report-time"
+              className="text-field"
+              type="time"
+              value={state.settings.dailyReportTime}
+              onChange={(event) => {
+                const value = event.target.value
+                if (!isValidTimeOfDay(value)) return
+                setState((prev) => ({ ...prev, settings: { ...prev.settings, dailyReportTime: value } }))
+              }}
+            />
+            <label className="report-auto">
+              <input
+                type="checkbox"
+                checked={state.settings.dailyReportAuto}
+                onChange={(event) => setState((prev) => ({ ...prev, settings: { ...prev.settings, dailyReportAuto: event.target.checked } }))}
+              />
+              到点自动生成
+            </label>
+          </div>
+          <p className="settings-hint">
+            日报写在 <code>Daily/&lt;日期&gt;-report.md</code>，每次生成覆盖上一版；每天的记录清单是分开的文件，会随笔记实时更新。日报也会读取你写在 <code>enlightenment/</code> 里的专项发现。
+          </p>
+        </div>
       </div>}
 
+      {activeSpace === 'reader' ? (
       <div className={`workspace${dragActive ? ' drag-active' : ''}`}>
-        {leftOpen && <aside className="left-sidebar">
+        <SpaceRail active="reader" onSelect={switchSpace} onChooseVault={() => void vaultApi.chooseVault()} vaultName={vaultApi.rootName} />
+        {layout.leftOpen && <aside className="left-sidebar" style={{ width: `${layout.leftWidth}px` }}>
           <div className="sidebar-tabs">
-            <button className={leftTab === 'pages' ? 'selected' : ''} onClick={() => setLeftTab('pages')}>页面</button>
-            <button className={leftTab === 'outline' ? 'selected' : ''} onClick={() => setLeftTab('outline')}>目录</button>
+            <button className={leftTab === 'files' ? 'selected' : ''} onClick={() => setLeftTab('files')} title="文件"><Files size={13} /> 文件</button>
+            <button className={leftTab === 'pages' ? 'selected' : ''} onClick={() => setLeftTab('pages')} title="页面"><Layers size={13} /> 页面</button>
+            <button className={leftTab === 'outline' ? 'selected' : ''} onClick={() => setLeftTab('outline')} title="目录"><List size={13} /> 目录</button>
           </div>
-          {!pdf ? <div className="sidebar-empty"><span className="sidebar-empty-icon"><FileText size={19} /></span><span>打开 PDF 后<br />在这里浏览页面</span></div> : leftTab === 'pages' ?
-            <div className="thumbnail-list">{Array.from({ length: pageCount }, (_, index) => <PDFThumbnail key={index + 1} pdf={pdf} pageNumber={index + 1} active={pageNumber === index + 1} onClick={() => scrollToPage(index + 1)} />)}</div> :
-            <div className="outline-list">
-              {flattenOutline(outline).map(({ item, depth }, index) => <button key={`${item.title}-${index}`} className="outline-entry" style={{ paddingLeft: `${15 + depth * 13}px` }} onClick={async () => {
-                if (!pdf || !item.dest) return
-                try {
-                  const destination = typeof item.dest === 'string' ? await pdf.getDestination(item.dest) : item.dest
-                  const reference = Array.isArray(destination) ? destination[0] : null
-                  if (!reference) return
-                  const pageIndex = await pdf.getPageIndex(reference as never)
-                  scrollToPage(pageIndex + 1)
-                } catch { /* Some PDFs contain incomplete outline destinations. */ }
-              }}><ChevronRight size={12} /><span>{item.title}</span></button>)}
-              {outline.length === 0 && <div className="outline-empty">此 PDF 没有目录</div>}
-            </div>}
-          <div className="sidebar-footer">{pdf ? `${pageCount} 页` : 'PDF 阅读器'}</div>
+
+          {leftTab === 'files' && <FileExplorer
+            root={explorer.root}
+            currentDir={explorer.current}
+            listing={explorer.listing}
+            loading={explorer.loading}
+            error={explorer.error}
+            roots={roots}
+            recents={session.recentFiles}
+            recentFolders={session.recentFolders}
+            favorites={session.favorites}
+            openPaths={openPaths}
+            browseMode={fileSystem().kind}
+            onPickFolder={() => void pickFolder()}
+            onOpenDir={(path) => void openFolderInternal(path)}
+            onGoUp={goUpFolder}
+            onRefresh={() => explorer.current && void openFolderInternal(explorer.current)}
+            onOpenFile={(path, options) => openDocument(path, options)}
+            onReveal={(path) => void fileSystem().reveal(path)}
+            onToggleFavorite={toggleFavoriteFolder}
+            onOpenRecent={(path) => openDocument(path)}
+            onOpenRecentFolder={(path) => void openFolderInternal(path)}
+          />}
+
+          {leftTab === 'pages' && (!activePdf || !activeDoc || activeDoc.kind !== 'pdf'
+            ? <div className="sidebar-empty"><span className="sidebar-empty-icon"><Layers size={19} /></span><span>{activeDoc && activeDoc.kind !== 'pdf' ? '这个格式没有固定页面\n可用左侧「目录」跳转' : '打开 PDF 后\n在这里浏览页面'}</span></div>
+            : <div className="thumbnail-list">{Array.from({ length: activeDoc.pageCount }, (_, index) => (
+              <PDFThumbnail
+                key={index + 1}
+                pdf={activePdf}
+                pageNumber={index + 1}
+                active={activeTab?.pageNumber === index + 1}
+                onClick={() => pageApiRef.current?.scrollToPage(index + 1)}
+              />
+            ))}</div>)}
+
+          {leftTab === 'outline' && (!activeDoc
+            ? <div className="sidebar-empty"><span className="sidebar-empty-icon"><List size={19} /></span><span>打开文档后<br />在这里查看目录</span></div>
+            : activeDoc.kind === 'pdf'
+              ? <div className="outline-list">
+                {flattenOutline(activeDoc.outline).map(({ item, depth }, index) => <button key={`${item.title}-${index}`} className="outline-entry" style={{ paddingLeft: `${15 + depth * 13}px` }} onClick={async () => {
+                  if (!activePdf || !item.dest) return
+                  try {
+                    const destination = typeof item.dest === 'string' ? await activePdf.getDestination(item.dest) : item.dest
+                    const reference = Array.isArray(destination) ? destination[0] : null
+                    if (!reference) return
+                    const pageIndex = await activePdf.getPageIndex(reference as never)
+                    pageApiRef.current?.scrollToPage(pageIndex + 1)
+                  } catch { /* Some PDFs contain incomplete outline destinations. */ }
+                }}><ChevronRight size={12} /><span>{item.title}</span></button>)}
+                {activeDoc.outline.length === 0 && <div className="outline-empty">此 PDF 没有目录</div>}
+              </div>
+              : <div className="outline-list">
+                {activeDoc.flowOutline.map((item, index) => (
+                  <button
+                    key={`${item.title}-${index}`}
+                    className="outline-entry"
+                    style={{ paddingLeft: `${15 + item.level * 13}px` }}
+                    onClick={() => {
+                      if ('chapterIndex' in item) {
+                        handleChapterChange(item.chapterIndex)
+                        return
+                      }
+                      flowApiRef.current?.scrollToAnchor(`flow-block-${item.block}`)
+                    }}
+                  >
+                    <ChevronRight size={12} /><span>{item.title}</span>
+                  </button>
+                ))}
+                {activeDoc.flowOutline.length === 0 && <div className="outline-empty">这个文档没有可跳转的标题</div>}
+              </div>)}
+
+          <div className="sidebar-footer">
+            {activeDoc?.status === 'ready'
+              ? `${activeDoc.kind === 'pdf' ? `${activeDoc.pageCount} 页` : activeDoc.kind === 'epub' ? `${activeDoc.pageCount} 章` : `${activeDoc.blocks.length} 段`} · ${activeTab?.name ?? ''}`
+              : explorer.current ? '文件浏览器' : 'Paperlight'}
+          </div>
         </aside>}
 
+        {layout.leftOpen && <Splitter
+          label="调整左侧栏宽度"
+          value={layout.leftWidth}
+          min={MIN_LEFT_WIDTH}
+          max={leftMax}
+          onDelta={resizeLeft}
+          onReset={() => setLayout((current) => ({ ...current, leftWidth: DEFAULT_LEFT_WIDTH }))}
+        />}
+
         <section className="reader-column">
-          {pdf && <div className="reader-toolbar">
+          {activeTab && <div className="reader-toolbar">
             <div className="page-navigation">
-              <button className="toolbar-button" title="上一页（←）" disabled={pageNumber <= 1} onClick={() => scrollToPage(pageNumber - 1)}><ChevronLeft size={17} /></button>
-              <input className="page-number-input" aria-label="页码" value={pageInput} onChange={(event) => setPageInput(event.target.value)} onKeyDown={(event) => {
-                if (event.key === 'Enter') scrollToPage(Number(pageInput) || 1)
-              }} onBlur={() => setPageInput(String(pageNumber))} />
-              <span className="page-total">/ {pageCount}</span>
-              <button className="toolbar-button" title="下一页（→）" disabled={pageNumber >= pageCount} onClick={() => scrollToPage(pageNumber + 1)}><ChevronRight size={17} /></button>
+              <button
+                className="toolbar-button"
+                title={activeDoc?.kind === 'epub' ? '上一章' : activeDoc?.kind === 'text' ? '向上' : '上一页（←）'}
+                disabled={activeDoc?.kind !== 'text' && positionIndex <= 1}
+                onClick={() => navigatePosition(-1)}
+              >
+                <ChevronLeft size={17} />
+              </button>
+              <input
+                className="page-number-input"
+                aria-label={activeDoc?.kind === 'pdf' ? '页码' : '章节'}
+                value={pageInput}
+                onChange={(event) => setPageInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') jumpToPosition(Number(pageInput) || 1)
+                }}
+                onBlur={() => setPageInput(String(positionIndex))}
+              />
+              <span className="page-total">{positionLabel(activeDoc?.kind ?? 'pdf', positionIndex, positionTotal)}</span>
+              <button
+                className="toolbar-button"
+                title={activeDoc?.kind === 'epub' ? '下一章' : activeDoc?.kind === 'text' ? '向下' : '下一页（→）'}
+                disabled={activeDoc?.kind !== 'text' && positionTotal > 0 && positionIndex >= positionTotal}
+                onClick={() => navigatePosition(1)}
+              >
+                <ChevronRight size={17} />
+              </button>
             </div>
+            <div className="reader-toolbar-title" title={activePath || ''}>{flowLocation || activeTab.name}</div>
             <div className="zoom-controls">
-              <button className="toolbar-button" title="缩小（⌘/Ctrl + -）" onClick={() => setZoom((value) => Math.max(0.5, Number((value - 0.1).toFixed(2))))}><Minus size={15} /></button>
-              <span className="zoom-label">{Math.round(zoom * 100)}%</span>
-              <button className="toolbar-button" title="放大（⌘/Ctrl + +）" onClick={() => setZoom((value) => Math.min(2, Number((value + 0.1).toFixed(2))))}><Plus size={15} /></button>
+              <button className="toolbar-button" title="缩小（⌘/Ctrl + -）" onClick={() => activePath && updateTab(activePath, { zoom: clamp(Number(((activeTab?.zoom ?? 1) - 0.1).toFixed(2)), 0.5, 3) })}><Minus size={15} /></button>
+              <span className="zoom-label">{Math.round((activeTab?.zoom ?? 1) * 100)}%</span>
+              <button className="toolbar-button" title="放大（⌘/Ctrl + +）" onClick={() => activePath && updateTab(activePath, { zoom: clamp(Number(((activeTab?.zoom ?? 1) + 0.1).toFixed(2)), 0.5, 3) })}><Plus size={15} /></button>
               <span className="toolbar-separator" />
-              <button className="toolbar-button fit-button" title="适合页面宽度" onClick={() => setZoom(1)}><RotateCcw size={14} /><span>适宽</span></button>
+              <button className="toolbar-button fit-button" title={activeDoc?.kind === 'pdf' ? '适合页面宽度（⌘0）' : '恢复默认字号（⌘0）'} onClick={() => activePath && updateTab(activePath, { zoom: 1 })}><RotateCcw size={14} /><span>{activeDoc?.kind === 'pdf' ? '适宽' : '默认'}</span></button>
             </div>
           </div>}
 
-          <div className={`reader-scroll${pdf ? '' : ' welcome-scroll'}`} ref={scrollRef} onMouseUp={selectText} onKeyUp={(event) => {
-            if (event.key.startsWith('Arrow') || event.key === 'Shift') selectText()
-          }} onScroll={() => setAnchor(null)}>
-            {pdf ? <div className="pages-stack">{Array.from({ length: pageCount }, (_, index) =>
-              <PDFPage key={`${fileName}-${index + 1}`} pdf={pdf} pageNumber={index + 1} scale={scale} onVisible={onPageVisible} />,
-            )}</div> : <div className="welcome-card">
-              <div className="welcome-art">
-                <div className="art-shadow" />
-                <div className="art-page art-page-back"><i /><i /><i /></div>
-                <div className="art-page art-page-front"><div className="art-page-kicker">READ · UNDERSTAND</div><div className="art-page-title">Ideas travel<br />through words.</div><div className="art-page-line" /><div className="art-page-text">A little help, right where<br />you need it.</div><div className="art-page-mark"><Languages size={21} /></div></div>
-                <div className="art-translate"><span>selected text</span><div>Ideas travel through words.</div><b>思想借由文字传递。</b></div>
-                <span className="art-sparkle sparkle-one">✳</span><span className="art-sparkle sparkle-two">✦</span>
+          {!activeTab ? (
+            <WelcomeScreen
+              onOpenFiles={() => void pickFiles()}
+              onOpenFolder={() => void pickFolder()}
+              canBrowse={fileSystem().canBrowse}
+              recents={session.recentFiles}
+              onOpenRecent={(path) => openDocument(path)}
+            />
+          ) : activeDoc?.status === 'ready' && activeDoc.kind === 'pdf' && activePdf ? (
+            <PageStack
+              key={activePath}
+              pdf={activePdf}
+              documentKey={documentKeyFor(activePath || '', activeTab.name)}
+              pageCount={activeDoc.pageCount}
+              firstPageRatio={activeDoc.firstPageRatio}
+              zoom={activeTab.zoom}
+              restoreScrollTop={activeTab.scrollTop}
+              onScrollPosition={handleScrollPosition}
+              onPageChange={handlePageChange}
+              onSelectionPointerUp={selectText}
+              onSelectionKeyUp={(event) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') selectText() }}
+              onUserScroll={() => setAnchor(null)}
+              onReloadDocument={reloadActiveDocument}
+              apiRef={pageApiRef}
+            />
+          ) : activeDoc?.status === 'ready' && activeDoc.kind === 'text' ? (
+            <TextReader
+              key={activePath}
+              documentKey={documentKeyFor(activePath || '', activeTab.name)}
+              blocks={activeDoc.blocks}
+              outline={activeDoc.flowOutline.filter((item): item is TextOutlineItem => 'block' in item)}
+              zoom={activeTab.zoom}
+              restoreRatio={activeTab.scrollRatio ?? 0}
+              onScrollPosition={handleScrollPosition}
+              onProgress={handleFlowProgress}
+              onLocationChange={setFlowLocation}
+              onSelectionPointerUp={selectText}
+              onSelectionKeyUp={(event) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') selectText() }}
+              onUserScroll={() => setAnchor(null)}
+              apiRef={flowApiRef}
+            />
+          ) : activeDoc?.status === 'ready' && activeDoc.kind === 'epub' && activeDoc.epub ? (
+            <EpubReader
+              key={`${activePath}#${activeTab.chapterIndex ?? 0}`}
+              book={activeDoc.epub}
+              chapterIndex={activeTab.chapterIndex ?? 0}
+              zoom={activeTab.zoom}
+              restoreRatio={activeTab.scrollRatio ?? 0}
+              onScrollPosition={handleScrollPosition}
+              onProgress={handleFlowProgress}
+              onSelectionPointerUp={selectText}
+              onSelectionKeyUp={(event) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') selectText() }}
+              onUserScroll={() => setAnchor(null)}
+              apiRef={flowApiRef}
+              onNextChapter={() => handleChapterChange((activeTab.chapterIndex ?? 0) + 1)}
+            />
+          ) : activeDoc?.status === 'error' ? (
+            <div className="reader-status">
+              <FileText size={26} />
+              <strong>无法打开这个文件</strong>
+              <span>{activeDoc.error}</span>
+              <span className="reader-status-path">{activePath}</span>
+              <div className="reader-status-actions">
+                <button className="primary-button" type="button" onClick={retryActive}><RotateCcw size={15} /> 重试</button>
+                <button className="secondary-button" type="button" onClick={() => activePath && closeTab(activePath)}>关闭标签页</button>
               </div>
-              <span className="eyebrow">PAPERLIGHT PDF</span>
-              <h1>让阅读与理解，<br /><em>自然地发生。</em></h1>
-              <p className="welcome-copy">打开一份英文 PDF。选中任何句子，<br />中文翻译就在眼前。</p>
-              <button className="primary-button" onClick={chooseFile}><FolderOpen size={17} /> 打开 PDF <span>⌘ O</span></button>
-              <div className="drop-hint">也可以将 PDF 拖到这里</div>
-              <div className="welcome-divider" />
-              <div className="feature-row"><div><span><Languages size={15} /></span><b>随选随译</b><small>保留原文上下文</small></div><div><span><StickyNote size={15} /></span><b>摘录笔记</b><small>本地自动保存</small></div><div><span><BookOpen size={15} /></span><b>专注阅读</b><small>简洁双栏布局</small></div></div>
-            </div>}
-          </div>
-          {dragActive && <div className="drop-overlay"><div><FilePlus2 size={27} /><strong>松开即可打开 PDF</strong><span>文件只在此设备的浏览器中读取</span></div></div>}
+            </div>
+          ) : (
+            <div className="reader-status">
+              <span className="mini-spinner" />
+              <strong>正在载入 {activeTab.name}</strong>
+              <span>{Math.round((activeDoc?.progress ?? 0) * 100)}%</span>
+            </div>
+          )}
+
+          {dragActive && <div className="drop-overlay"><div><FilePlus2 size={27} /><strong>松开即可打开 PDF</strong><span>文件只在此设备上读取</span></div></div>}
         </section>
 
-        {rightOpen && <aside className="right-sidebar">
-          <div className="right-heading"><div><span className="right-kicker">READING DESK</span><h2>阅读助手</h2></div><button className="tiny-icon" title="收起侧栏" onClick={() => setRightOpen(false)}><X size={16} /></button></div>
-          <div className="right-tabs">
-            <button className={rightTab === 'sense' ? 'selected' : ''} onClick={() => setRightTab('sense')}><Languages size={14} /> 义项</button>
-            <button className={rightTab === 'notebook' ? 'selected' : ''} onClick={() => setRightTab('notebook')}><StickyNote size={14} /> 记录本{atoms.length > 0 && <span className="notes-count">{atoms.length}</span>}</button>
-            <button className={rightTab === 'chat' ? 'selected' : ''} onClick={() => setRightTab('chat')}><BookOpen size={14} /> 对话{chatMessages.length > 0 && <span className="notes-count">{chatMessages.length}</span>}</button>
-          </div>
+        {layout.rightOpen && <Splitter
+          label="调整阅读助手宽度"
+          value={layout.rightWidth}
+          min={MIN_RIGHT_WIDTH}
+          max={rightMax}
+          onDelta={resizeRight}
+          onReset={() => setLayout((current) => ({ ...current, rightWidth: DEFAULT_RIGHT_WIDTH, assistantWide: false }))}
+        />}
 
-          {rightTab === 'sense' && <div className="translation-panel">
-            <div className="query-row">
-              <label className="field-label" htmlFor="query-term">查询词（可键盘修改）</label>
-              <div className="query-input-wrap">
-                <input
-                  id="query-term"
-                  className="text-field"
-                  value={queryTerm}
-                  spellCheck={false}
-                  placeholder="如 within"
-                  onChange={(event) => setQueryTerm(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') void runSenseLookup(queryTerm, lastContextRef.current)
-                  }}
-                />
-                <button
-                  type="button"
-                  className="query-go"
-                  disabled={senseLoading || !queryTerm.trim()}
-                  onClick={() => void runSenseLookup(queryTerm, lastContextRef.current)}
-                >
-                  查询
-                </button>
-              </div>
-              {selection && <span className="query-meta">来自第 {selection.pageNumber} 页的选区 · Enter 重新查询</span>}
-            </div>
-
-            {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在结合上下文判断义项…</div>}
-
-            {senseError && !senseLoading && (
-              <div className="panel-error">
-                <p>{senseError}</p>
-                <button className="text-action" type="button" onClick={() => void runSenseLookup(queryTerm || sense?.term || '', lastContextRef.current)}>重试</button>
-              </div>
-            )}
-
-            {sense && !senseLoading && (
-              <>
-                <SenseCard
-                  sense={sense}
-                  model={model}
-                  added={senseInNotebook}
-                  relations={relations}
-                  onAdd={addCurrentSense}
-                  onJumpToAtom={(id) => { setActiveAtomId(id); setRightTab('notebook') }}
-                />
-
-                <div className="sense-actions">
-                  <button className="text-action" type="button" disabled={expanding} onClick={() => void expandCurrent()}>
-                    {expanding ? '正在获取…' : allSenses ? '重新获取完整义项' : '查看完整词典义项'}
-                  </button>
-                  <button className="text-action" type="button" onClick={() => setRightTab('chat')}>继续和 Agent 对话</button>
-                </div>
-
-                {allSenses && allSenses.length > 0 && (
-                  <section className="sense-block all-senses">
-                    <h4>{sense.lemma} 的全部义项（{allSenses.length}）</h4>
-                    <ul className="all-sense-list">
-                      {allSenses.map((item) => (
-                        <li key={item.senseId} className={item.isContextual ? 'current' : ''}>
-                          <strong>{item.partOfSpeech} · {item.senseId}{item.isContextual ? '（当前上下文）' : ''}</strong>
-                          <p>{item.meaning}</p>
-                          <span>{item.definition}</span>
-                        </li>
-                      ))}
-                    </ul>
-                    <p className="sense-plain">以上义项同样由 AI 生成，不是授权词典内容，请自行核对。</p>
-                  </section>
-                )}
-
-                <details className="context-details">
-                  <summary>整句翻译参考 <ChevronDown size={13} /></summary>
-                  {translationLoading ? <div className="loading-copy"><span className="mini-spinner" /> 正在翻译…</div>
-                    : translationError ? <p className="panel-error-text">{translationError}</p>
-                    : translation ? <p>{translation}</p>
-                    : selection ? <button className="text-action" type="button" onClick={() => void runTranslation(selection)}>翻译选中内容</button>
-                    : <p className="sense-plain">先在正文中选中文字。</p>}
-                </details>
-
-                <button className="save-note-button" type="button" onClick={() => saveExcerpt(`${sense.term}（${sense.contextualMeaning}）`)}>
-                  <Bookmark size={15} /> 把这条义项存成笔记
-                </button>
-              </>
-            )}
-
-            {!sense && !senseLoading && !senseError && (
-              <div className="translation-empty">
-                <div><Languages size={20} /></div>
-                <strong>选中一个词</strong>
-                <span>会结合上下文给出准确的义项、例句、<br />使用建议与词根词缀分析。</span>
-              </div>
-            )}
-          </div>}
-
-          {rightTab === 'notebook' && <NotebookPanel
+        {layout.rightOpen && <div className="right-pane" style={{ width: `${layout.rightWidth}px` }}>
+          <AssistantPanel
+            tab={rightTab}
+            onTab={setRightTab}
+            wide={layout.assistantWide}
+            onToggleWide={toggleAssistantWide}
+            onCollapse={() => setLayout((current) => ({ ...current, rightOpen: false }))}
+            queryTerm={queryTerm}
+            onQueryTerm={setQueryTerm}
+            onQuery={() => void runSenseLookup(queryTerm, lastContextRef.current)}
+            sense={sense}
+            senseLoading={senseLoading}
+            senseError={senseError}
+            allSenses={allSenses}
+            expanding={expanding}
+            onExpand={() => void expandCurrent()}
+            translation={translation}
+            translationLoading={translationLoading}
+            translationError={translationError}
+            onTranslate={() => selection && void runTranslation(selection)}
+            selection={selection}
+            senseInNotebook={senseInNotebook}
+            relations={relations}
+            onAddSense={addCurrentSense}
+            model={model}
+            onJumpToAtom={(id) => { setActiveAtomId(id); setRightTab('notebook') }}
             atoms={atoms}
             notes={notebookNotes}
             activeAtomId={activeAtomId}
-            model={model}
             onSelectAtom={setActiveAtomId}
             onDeleteAtom={(id) => {
-              setAtoms((current) => current.filter((atom) => atom.id !== id))
-              setNotebookNotes((current) => current.map((note) => ({ ...note, senseIds: note.senseIds.filter((senseId) => senseId !== id) })))
+              setNotebook((current) => ({
+                ...current,
+                atoms: current.atoms.filter((atom) => atom.id !== id),
+                notes: current.notes.map((note) => ({ ...note, senseIds: note.senseIds.filter((senseRef) => senseRef !== id) })),
+              }))
               setActiveAtomId(null)
             }}
             onAddNote={addNoteToActiveAtom}
-            onDeleteNote={(id) => setNotebookNotes((current) => current.filter((note) => note.id !== id))}
-          />}
-
-          {rightTab === 'chat' && <ChatPanel
-            sense={sense}
-            model={model}
-            messages={chatMessages}
-            sending={chatSending}
-            error={chatError}
+            onDeleteNote={(id) => setNotebook((current) => ({ ...current, notes: current.notes.filter((note) => note.id !== id) }))}
+            chatMessages={chatMessages}
             savedMessageIds={savedMessageIds}
+            chatSending={chatSending}
+            chatError={chatError}
             onSend={(question) => void sendChat(question)}
             onSaveExcerpt={(message) => saveExcerpt(message.content, message.id)}
-            onOpenNotebook={() => {
-              setActiveAtomId(senseId)
-              setRightTab('notebook')
-            }}
-          />}
-        </aside>}
+            onSaveSense={() => sense && saveExcerpt(`${sense.term}（${sense.contextualMeaning}）`)}
+            onRetrySense={() => void runSenseLookup(queryTerm || sense?.term || '', lastContextRef.current)}
+            vaultReady={vaultApi.ready}
+            vaultRootName={vaultApi.rootName}
+            vaultTarget={noteFolderPath(readingMirror || null)}
+            vaultBusy={vaultActionBusy}
+            vaultMessage={vaultActionMessage}
+            onOpenNotesSpace={() => switchSpace('notes')}
+            onSaveSenseToVault={saveSenseToVault}
+            onGenerateCompleteNote={generateCompleteNote}
+            onSaveNoteToVault={saveNotebookNoteToVault}
+          />
+        </div>}
       </div>
+      ) : activeSpace === 'notes' ? (
+        <NotesSpace
+          vault={vaultApi}
+          atoms={atoms}
+          notes={notebookNotes}
+          recentRoots={vaultState.recentRoots}
+          openPaths={notesSpace.openPaths}
+          activePath={notesSpace.activePath}
+          view={notesSpace.view}
+          treeWidth={notesSpace.treeWidth}
+          sideOpen={notesSpace.sideOpen}
+          sideWidth={notesSpace.sideWidth}
+          collapsed={vaultState.collapsed}
+          onOpen={openNote}
+          onClose={closeNote}
+          onActivate={activateNote}
+          onView={setNoteView}
+          onTreeWidth={resizeNoteTree}
+          onTreeReset={() => setNotesSpace((current) => ({ ...current, treeWidth: DEFAULT_TREE_WIDTH }))}
+          onSideWidth={resizeNoteSide}
+          onSideReset={() => setNotesSpace((current) => ({ ...current, sideWidth: DEFAULT_SIDE_WIDTH }))}
+          onToggleCollapsed={toggleVaultCollapsed}
+          onToggleSide={toggleNoteSide}
+          onSwitchSpace={switchSpace}
+          onOpenSense={(id) => { setActiveAtomId(id); setRightTab('notebook'); switchSpace('reader') }}
+          readingContext={readingContext}
+          reportTime={state.settings.dailyReportTime}
+          onOpenSource={openVaultSource}
+          pendingSenseCount={pendingSenseAtoms.length}
+          onSavePendingSenses={savePendingSenses}
+          onCreateBlankNote={() => void createBlankNote()}
+        />
+      ) : (
+        <ChatSpace
+          vault={vaultApi}
+          threads={chatSpace.threads}
+          activeThreadId={chatSpace.activeThreadId}
+          historyWidth={chatSpace.historyWidth}
+          pickerWidth={chatSpace.pickerWidth}
+          historyOpen={chatSpace.historyOpen}
+          pickerOpen={chatSpace.pickerOpen}
+          model={model}
+          onCreateThread={createThread}
+          onActivateThread={activateThread}
+          onUpdateThread={updateThread}
+          onDeleteThread={deleteThread}
+          onHistoryWidth={resizeHistory}
+          onHistoryReset={() => setChatSpace((current) => ({ ...current, historyWidth: DEFAULT_HISTORY_WIDTH }))}
+          onPickerWidth={resizePicker}
+          onPickerReset={() => setChatSpace((current) => ({ ...current, pickerWidth: DEFAULT_PICKER_WIDTH }))}
+          onToggleColumn={toggleChatColumn}
+          onSwitchSpace={switchSpace}
+          onOpenNote={openNoteInNotesSpace}
+        />
+      )}
 
-      {anchor && senseLoading && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
+      {activeSpace === 'reader' && anchor && senseLoading && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
         <div className="popover-title"><span className="provider-dot openai" />上下文义项<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
         <div className="popover-loading"><span className="mini-spinner" /> 正在判断义项…</div>
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
       </div>}
 
-      {anchor && !senseLoading && sense && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
+      {activeSpace === 'reader' && anchor && !senseLoading && sense && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
         <div className="popover-title"><span className="provider-dot openai" />上下文义项{sense.partOfSpeech ? ` · ${sense.partOfSpeech}` : ''}<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
         <p className="popover-meaning">{sense.contextualMeaning}</p>
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
       </div>}
 
-      {anchor && !senseLoading && !sense && senseError && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
+      {activeSpace === 'reader' && anchor && !senseLoading && !sense && senseError && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
         <div className="popover-title"><span className="provider-dot mock" />义项查询失败</div>
         <p className="popover-meaning">{senseError}</p>
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>

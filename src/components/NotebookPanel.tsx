@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ChevronLeft, Link2, Plus, Trash2 } from 'lucide-react'
+import { ChevronLeft, Library, Link2, Plus, Trash2 } from 'lucide-react'
 import SenseCard from './SenseCard'
 import { noteLabel } from '../lib/notebook'
 import type { NotebookNote, SenseAtom } from '../types'
@@ -9,14 +9,19 @@ interface NotebookPanelProps {
   notes: NotebookNote[]
   activeAtomId: string | null
   model: string
+  vaultReady: boolean
+  vaultRootName: string
   onSelectAtom: (id: string | null) => void
   onDeleteAtom: (id: string) => void
   onAddNote: (body: string) => void
   onDeleteNote: (id: string) => void
+  onSaveToVault: (note: NotebookNote) => void
+  onOpenNotesSpace: () => void
 }
 
 export default function NotebookPanel({
-  atoms, notes, activeAtomId, model, onSelectAtom, onDeleteAtom, onAddNote, onDeleteNote,
+  atoms, notes, activeAtomId, model, vaultReady, vaultRootName,
+  onSelectAtom, onDeleteAtom, onAddNote, onDeleteNote, onSaveToVault, onOpenNotesSpace,
 }: NotebookPanelProps) {
   const [draft, setDraft] = useState('')
   const activeAtom = atoms.find((atom) => atom.id === activeAtomId) || null
@@ -48,7 +53,12 @@ export default function NotebookPanel({
               <li key={note.id}>
                 <span className="note-date-chip">{noteLabel(note)}</span>
                 <p>{note.body}</p>
-                <button type="button" title="删除这份笔记" onClick={() => onDeleteNote(note.id)}><Trash2 size={12} /></button>
+                <div className="note-linked-actions">
+                  <button type="button" title={vaultReady ? `写入 ${vaultRootName}` : '先在笔记空间里选择 vault'} onClick={() => onSaveToVault(note)}>
+                    <Library size={11} /> 存入 vault
+                  </button>
+                  <button type="button" title="删除这份笔记" onClick={() => onDeleteNote(note.id)}><Trash2 size={12} /></button>
+                </div>
               </li>
             ))}
           </ul>
@@ -100,14 +110,20 @@ export default function NotebookPanel({
       </section>
 
       <section className="sense-block">
-        <h4><Link2 size={11} /> 笔记（{notes.length}）</h4>
+        <h4>
+          <Link2 size={11} /> 笔记（{notes.length}）
+          <button type="button" className="note-open-space" onClick={onOpenNotesSpace} title={`在笔记空间里管理 ${vaultRootName}`}>笔记空间</button>
+        </h4>
         {notes.length === 0 && <p className="sense-plain">对话或义项卡中都能把内容存成笔记。</p>}
         <ul className="note-all-list">
           {notes.map((note) => (
             <li key={note.id}>
               <div className="note-head">
                 <span className="note-date-chip">{noteLabel(note)}</span>
-                <button type="button" title="删除这份笔记" onClick={() => onDeleteNote(note.id)}><Trash2 size={12} /></button>
+                <span className="note-head-actions">
+                  <button type="button" title={vaultReady ? `写入 ${vaultRootName}` : '先在笔记空间里选择 vault'} onClick={() => onSaveToVault(note)}><Library size={12} /></button>
+                  <button type="button" title="删除这份笔记" onClick={() => onDeleteNote(note.id)}><Trash2 size={12} /></button>
+                </span>
               </div>
               <p>{note.body}</p>
               {note.senseIds.length > 0 && (

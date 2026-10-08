@@ -1,0 +1,1166 @@
+// End-to-end smoke test for the Paperlight app.
+//
+// Started by `npm run smoke` (PAPERLIGHT_SMOKE=1 electron .). It drives the real
+// window: opens a generated 120-page PDF through the app bridge, checks that the
+// reader virtualises pages, opens a second tab, drags the reader/assistant
+// divider and verifies the persisted app state. Screenshots land in
+// tests/artifacts/ and the process exits non-zero when a check fails.
+
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { app } from 'electron'
+import { createTestPdf } from '../tests/fixtures/make-pdf.mjs'
+import { createTestEpub } from '../tests/fixtures/make-epub.mjs'
+
+const RESULTS = []
+let failures = 0
+
+function record(name, ok, detail) {
+  RESULTS.push({ name, ok, detail })
+  if (!ok) failures += 1
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`)
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function evaluate(webContents, expression) {
+  return webContents.executeJavaScript(expression, true)
+}
+
+async function waitFor(webContents, expression, { timeout = 20000, interval = 120, label = expression } = {}) {
+  const started = Date.now()
+  for (;;) {
+    try {
+      const value = await evaluate(webContents, expression)
+      if (value) return value
+    } catch (error) {
+      if (Date.now() - started > timeout) throw error
+    }
+    if (Date.now() - started > timeout) throw new Error(`timed out waiting for ${label}`)
+    await sleep(interval)
+  }
+}
+
+// pdf.js streams a page's text content from its worker, and that stream can
+// stall. The reader now recovers (page retry, then a document rebuild), so this
+// helper accepts either outcome and reports which path was taken.
+async function ensureTextLayer(wc, label, { timeout = 60000 } = {}) {
+  const started = Date.now()
+  let recovered = false
+  while (Date.now() - started < timeout) {
+    const state = await evaluate(wc, `({
+      spans: document.querySelectorAll('.textLayer span').length,
+      noText: document.querySelectorAll('.page-no-text').length,
+      errors: document.querySelectorAll('.page-error').length,
+    })`)
+    if (state.spans >= 4) return { ok: true, recovered, waitedMs: Date.now() - started, label }
+    if (state.errors > 0) return { ok: false, reason: 'page render error', label }
+    if (state.noText > 0) {
+      recovered = true
+      await evaluate(wc, `(() => {
+        const retry = document.querySelector('.page-no-text .page-retry')
+        const reload = document.querySelector('.page-no-text .page-reload')
+        const button = retry || reload
+        if (button) button.click()
+        return true
+      })()`)
+      await sleep(700)
+      continue
+    }
+    await sleep(250)
+  }
+  return { ok: false, reason: 'timeout', waitedMs: Date.now() - started, label }
+}
+
+// The renderer reloads during the restore check, which drops page state, so the
+// canned API responses are installed through one reusable helper.
+async function installSenseStub(wc, stubSense) {
+  await evaluate(wc, `(() => {
+    const original = window.fetch.bind(window)
+    window.fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : (input && input.url) || ''
+      if (url.includes('/api/sense')) {
+        const body = init && init.body ? JSON.parse(init.body) : {}
+        const payload = body.task === 'lookup'
+          ? ${JSON.stringify(stubSense)}
+          : { answer: 'numerous 侧重数量多，比 many 更书面。' }
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return original(input, init)
+    }
+    return true
+  })()`)
+}
+
+// The daily summary and note endpoints go through the same local proxy as the
+// sense endpoint. The stub keeps the vault checks fully offline while still
+// recording what the renderer actually sent (used to prove strict grounding).
+async function installVaultStub(wc) {
+  await evaluate(wc, `(() => {
+    window.__vaultChatRequests = []
+    window.__vaultReportRequests = []
+    const original = window.fetch.bind(window)
+    window.fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : (input && input.url) || ''
+      const body = init && init.body ? JSON.parse(init.body) : {}
+      if (url.includes('/api/vault-chat')) {
+        window.__vaultChatRequests.push(body)
+        const context = Array.isArray(body.context) ? body.context : []
+        const grounded = context.length > 0
+        const answer = grounded
+          ? '依据 [[' + context[0].path + ']]：vault 里已有的一份笔记。'
+          : '（未限定 vault 的一般回答）'
+        return Promise.resolve(new Response(JSON.stringify({ answer, grounded, sources: context.map((item) => item.path) }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      if (url.includes('/api/daily-summary')) {
+        window.__vaultReportRequests.push(body)
+        const count = (body.records || []).length
+        const findings = (body.findings || []).length
+        return Promise.resolve(new Response(JSON.stringify({ summary: 'AI 日报：' + (body.date || '') + ' 收录 ' + count + ' 条记录、' + findings + ' 条专项发现。' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      if (url.includes('/api/note')) {
+        return Promise.resolve(new Response(JSON.stringify({ note: { title: 'AI 完整笔记', markdown: '# AI 完整笔记\\n\\n## 核心含义\\n\\n由测试桩生成。' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return original(input, init)
+    }
+    return true
+  })()`)
+}
+
+async function screenshot(window, artifacts, name) {
+  const image = await window.webContents.capturePage()
+  const file = join(artifacts, name)
+  writeFileSync(file, image.toPNG())
+  return file
+}
+
+export async function runSmokeTest({ window, projectRoot }) {
+  // A local key so the AI code paths really run — every AI endpoint the smoke
+  // exercises is intercepted by install*Stub, so nothing leaves this machine.
+  process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'sk-paperlight-smoke-stub'
+  const artifacts = join(projectRoot, 'tests', 'artifacts')
+  mkdirSync(artifacts, { recursive: true })
+  const library = join(tmpdir(), 'paperlight-smoke-library')
+  rmSync(library, { recursive: true, force: true })
+  mkdirSync(join(library, 'collection'), { recursive: true })
+  const bigPdf = join(library, 'Foucault-liberal-political-economy.pdf')
+  const secondPdf = join(library, 'collection', 'Knowledge-and-Power.pdf')
+  writeFileSync(bigPdf, createTestPdf({ pages: 120, title: 'Foucault and Liberal Political Economy' }))
+  writeFileSync(secondPdf, createTestPdf({ pages: 24, title: 'Knowledge and Power' }))
+  const mixedPdf = join(library, 'collection', 'Mixed-Geometry.pdf')
+  writeFileSync(mixedPdf, createTestPdf({ pages: 30, title: 'Mixed Geometry', landscapePages: [4, 11, 17] }))
+  const markdownPath = join(library, 'collection', 'Reading-Notes.md')
+  writeFileSync(markdownPath, [
+    '# Paperlight Markdown Notes',
+    '',
+    'These classifications operate within a broader framework of knowledge.',
+    '',
+    '## Section two',
+    '',
+    '- contextual sense lookup',
+    '- reflowed reading position',
+    '',
+    '```js',
+    'const paperlight = true',
+    '```',
+    '',
+    '> A quote that should render as a blockquote.',
+  ].join('\n'))
+  const textPath = join(library, 'collection', 'Plain-Notes.txt')
+  writeFileSync(textPath, [
+    'These classifications operate within a broader framework of knowledge.',
+    '',
+    'Paperlight plain text paragraph two, also selectable.',
+  ].join('\n'))
+  const epubPath = join(library, 'collection', 'Paperlight-Book.epub')
+  writeFileSync(epubPath, await createTestEpub({
+    title: 'Paperlight Book',
+    author: 'Paperlight',
+    chapters: ['Alpha Chapter', 'Beta Chapter'],
+  }))
+
+  const wc = window.webContents
+  const consoleLog = []
+  wc.on('console-message', (...args) => {
+    const details = args[0] && typeof args[0] === 'object' && 'message' in args[0] ? args[0] : null
+    const message = details ? `${details.level}: ${details.message}` : args.slice(1).join(' ')
+    consoleLog.push(message)
+    if (/error|warn/i.test(message)) console.log(`  [renderer] ${message}`)
+  })
+  // Capture renderer-side errors so a canvas failure can be traced to its origin.
+  await evaluate(wc, `(() => {
+    window.__paperlightErrors = window.__paperlightErrors || []
+    window.addEventListener('error', (event) => window.__paperlightErrors.push('error: ' + (event.message || '') + ' @ ' + (event.filename || '') + ':' + (event.lineno || 0)))
+    window.addEventListener('unhandledrejection', (event) => {
+      const reason = event.reason
+      window.__paperlightErrors.push('rejection: ' + (reason && reason.stack ? reason.stack : String(reason)))
+    })
+    return true
+  })()`)
+  const DIAGNOSTIC = `(() => ({
+    tabs: Array.from(document.querySelectorAll('.doc-tab-name')).map(n => n.textContent),
+    status: document.querySelector('.reader-status')?.innerText || null,
+    pageError: document.querySelector('.page-error')?.innerText || null,
+    slots: document.querySelectorAll('.page-slot').length,
+    canvases: document.querySelectorAll('.pdf-page canvas').length,
+    textSpans: document.querySelectorAll('.textLayer span').length,
+    toolbar: document.querySelector('.reader-toolbar')?.innerText?.replace(/\\n/g, ' | ') || null,
+    readyState: document.readyState,
+    pageInput: document.querySelector('.page-number-input')?.value ?? null,
+    captions: Array.from(document.querySelectorAll('.page-caption')).map((n) => n.textContent),
+    canvasSizes: Array.from(document.querySelectorAll('.pdf-page canvas')).map((c) => c.width + 'x' + c.height).join(','),
+    loadingOverlays: document.querySelectorAll('.page-loading').length,
+    textLayerChildren: document.querySelector('.textLayer')?.childElementCount ?? -1,
+    stackHeight: Math.round(document.querySelector('.pages-stack')?.getBoundingClientRect().height || 0),
+    rootChildren: document.getElementById('root')?.childElementCount ?? -1,
+    bodyText: (document.body?.innerText || '').replace(/\\n+/g, ' ').slice(0, 200),
+    errors: (window.__paperlightErrors || []).slice(-6),
+  }))()`
+  try {
+    await waitFor(wc, `document.querySelectorAll('.welcome-card').length > 0`, { label: 'welcome screen' })
+    record('welcome screen renders without a document', true)
+    await screenshot(window, artifacts, '01-welcome.png')
+
+    // The packaged app serves its own AI proxy; in dev the Vite plugin does.
+    const api = await evaluate(wc, `fetch('/api/translation-config').then(r => r.json())`)
+    record('local AI proxy answers on the app origin', typeof api?.configured === 'boolean', JSON.stringify(api))
+
+    // Open a folder through the same channel the native dialog uses.
+    wc.send('app:open-folder', library)
+    await waitFor(wc, `document.querySelectorAll('.explorer-entry').length >= 2`, { label: 'explorer listing' })
+    const listed = await evaluate(wc, `Array.from(document.querySelectorAll('.explorer-entry .entry-name')).map(n => n.textContent)`)
+    record('folder explorer lists the folder contents', listed.includes('collection') && listed.some((name) => name.endsWith('.pdf')), listed.join(', '))
+    await screenshot(window, artifacts, '02-explorer.png')
+
+    // Open the 120-page document and measure time to first painted page.
+    const openedAt = Date.now()
+    wc.send('app:open-paths', [bigPdf])
+    await waitFor(wc, `Array.from(document.querySelectorAll('.pdf-page canvas')).some((c) => c.width > 0)`, { label: 'first canvas paint', timeout: 20000 })
+    const firstPaintMs = Date.now() - openedAt
+    record('120-page PDF paints its first page quickly', firstPaintMs < 8000, `${firstPaintMs} ms`)
+    const firstText = await ensureTextLayer(wc, 'first page')
+    record('PDF text layer becomes selectable', firstText.ok, JSON.stringify(firstText))
+
+    const virtual = await evaluate(wc, `({
+      slots: document.querySelectorAll('.page-slot').length,
+      canvases: document.querySelectorAll('.pdf-page canvas').length,
+      stackHeight: document.querySelector('.pages-stack')?.getBoundingClientRect().height || 0,
+      total: document.querySelector('.page-total')?.textContent || '',
+    })`)
+    record('page virtualisation keeps only a few pages mounted', virtual.slots <= 5 && virtual.canvases <= 5, JSON.stringify(virtual))
+    record('reader reports the full page count', virtual.total.includes('120'), virtual.total)
+    record('page stack reserves the full scroll height', virtual.stackHeight > 50000, `${Math.round(virtual.stackHeight)} px`)
+    await screenshot(window, artifacts, '03-reader-120-pages.png')
+
+    // Jump to a far page through the toolbar input path.
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('.page-number-input')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, '90')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.page-number-input')?.value === '90'`, { label: 'jump to page 90' })
+    await ensureTextLayer(wc, 'page 90')
+    const page90 = await evaluate(wc, `({
+      captions: Array.from(document.querySelectorAll('.page-caption')).map(n => n.textContent),
+      mounted: document.querySelectorAll('.page-slot').length,
+    })`)
+    record('jumping to page 90 mounts that page only', page90.captions.includes('90') && page90.mounted <= 5, JSON.stringify(page90))
+    await screenshot(window, artifacts, '04-page-90.png')
+
+    // Second document -> second tab, then switch back.
+    wc.send('app:open-paths', [secondPdf])
+    await waitFor(wc, `document.querySelectorAll('.doc-tab').length === 2`, { label: 'second tab' })
+    const tabNames = await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab-name')).map(n => n.textContent)`)
+    record('multiple PDFs stay open as tabs', tabNames.length === 2 && tabNames.some((n) => n.includes('Knowledge')), tabNames.join(', '))
+
+    await evaluate(wc, `document.querySelectorAll('.doc-tab')[0].click()`)
+    await waitFor(wc, `document.querySelector('.page-total')?.textContent.includes('120')`, { label: 'switch back to the first tab' })
+    const restored = await evaluate(wc, `document.querySelector('.page-number-input')?.value`)
+    record('switching tabs restores the reading position', restored === '90', `page ${restored}`)
+    await screenshot(window, artifacts, '05-multi-tab.png')
+
+    // Drag the reader/assistant divider like a user would.
+    const widthExpr = `Math.round(document.querySelector('.right-pane').getBoundingClientRect().width)`
+    const before = await evaluate(wc, widthExpr)
+    const handle = await evaluate(wc, `(() => {
+      const splitters = document.querySelectorAll('.splitter')
+      const el = splitters[splitters.length - 1]
+      const rect = el.getBoundingClientRect()
+      window.__dragProbe = { down: 0, move: 0, up: 0 }
+      el.addEventListener('pointerdown', () => { window.__dragProbe.down += 1 })
+      window.addEventListener('pointermove', () => { window.__dragProbe.move += 1 })
+      window.addEventListener('pointerup', () => { window.__dragProbe.up += 1 })
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }
+    })()`)
+    wc.sendInputEvent({ type: 'mouseMove', x: handle.x, y: handle.y })
+    await sleep(60)
+    wc.sendInputEvent({ type: 'mouseDown', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
+    for (let step = 1; step <= 6; step += 1) {
+      wc.sendInputEvent({ type: 'mouseMove', x: handle.x - step * 20, y: handle.y, button: 'left' })
+      await sleep(40)
+    }
+    wc.sendInputEvent({ type: 'mouseUp', x: handle.x - 120, y: handle.y, button: 'left', clickCount: 1 })
+    await sleep(300)
+    let after = await evaluate(wc, widthExpr)
+    let method = 'real pointer drag'
+    if (!(after > before + 60)) {
+      // Deterministic fallback for headless runs without real pointer input.
+      method = 'synthetic pointer events'
+      await evaluate(wc, `(() => {
+        const splitters = document.querySelectorAll('.splitter')
+        const el = splitters[splitters.length - 1]
+        const rect = el.getBoundingClientRect()
+        const opts = (x) => ({ bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: x, clientY: Math.round(rect.top + 40) })
+        window.__paperlightDrag = { el, opts, x: rect.left + rect.width / 2 }
+        el.dispatchEvent(new PointerEvent('pointerdown', opts(window.__paperlightDrag.x)))
+        return true
+      })()`)
+      await sleep(80)
+      for (let step = 1; step <= 8; step += 1) {
+        await evaluate(wc, `(() => {
+          const drag = window.__paperlightDrag
+          drag.el.dispatchEvent(new PointerEvent('pointermove', drag.opts(drag.x - ${step} * 15)))
+          return true
+        })()`)
+        await sleep(30)
+      }
+      await evaluate(wc, `(() => {
+        const drag = window.__paperlightDrag
+        drag.el.dispatchEvent(new PointerEvent('pointerup', drag.opts(drag.x - 120)))
+        return true
+      })()`)
+      await sleep(300)
+      after = await evaluate(wc, widthExpr)
+    }
+    record('dragging the divider resizes the reading desk', after > before + 60, `${before} px → ${after} px via ${method}`)
+    const probe = await evaluate(wc, `window.__dragProbe`)
+    record('native pointer input reaches the divider', probe.down > 0 && probe.move > 0, JSON.stringify(probe))
+    await screenshot(window, artifacts, '06-splitter-dragged.png')
+
+    // The reader must still be usable after the resize.
+    const stillMounted = await evaluate(wc, `document.querySelectorAll('.page-slot').length`)
+    record('reader keeps rendering after the resize', stillMounted >= 1 && stillMounted <= 5, `${stillMounted} mounted pages`)
+
+    // Move the divider back with the keyboard path and read the result after React commits.
+    const keyboardBefore = await evaluate(wc, widthExpr)
+    await evaluate(wc, `(() => {
+      const splitters = document.querySelectorAll('.splitter')
+      const el = splitters[splitters.length - 1]
+      for (let i = 0; i < 4; i += 1) el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+      return true
+    })()`)
+    await sleep(250)
+    const keyboardAfter = await evaluate(wc, widthExpr)
+    record('divider is keyboard accessible', keyboardBefore - keyboardAfter > 20, `${keyboardBefore} px → ${keyboardAfter} px with ArrowRight`)
+
+    // Persisted app state (the app debounces disk writes, so poll).
+    const stateFile = join(app.getPath('userData'), 'paperlight-state.json')
+    let persisted = null
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await sleep(300)
+      try {
+        const disk = JSON.parse(readFileSync(stateFile, 'utf8'))
+        if (disk.session.tabs.length === 2 && disk.layout.rightWidth > 0 && disk.session.activeFolder) {
+          persisted = disk
+          break
+        }
+        persisted = persisted || disk
+      } catch {
+        // Not written yet.
+      }
+    }
+    record(
+      'app state persists tabs, folder and pane sizes',
+      Boolean(persisted && persisted.session.tabs.length === 2 && persisted.layout.rightWidth > 0 && persisted.session.activeFolder),
+      persisted ? `tabs=${persisted.session.tabs.length} rightWidth=${persisted.layout.rightWidth}` : 'state file missing',
+    )
+
+    await evaluate(wc, `(() => { document.querySelectorAll('.doc-tab-close')[0].click(); return true })()`)
+    await waitFor(wc, `document.querySelectorAll('.doc-tab').length === 1`, { label: 'tab closed' })
+    const remaining = await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab-name')).map(n => n.textContent)`)
+    record('closing a tab keeps the other document open', remaining.length === 1, remaining.join(', '))
+
+    await screenshot(window, artifacts, '07-final.png')
+
+    // Drive the real assistant loop without touching the network: stub the local
+    // /api/sense route, select a word in the page, add the sense to the notebook,
+    // write a note and ask a follow-up question.
+    const stubSense = {
+      sense: {
+        term: 'numerous',
+        lemma: 'numerous',
+        partOfSpeech: 'adjective',
+        senseId: 'many',
+        contextualMeaning: '众多的、大量的',
+        definition: 'existing in large numbers',
+        contextSentence: 'his numerous readers and followers',
+        examples: [{ text: 'his numerous readers', translation: '他众多的读者', sourceType: 'ai_generated', citation: null }],
+        guidance: {
+          scenarios: ['书面表达'],
+          advice: ['后面接可数名词复数'],
+          frequency: '常见',
+          alternatives: [], synonyms: [], antonyms: [],
+          morphology: { root: 'numer', prefix: '', suffix: '-ous', note: '' },
+        },
+      },
+    }
+    await installSenseStub(wc, stubSense)
+
+    const selectionMade = await evaluate(wc, `(() => {
+      const spans = Array.from(document.querySelectorAll('.textLayer span')).filter((span) => (span.textContent || '').trim().length > 4)
+      if (spans.length === 0) return false
+      const range = document.createRange()
+      range.selectNodeContents(spans[0])
+      const selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.querySelector('.reader-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      return true
+    })()`)
+    record('selecting text in the page starts a contextual sense lookup', selectionMade === true)
+    await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'sense card' })
+    await screenshot(window, artifacts, '08-sense.png')
+
+    await evaluate(wc, `(() => { document.querySelector('.sense-add').click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.sense-add')?.classList.contains('added')`, { label: 'sense added to the notebook' })
+    record('the contextual sense can be added to the notebook', true)
+
+    await evaluate(wc, `(() => {
+      const tab = Array.from(document.querySelectorAll('.right-tabs button')).find((b) => b.textContent.includes('记录本'))
+      tab.click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.sense-head h3')?.textContent === 'numerous'`, { label: 'notebook atom detail' })
+    record('the notebook opens the term↔sense atom that was just added', true)
+
+    // Write a note through the real UI.
+    await waitFor(wc, `document.querySelector('.note-editor') !== null`, { label: 'note editor' })
+    await evaluate(wc, `(() => {
+      const textarea = document.querySelector('.note-editor')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(textarea, 'numerous 后面接可数名词复数：his numerous readers。')
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `!document.querySelector('.small-save')?.disabled`, { label: 'note save button' })
+    await evaluate(wc, `(() => { document.querySelector('.small-save').click(); return true })()`)
+    await waitFor(wc, `document.querySelectorAll('.note-linked-list li').length === 1`, { label: 'saved note' })
+    const savedNote = await evaluate(wc, `({
+      body: document.querySelector('.note-linked-list p')?.textContent || '',
+      label: document.querySelector('.note-date-chip')?.textContent || '',
+    })`)
+    record('a note written in the desk gets its daily ordinal', savedNote.body.includes('his numerous readers') && /第 1 份笔记/.test(savedNote.label), JSON.stringify(savedNote))
+
+    await evaluate(wc, `(() => { document.querySelector('.back-to-notes').click(); return true })()`)
+    await waitFor(wc, `document.querySelectorAll('.atom-list li').length === 1`, { label: 'notebook list' })
+    const notebookList = await evaluate(wc, `({
+      atom: document.querySelector('.atom-list strong')?.textContent || '',
+      noteCount: document.querySelector('.atom-meta')?.textContent || '',
+      notes: document.querySelectorAll('.note-all-list li').length,
+    })`)
+    record('the notebook list shows the atom and its linked note', notebookList.atom === 'numerous' && notebookList.notes === 1 && notebookList.noteCount.includes('1 份笔记'), JSON.stringify(notebookList))
+
+    // Follow-up question through the chat panel.
+    await evaluate(wc, `(() => {
+      const tab = Array.from(document.querySelectorAll('.right-tabs button')).find((b) => b.textContent.includes('对话'))
+      tab.click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.chat-input textarea') !== null`, { label: 'chat input' })
+    await evaluate(wc, `(() => {
+      const textarea = document.querySelector('.chat-input textarea')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(textarea, 'numerous 和 many 有什么区别？')
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    await evaluate(wc, `(() => { document.querySelector('.chat-input button').click(); return true })()`)
+    await waitFor(wc, `Array.from(document.querySelectorAll('.chat-messages p')).some((p) => p.textContent.includes('更书面'))`, { label: 'chat answer' })
+    record('follow-up questions are answered in the chat panel', true)
+    await screenshot(window, artifacts, '09-assistant.png')
+
+    // Mixed page geometry: a landscape fold-out must be drawn at its own scale,
+    // and correcting its height must not move the page being read.
+    wc.send('app:open-paths', [mixedPdf])
+    await waitFor(wc, `Array.from(document.querySelectorAll('.doc-tab-name')).some((n) => n.textContent.includes('Mixed-Geometry'))`, { label: 'mixed-geometry tab' })
+    await ensureTextLayer(wc, 'mixed-geometry')
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('.page-number-input')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, '12')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.page-number-input')?.value === '12'`, { label: 'jump to page 12' })
+    await waitFor(wc, `document.querySelector('.pdf-page-shell[data-page-number="11"] canvas') !== null`, { label: 'landscape page mounted' })
+    const beforeReflow = await evaluate(wc, `Math.round(document.querySelector('.pdf-page-shell[data-page-number="12"]').getBoundingClientRect().top)`)
+    await sleep(1200)
+    const afterReflow = await evaluate(wc, `({
+      top: Math.round(document.querySelector('.pdf-page-shell[data-page-number="12"]').getBoundingClientRect().top),
+      page: document.querySelector('.page-number-input')?.value,
+      canvasWidth: Math.round(parseFloat(document.querySelector('.pdf-page-shell[data-page-number="11"] canvas').style.width)),
+      boxWidth: Math.round(parseFloat(document.querySelector('.pdf-page-shell[data-page-number="11"] .pdf-page').style.width)),
+    })`)
+    record(
+      'a landscape page is drawn at its own scale, not page 1\'s',
+      Math.abs(afterReflow.canvasWidth - afterReflow.boxWidth) <= 2,
+      `canvas ${afterReflow.canvasWidth}px vs slot ${afterReflow.boxWidth}px`,
+    )
+    record(
+      'correcting a page above the reading position does not move it',
+      afterReflow.page === '12' && Math.abs(afterReflow.top - beforeReflow) <= 20,
+      `viewport top ${beforeReflow}px → ${afterReflow.top}px, page ${afterReflow.page}`,
+    )
+
+    // Zoom re-layouts every box; the page being read must stay put.
+    const zoomBefore = await evaluate(wc, `({
+      page: document.querySelector('.page-number-input')?.value,
+      top: Math.round(document.querySelector('.pdf-page-shell[data-page-number="12"]').getBoundingClientRect().top),
+    })`)
+    await evaluate(wc, `(() => { document.querySelector('.zoom-controls .toolbar-button').click(); return true })()`)
+    await sleep(400)
+    const zoomAfter = await evaluate(wc, `({
+      page: document.querySelector('.page-number-input')?.value,
+      top: Math.round(document.querySelector('.pdf-page-shell[data-page-number="12"]').getBoundingClientRect().top),
+      label: document.querySelector('.zoom-label')?.textContent,
+    })`)
+    record(
+      'zooming keeps the reading position',
+      zoomAfter.page === zoomBefore.page && Math.abs(zoomAfter.top - zoomBefore.top) <= 20,
+      `page ${zoomBefore.page}@${zoomBefore.top}px → ${zoomAfter.page}@${zoomAfter.top}px (${zoomAfter.label})`,
+    )
+    await screenshot(window, artifacts, '11-mixed-geometry.png')
+
+    await sleep(900)
+    const savedState = JSON.parse(readFileSync(join(app.getPath('userData'), 'paperlight-state.json'), 'utf8'))
+    // Session restore: a reload behaves like a relaunch (the state file is the
+    // only thing carrying over), so the whole workspace must come back by itself.
+    const restoreBefore = await evaluate(wc, `({
+      tabs: document.querySelectorAll('.doc-tab').length,
+      width: Math.round(document.querySelector('.right-pane').getBoundingClientRect().width),
+      entries: document.querySelectorAll('.explorer-entry').length,
+    })`)
+    const reloaded = new Promise((resolve) => wc.once('did-finish-load', resolve))
+    wc.reload()
+    await reloaded
+    await waitFor(wc, `document.querySelectorAll('.doc-tab').length >= 1`, { label: 'restored tab', timeout: 30000 })
+    await ensureTextLayer(wc, 'restored page render')
+    await waitFor(wc, `document.querySelectorAll('.explorer-entry').length >= 2`, { label: 'restored folder listing' })
+    const restoreAfter = await evaluate(wc, `({
+      tabs: document.querySelectorAll('.doc-tab').length,
+      width: Math.round(document.querySelector('.right-pane').getBoundingClientRect().width),
+      entries: document.querySelectorAll('.explorer-entry').length,
+      notes: Array.from(document.querySelectorAll('.right-tabs button')).map((b) => b.textContent).join('|'),
+    })`)
+    record(
+      'the whole workspace is restored after a restart',
+      restoreAfter.tabs === restoreBefore.tabs
+        && restoreAfter.entries === restoreBefore.entries
+        && Math.abs(restoreAfter.width - restoreBefore.width) <= 2
+        && /记录本\s*1/.test(restoreAfter.notes),
+      `before=${JSON.stringify(restoreBefore)} after=${JSON.stringify(restoreAfter)}`,
+    )
+    await screenshot(window, artifacts, '10-restored-session.png')
+
+    record(
+      'notebook data is persisted to the app state file',
+      savedState.notebook.atoms.length === 1 && savedState.notebook.notes.length === 1 && Object.keys(savedState.notebook.chat).length === 1,
+      `atoms=${savedState.notebook.atoms.length} notes=${savedState.notebook.notes.length} chats=${Object.keys(savedState.notebook.chat).length}`,
+    )
+    await screenshot(window, artifacts, '12-final-state.png')
+
+    // ---------------------------------------------------------------- Markdown
+    await installSenseStub(wc, stubSense)
+    wc.send('app:open-paths', [markdownPath])
+    await waitFor(wc, `document.querySelectorAll('.flow-heading').length >= 2`, { label: 'markdown headings' })
+    const markdownView = await evaluate(wc, `({
+      headings: Array.from(document.querySelectorAll('.flow-heading')).map((n) => n.textContent),
+      paragraphs: document.querySelectorAll('.flow-paragraph').length,
+      lists: document.querySelectorAll('.flow-list li').length,
+      code: document.querySelectorAll('.flow-code').length,
+      quote: document.querySelectorAll('.flow-quote').length,
+      total: document.querySelector('.page-total')?.textContent || '',
+    })`)
+    record('Markdown renders as structured text', markdownView.headings.length >= 2 && markdownView.lists === 2 && markdownView.code === 1 && markdownView.quote === 1, JSON.stringify(markdownView))
+
+    await evaluate(wc, `(() => {
+      const tab = Array.from(document.querySelectorAll('.sidebar-tabs button')).find((b) => b.textContent.includes('目录'))
+      tab.click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelectorAll('.outline-entry').length >= 2`, { label: 'markdown outline' })
+    const markdownOutline = await evaluate(wc, `Array.from(document.querySelectorAll('.outline-entry span')).map((n) => n.textContent)`)
+    record('Markdown headings become outline entries', markdownOutline.includes('Paperlight Markdown Notes') && markdownOutline.includes('Section two'), markdownOutline.join(' | '))
+
+    await evaluate(wc, `(() => {
+      const tab = Array.from(document.querySelectorAll('.sidebar-tabs button')).find((b) => b.textContent.includes('文件'))
+      tab.click()
+      return true
+    })()`)
+
+    // Selecting text in a reflowed document must reach the sense lookup.
+    await evaluate(wc, `(() => {
+      const paragraphs = Array.from(document.querySelectorAll('.flow-paragraph'))
+      const range = document.createRange()
+      range.selectNodeContents(paragraphs[0])
+      const selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.querySelector('.flow-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.query-meta')?.textContent.includes('Reading-Notes.md')`, { label: 'markdown selection handed to the assistant' })
+    record('selecting text in Markdown feeds the contextual sense lookup', true)
+    await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'markdown sense card' })
+    await screenshot(window, artifacts, '13-markdown.png')
+
+    // ------------------------------------------------------------------- text
+    wc.send('app:open-paths', [textPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'plain text tab' })
+    await waitFor(wc, `document.querySelectorAll('.flow-paragraph').length >= 2`, { label: 'plain text paragraphs' })
+    const textView = await evaluate(wc, `({
+      paragraphs: Array.from(document.querySelectorAll('.flow-paragraph')).map((n) => n.textContent.slice(0, 40)),
+      headings: document.querySelectorAll('.flow-heading').length,
+    })`)
+    record('plain text opens as readable paragraphs', textView.paragraphs.length >= 2 && textView.headings === 0, JSON.stringify(textView))
+
+    // ------------------------------------------------------------------- EPUB
+    wc.send('app:open-paths', [epubPath])
+    await waitFor(wc, `document.querySelectorAll('.epub-body p').length >= 2`, { label: 'epub chapter render' })
+    const epubView = await evaluate(wc, `({
+      heading: document.querySelector('.epub-body h1')?.textContent || '',
+      paragraphs: document.querySelectorAll('.epub-body p').length,
+      scripts: document.querySelectorAll('.epub-body script').length,
+      styles: document.querySelectorAll('.epub-body style, .epub-body link').length,
+      inlineStyles: document.querySelectorAll('.epub-body [style]').length,
+      image: (document.querySelector('.epub-body img') || {}).getAttribute ? document.querySelector('.epub-body img').getAttribute('src') : null,
+      linkTarget: document.querySelector('.epub-body a[target="_blank"]')?.getAttribute('href') || '',
+      total: document.querySelector('.page-total')?.textContent || '',
+    })`)
+    record('EPUB chapter renders with its heading and text', epubView.heading === 'Alpha Chapter' && epubView.paragraphs >= 2 && epubView.total.includes('第 1 章'), JSON.stringify({ heading: epubView.heading, total: epubView.total }))
+    record('EPUB markup is sanitized (no scripts, styles or inline CSS)', epubView.scripts === 0 && epubView.styles === 0 && epubView.inlineStyles === 0, JSON.stringify(epubView))
+    record('EPUB images resolve to archive blobs and links open externally', String(epubView.image).startsWith('blob:') && epubView.linkTarget === 'https://example.com', `src=${String(epubView.image).slice(0, 24)}… href=${epubView.linkTarget}`)
+
+    await evaluate(wc, `(() => {
+      const tab = Array.from(document.querySelectorAll('.sidebar-tabs button')).find((b) => b.textContent.includes('目录'))
+      tab.click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelectorAll('.outline-entry').length >= 2`, { label: 'epub outline' })
+    const epubOutline = await evaluate(wc, `Array.from(document.querySelectorAll('.outline-entry span')).map((n) => n.textContent)`)
+    record('EPUB table of contents is available', epubOutline.includes('Alpha Chapter') && epubOutline.includes('Beta Chapter'), epubOutline.join(' | '))
+
+    // Chapter navigation.
+    await evaluate(wc, `(() => {
+      const tab = Array.from(document.querySelectorAll('.sidebar-tabs button')).find((b) => b.textContent.includes('文件'))
+      tab.click()
+      const chapterEntry = Array.from(document.querySelectorAll('.outline-entry')).find((b) => b.textContent.includes('Beta Chapter'))
+      return true
+    })()`)
+    await evaluate(wc, `(() => {
+      document.querySelectorAll('.page-navigation .toolbar-button')[1].click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Beta Chapter'`, { label: 'next chapter' })
+    const chapterTwo = await evaluate(wc, `document.querySelector('.page-total')?.textContent || ''`)
+    record('EPUB chapter navigation works from the toolbar', chapterTwo.includes('第 2 章'), chapterTwo)
+
+    // Selecting inside a chapter feeds the assistant, and the position persists.
+    await evaluate(wc, `(() => {
+      const paragraphs = Array.from(document.querySelectorAll('.epub-body p'))
+      const range = document.createRange()
+      range.selectNodeContents(paragraphs[0])
+      const selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.querySelector('.flow-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.query-meta')?.textContent.includes('Paperlight-Book.epub')`, { label: 'epub selection handed to the assistant' })
+    record('selecting text inside an EPUB chapter feeds the sense lookup', true)
+
+    // The app writes its state through a 400 ms debounce; poll instead of
+    // guessing, and report the browser copy when the file disagrees.
+    const statePath = join(app.getPath('userData'), 'paperlight-state.json')
+    let epubTab = null
+    let diskTabs = -1
+    for (let attempt = 0; attempt < 20 && !epubTab; attempt += 1) {
+      await sleep(300)
+      try {
+        const disk = JSON.parse(readFileSync(statePath, 'utf8'))
+        diskTabs = disk.session.tabs.length
+        epubTab = disk.session.tabs.find((tab) => tab.path.endsWith('Paperlight-Book.epub'))
+      } catch {
+        diskTabs = -1
+      }
+    }
+    const browserTabs = await evaluate(wc, `(() => {
+      try { return JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')?.session?.tabs?.length ?? -1 } catch { return -2 }
+    })()`)
+    record('EPUB chapter position is persisted', epubTab?.chapterIndex === 1, `chapterIndex=${epubTab?.chapterIndex} diskTabs=${diskTabs} browserTabs=${browserTabs}`)
+    await screenshot(window, artifacts, '14-epub.png')
+
+    // ------------------------------------------------- notes vault workspace
+    const vaultDir = join(library, 'paperlight-vault')
+    mkdirSync(join(vaultDir, 'materials', 'books', 'book1'), { recursive: true })
+    writeFileSync(join(vaultDir, 'materials', 'books', 'book1', 'book1.pdf'), createTestPdf({ pages: 4, title: 'Book One' }))
+    mkdirSync(join(vaultDir, 'notes', '_inbox'), { recursive: true })
+    writeFileSync(join(vaultDir, 'notes', '_inbox', 'Reading-Log.md'), '# Reading Log\n\nvault 里已有的一份笔记：knowledge and power。\n')
+    mkdirSync(join(vaultDir, 'enlightenment'), { recursive: true })
+    // A note from the previous layout: migrating it must keep the whole summary
+    // (sub-sections included) and the user's own additions.
+    const legacyDailyFile = join(vaultDir, 'Paperlight', 'Daily', '2026-01-05.md')
+    mkdirSync(join(vaultDir, 'Paperlight', 'Daily'), { recursive: true })
+    writeFileSync(legacyDailyFile, [
+      '---',
+      'title: 2026-01-05 笔记',
+      'kind: daily',
+      'date: 2026-01-05',
+      'updated: "2026-01-05T20:00:00.000Z"',
+      'summary: ai',
+      'tags: [paperlight, daily]',
+      '---',
+      '# 2026-01-05 笔记',
+      '',
+      '## 当日汇总',
+      '',
+      '旧版汇总的概览。',
+      '',
+      '### 主题脉络',
+      '',
+      '- 旧版子小节要保留。',
+      '',
+      '## 当日收录',
+      '',
+      '- **旧条目**：内容。',
+      '',
+      '## 我的补充',
+      '',
+      '我自己写的补充。',
+    ].join('\n'))
+    const now = new Date()
+    const pad = (value) => String(value).padStart(2, '0')
+    const todayKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    const findingFile = join(vaultDir, 'enlightenment', `${todayKey}-观察.md`)
+    writeFileSync(findingFile, '# 观察\n\n原始资料与笔记要分开放，日报要读这里。\n')
+    const dailyFile = join(vaultDir, 'Daily', `${todayKey}.md`)
+    const reportFile = join(vaultDir, 'Daily', `${todayKey}-report.md`)
+    const senseNoteFile = join(vaultDir, 'notes', 'books', 'book1', 'numerous--many.md')
+
+    await installVaultStub(wc)
+    const vaultBridge = await evaluate(wc, `Object.keys(window.paperlight.vault || {}).join(',')`)
+    record(
+      'the vault bridge is exposed to the renderer',
+      vaultBridge.includes('read') && vaultBridge.includes('write') && vaultBridge.includes('tree'),
+      vaultBridge,
+    )
+
+    // Choosing a vault travels the same IPC path the native folder dialog uses.
+    wc.send('app:set-vault', vaultDir)
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'notes desk' })
+    await waitFor(wc, `document.querySelectorAll('.notes-tree-pane .vault-node').length >= 4`, { label: 'vault tree' })
+
+    // The workspace layout is created on demand: materials / notes / enlightenment / Daily.
+    let scaffold = false
+    for (let attempt = 0; attempt < 10 && !scaffold; attempt += 1) {
+      scaffold = ['materials', 'notes', 'enlightenment', 'Daily'].every((name) => existsSync(join(vaultDir, name)))
+      if (!scaffold) await sleep(300)
+    }
+    record('the vault workspace folders are created automatically', scaffold, ['materials', 'notes', 'enlightenment', 'Daily'].join(', '))
+
+    const treeNames = await evaluate(wc, `Array.from(document.querySelectorAll('.notes-tree-pane .vault-node-name')).map((n) => n.textContent)`)
+    const hasSource = await evaluate(wc, `document.querySelectorAll('.notes-tree-pane .vault-node.file.source').length`)
+    record(
+      'the tree shows materials/, notes/, enlightenment/ and Daily/',
+      ['materials', 'notes', 'enlightenment', 'Daily'].every((name) => treeNames.includes(name)) && hasSource >= 1,
+      `${treeNames.slice(0, 8).join(', ')} | sources=${hasSource}`,
+    )
+    await screenshot(window, artifacts, '15-notes-vault.png')
+
+    // A note from the old layout is migrated, not lost.
+    const migratedDaily = join(vaultDir, 'Daily', '2026-01-05.md')
+    const migratedReport = join(vaultDir, 'Daily', '2026-01-05-report.md')
+    let migratedDailyText = ''
+    for (let attempt = 0; attempt < 25 && !migratedDailyText; attempt += 1) {
+      await sleep(300)
+      try { migratedDailyText = readFileSync(migratedDaily, 'utf8') } catch { migratedDailyText = '' }
+    }
+    let migratedReportText = ''
+    try { migratedReportText = readFileSync(migratedReport, 'utf8') } catch { migratedReportText = '' }
+    record(
+      'an old Paperlight/Daily note moves to Daily/ with the user\'s own additions',
+      migratedDailyText.includes('我自己写的补充') && !existsSync(legacyDailyFile),
+      `${migratedDaily} | legacy still there: ${existsSync(legacyDailyFile)}`,
+    )
+    record(
+      'the old summary becomes the day\'s report, sub-sections included',
+      migratedReportText.includes('旧版汇总的概览。')
+        && migratedReportText.includes('### 主题脉络')
+        && migratedReportText.includes('旧版子小节要保留。'),
+      migratedReportText.split('\n').slice(0, 14).join(' | '),
+    )
+
+    // The reader's own tab strip offers "new blank note" as well.
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, `document.querySelector('.tab-strip .tab-add') !== null`, { label: 'reader tab strip' })
+    const sidebarSpaceRow = await evaluate(wc, `({
+      duplicated: document.querySelector('.sidebar-spaces') !== null,
+      rail: document.querySelectorAll('.space-rail-button').length,
+    })`)
+    record(
+      'the reader sidebar no longer repeats the space rail',
+      !sidebarSpaceRow.duplicated && sidebarSpaceRow.rail >= 4,
+      JSON.stringify(sidebarSpaceRow),
+    )
+    await evaluate(wc, `(() => { document.querySelector('.tab-add').click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.tab-add-menu') !== null`, { label: 'new-tab menu' })
+    const menuItems = await evaluate(wc, `Array.from(document.querySelectorAll('.tab-add-menu button')).map((b) => b.textContent)`)
+    record(
+      'the + opens a menu with "open document" and "new blank note"',
+      menuItems.some((item) => item.includes('打开文档')) && menuItems.some((item) => item.includes('新建空白笔记')),
+      menuItems.join(' | '),
+    )
+    await evaluate(wc, `(() => {
+      Array.from(document.querySelectorAll('.tab-add-menu button')).find((b) => b.textContent.includes('新建空白笔记')).click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.notes-space') !== null && document.querySelector('.note-textarea') !== null`, { label: 'blank note created' })
+    const blankNote = await evaluate(wc, `({
+      path: document.querySelector('.note-toolbar-path-text')?.textContent || '',
+      body: document.querySelector('.note-textarea')?.value || '',
+    })`)
+    let blankOnDisk = false
+    for (let attempt = 0; attempt < 12 && !blankOnDisk; attempt += 1) {
+      await sleep(300)
+      blankOnDisk = existsSync(join(vaultDir, blankNote.path))
+    }
+    record(
+      'the + creates a blank Markdown note and opens it for editing',
+      blankNote.path.startsWith('notes/') && blankNote.body.includes('未命名') && blankOnDisk,
+      `${blankNote.path} | ${JSON.stringify(blankNote.body.slice(0, 40))}`,
+    )
+
+    // Back to the vault: reading a material notes its book context.
+    await evaluate(wc, `(() => {
+      const source = document.querySelector('.notes-tree-pane .vault-node.file.source .vault-node-toggle')
+      source.click()
+      return true
+    })()`)
+    await waitFor(wc, `Array.from(document.querySelectorAll('.doc-tab-name')).some((n) => n.textContent.includes('book1'))`, { label: 'material opened in the reader' })
+    const materialText = await ensureTextLayer(wc, 'material text layer')
+    record('a material from materials/ opens in the reading desk', materialText.ok, JSON.stringify(materialText))
+
+    // A sense collected while reading it lands in the mirrored notes/ folder.
+    await evaluate(wc, `(() => {
+      const spans = Array.from(document.querySelectorAll('.textLayer span')).filter((span) => (span.textContent || '').trim().length > 4)
+      if (spans.length === 0) return false
+      const range = document.createRange()
+      range.selectNodeContents(spans[0])
+      const selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.querySelector('.reader-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'sense card for the material' })
+    const targetHint = await evaluate(wc, `Array.from(document.querySelectorAll('.vault-hint')).map((n) => n.textContent).join(' ')`)
+    record('the assistant says where this reading session writes', targetHint.includes('notes/books/book1'), targetHint.slice(0, 120))
+    await evaluate(wc, `(() => { document.querySelector('.vault-button').click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'notes desk after saving the sense' })
+    let senseSaved = false
+    for (let attempt = 0; attempt < 12 && !senseSaved; attempt += 1) {
+      senseSaved = existsSync(senseNoteFile)
+      if (!senseSaved) await sleep(300)
+    }
+    record('a sense from that material is filed under notes/<material>/', senseSaved, senseNoteFile)
+
+    // The day's record list reflects it, links it and keeps its senses.
+    // The list is rebuilt a moment after the sense is filed; poll for the link
+    // itself instead of accepting the first version that has a heading.
+    let dailyContent = ''
+    for (let attempt = 0; attempt < 30 && !dailyContent.includes('[[notes/books/book1/numerous--many.md|'); attempt += 1) {
+      await sleep(300)
+      try { dailyContent = readFileSync(dailyFile, 'utf8') } catch { dailyContent = '' }
+    }
+    record(
+      "the day's record list lives in Daily/<date>.md",
+      dailyContent.includes('## 当日收录') && dailyContent.includes('kind: daily'),
+      dailyContent ? dailyContent.split('\n').slice(0, 3).join(' | ') : 'missing',
+    )
+    record(
+      'the record list links the notes of the day',
+      dailyContent.includes('[[notes/books/book1/numerous--many.md|') && dailyContent.includes('[[enlightenment/'),
+      dailyContent.slice(0, 200).replace(/\n/g, ' / '),
+    )
+    const storedAtom = await evaluate(wc, `(() => {
+      try {
+        const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+        const atom = (state.notebook?.atoms || []).find((item) => item.id === 'numerous|adjective|many')
+        return atom ? { notesFolder: atom.notesFolder || '', notePath: atom.notePath || '' } : null
+      } catch { return null }
+    })()`)
+    record(
+      'a sense notes where its file was actually written',
+      storedAtom?.notePath === 'notes/books/book1/numerous--many.md',
+      JSON.stringify(storedAtom),
+    )
+    record(
+      "the day's note carries its senses so links resolve",
+      /^senses: \[numerous\|adjective\|many\]/m.test(dailyContent),
+      (dailyContent.match(/^senses: .*$/m) || ['missing'])[0],
+    )
+
+    // One full-width mode at a time, switched from the top-right of the note.
+    await evaluate(wc, `(() => {
+      const target = Array.from(document.querySelectorAll('.notes-tree-pane .vault-node.file')).find((n) => n.textContent.includes(${JSON.stringify(todayKey)}))
+      target.querySelector('.vault-node-toggle').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes(${JSON.stringify(todayKey)}) === true`, { label: "day's note open" })
+    const editMode = await evaluate(wc, `({
+      textarea: document.querySelector('.note-textarea') !== null,
+      preview: document.querySelector('.note-preview-area') !== null,
+      switchLabel: document.querySelector('.note-view-switch button.selected')?.textContent || '',
+    })`)
+    record('edit mode fills the desk with the Markdown source', editMode.textarea && !editMode.preview && editMode.switchLabel.includes('编辑'), JSON.stringify(editMode))
+    await evaluate(wc, `(() => { Array.from(document.querySelectorAll('.note-view-switch button')).find((b) => b.textContent.includes('浏览')).click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.note-preview-area') !== null`, { label: 'preview mode' })
+    const previewMode = await evaluate(wc, `({
+      textarea: document.querySelector('.note-textarea') !== null,
+      headings: document.querySelectorAll('.note-preview-area .flow-heading').length,
+      links: document.querySelectorAll('.note-preview-area .wiki-link').length,
+      grounded: document.querySelector('.note-view-switch button.selected')?.textContent || '',
+    })`)
+    record(
+      'preview mode fills the desk with the rendered note (no split view)',
+      !previewMode.textarea && previewMode.headings >= 1 && previewMode.links >= 2 && previewMode.grounded.includes('浏览'),
+      JSON.stringify(previewMode),
+    )
+
+    // The info panel resolves the day's senses instead of claiming there are none.
+    const panelLinks = await evaluate(wc, `({
+      senses: document.querySelectorAll('.note-sense-list li').length,
+      facts: Array.from(document.querySelectorAll('.note-facts dd')).map((n) => n.textContent),
+      emptyText: Array.from(document.querySelectorAll('.notes-side-pane .sense-plain')).map((n) => n.textContent).join(' | '),
+    })`)
+    record(
+      "the day's note shows its linked senses in the info panel",
+      panelLinks.senses >= 1 && !panelLinks.emptyText.includes('没有记录本里的义项'),
+      JSON.stringify(panelLinks).slice(0, 200),
+    )
+
+    // A [[link]] inside the record list opens the linked note.
+    await evaluate(wc, `(() => { document.querySelector('.note-preview-area .wiki-link').click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes('numerous--many') === true`, { label: 'wiki link opens the sense note' })
+    record('[[wiki links]] open the linked vault note', true)
+
+    // Editing still autosaves, and a new note goes next to the open one.
+    await evaluate(wc, `(() => { Array.from(document.querySelectorAll('.note-view-switch button')).find((b) => b.textContent.includes('编辑')).click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.note-textarea') !== null`, { label: 'back to edit mode' })
+    await evaluate(wc, `(() => { Array.from(document.querySelectorAll('.notes-tree-toolbar button')).find((b) => b.textContent.includes('新建笔记')).click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.notes-create-row input') !== null`, { label: 'new note input' })
+    const createTarget = await evaluate(wc, `document.querySelector('.notes-create-folder')?.textContent || ''`)
+    const createdNoteDir = createTarget.replace('存到', '').trim()
+    const createdNoteFile = join(vaultDir, createdNoteDir, 'smoke-note.md')
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('.notes-create-row input')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'Smoke Note')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.note-textarea')?.value.includes('Smoke Note') === true`, { label: 'new note open' })
+    record(
+      'a new note lands in the folder the create row names',
+      createdNoteDir.startsWith('notes/') && existsSync(createdNoteFile),
+      `${createTarget} → ${createdNoteFile}`,
+    )
+    await evaluate(wc, `(() => {
+      const area = document.querySelector('.note-textarea')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(area, '# Smoke Note\\n\\nPaperlight 自动保存到 vault 的正文。\\n')
+      area.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    let noteContent = ''
+    for (let attempt = 0; attempt < 20 && !noteContent.includes('自动保存'); attempt += 1) {
+      await sleep(300)
+      try { noteContent = readFileSync(createdNoteFile, 'utf8') } catch { noteContent = '' }
+    }
+    record('editing autosaves the note as Markdown on disk', noteContent.includes('自动保存'), noteContent.split('\n').slice(0, 2).join(' | '))
+
+    // A sense whose file is gone can be archived again in one click.
+    rmSync(senseNoteFile, { force: true })
+    await evaluate(wc, `(() => { document.querySelector('.notes-tree-actions button').click(); return true })()`)
+    let backfillOffered = false
+    for (let attempt = 0; attempt < 20 && !backfillOffered; attempt += 1) {
+      await sleep(300)
+      backfillOffered = await evaluate(wc, `Array.from(document.querySelectorAll('.notes-side-pane button')).some((b) => b.textContent.includes('全部写入 vault'))`)
+    }
+    const backfill = backfillOffered && await evaluate(wc, `(() => {
+      const button = Array.from(document.querySelectorAll('.notes-side-pane button')).find((b) => b.textContent.includes('全部写入 vault'))
+      button.click()
+      return true
+    })()`)
+    let backfilled = false
+    for (let attempt = 0; attempt < 20 && !backfilled; attempt += 1) {
+      await sleep(300)
+      backfilled = existsSync(senseNoteFile)
+    }
+    record('a sense whose note is missing can be archived again in one click', backfill && backfilled, `${senseNoteFile} → ${backfilled}`)
+
+    // The report is its own file, generated on demand (and at the configured time).
+    await evaluate(wc, `(() => {
+      const button = Array.from(document.querySelectorAll('.notes-side-pane button')).find((b) => b.textContent.includes('生成'))
+      if (!button) return false
+      button.click()
+      return true
+    })()`)
+    let reportContent = ''
+    for (let attempt = 0; attempt < 20 && !reportContent.includes('kind: report'); attempt += 1) {
+      await sleep(300)
+      try { reportContent = readFileSync(reportFile, 'utf8') } catch { reportContent = '' }
+    }
+    record(
+      'the daily report is written to its own file',
+      reportContent.includes('kind: report') && reportContent.includes('## 来源') && /^source: (ai|local)$/m.test(reportContent),
+      reportContent.split('\n').slice(0, 8).join(' | '),
+    )
+    const reportRequest = await evaluate(wc, `(() => {
+      const requests = window.__vaultReportRequests || []
+      return requests[requests.length - 1] || null
+    })()`)
+    record(
+      'the report request carries the records and the enlightenment findings',
+      Boolean(reportRequest) && (reportRequest.records || []).length >= 2 && (reportRequest.findings || []).some((f) => f.path.includes('enlightenment/')),
+      JSON.stringify({ records: (reportRequest?.records || []).length, findings: (reportRequest?.findings || []).map((f) => f.path) }),
+    )
+    let dailyWithReport = ''
+    for (let attempt = 0; attempt < 12 && !dailyWithReport.includes('-report.md'); attempt += 1) {
+      await sleep(300)
+      try { dailyWithReport = readFileSync(dailyFile, 'utf8') } catch { dailyWithReport = '' }
+    }
+    record("the day's list links its report", dailyWithReport.includes(`[[Daily/${todayKey}-report.md]]`), dailyWithReport.split('\n').slice(0, 4).join(' | '))
+    await screenshot(window, artifacts, '16-daily-report.png')
+
+    // ------------------------------------------------------------- chat desk
+    wc.send('app:command', 'space-chat')
+    await waitFor(wc, `document.querySelector('.chat-space') !== null`, { label: 'chat desk' })
+    await waitFor(wc, `document.querySelectorAll('.thread-list li').length >= 1`, { label: 'chat thread list' })
+    const chatColumns = await evaluate(wc, `({
+      rail: document.querySelectorAll('.space-rail-button').length,
+      history: document.querySelector('.thread-column') !== null,
+      picker: document.querySelector('.picker-column') !== null,
+      sources: document.querySelectorAll('.picker-column .vault-node.file.source').length,
+    })`)
+    record(
+      'the chat desk shows a thread column, a notes picker and a composer',
+      chatColumns.rail >= 3 && chatColumns.history && chatColumns.picker && chatColumns.sources === 0,
+      JSON.stringify(chatColumns),
+    )
+
+    await waitFor(wc, `document.querySelectorAll('.picker-column .vault-node.file').length >= 1`, { label: 'vault picker tree' })
+    await evaluate(wc, `(() => {
+      const target = Array.from(document.querySelectorAll('.picker-column .vault-node.file')).find((n) => n.textContent.includes('Reading-Log'))
+      target.querySelector('.vault-check').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.grounded-badge')?.classList.contains('on') === true`, { label: 'grounded selection' })
+    const groundedBar = await evaluate(wc, `({
+      badge: document.querySelector('.grounded-badge')?.textContent || '',
+      chips: Array.from(document.querySelectorAll('.grounding-chip button:first-child')).map((b) => b.textContent),
+    })`)
+    record(
+      'selecting vault content grounds the conversation',
+      groundedBar.badge.includes('严格 grounded') && groundedBar.chips.some((chip) => chip.includes('Reading-Log')),
+      JSON.stringify(groundedBar),
+    )
+
+    await evaluate(wc, `(() => {
+      const area = document.querySelector('.vault-chat-input textarea')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(area, '这份 vault 笔记说了什么？')
+      area.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.vault-chat-input button').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.vault-chat-messages li.assistant .message-body') !== null`, { label: 'grounded answer' })
+    const groundedRequest = await evaluate(wc, `(() => {
+      const requests = window.__vaultChatRequests || []
+      const last = requests[requests.length - 1] || null
+      return {
+        grounded: last ? last.context.length > 0 : false,
+        carriesNoteBody: last ? JSON.stringify(last.context).includes('knowledge and power') : false,
+        answer: document.querySelector('.vault-chat-messages li.assistant .message-body')?.textContent || '',
+      }
+    })()`)
+    record(
+      'a grounded answer only receives the selected vault notes',
+      groundedRequest.grounded && groundedRequest.carriesNoteBody,
+      JSON.stringify({ grounded: groundedRequest.grounded, carriesNoteBody: groundedRequest.carriesNoteBody }),
+    )
+    record('the grounded answer cites its source note', groundedRequest.answer.includes('Reading-Log'), groundedRequest.answer.slice(0, 90))
+    await screenshot(window, artifacts, '17-vault-chat.png')
+
+    // Ungrounded mode is explicit, and an answer can be saved back as a note.
+    await evaluate(wc, `(() => { document.querySelector('.grounding-chip button:last-child').click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.grounding-bar.off') !== null`, { label: 'ungrounded warning' })
+    const ungroundedText = await evaluate(wc, `document.querySelector('.grounding-bar.off')?.textContent || ''`)
+    record('clearing the selection warns that answers are no longer grounded', ungroundedText.includes('未选择 vault 内容'), ungroundedText.slice(0, 60))
+
+    await evaluate(wc, `(() => { Array.from(document.querySelectorAll('.message-actions button')).find((b) => b.textContent.includes('存为 vault 笔记')).click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.message-actions button.saved') !== null`, { label: 'answer saved to the vault' })
+    const inboxFiles = existsSync(join(vaultDir, 'notes', '_inbox')) ? readdirSync(join(vaultDir, 'notes', '_inbox')) : []
+    record(
+      'an answer can be saved back into the vault as a note',
+      inboxFiles.some((name) => name.includes('这份-vault-笔记说了什么')),
+      inboxFiles.join(', '),
+    )
+
+    await sleep(1200)
+    const vaultState = JSON.parse(readFileSync(join(app.getPath('userData'), 'paperlight-state.json'), 'utf8'))
+    record(
+      'the vault, the open notes, the report time and the chat threads are persisted',
+      vaultState.vault?.root === vaultDir
+        && (vaultState.chatSpace?.threads?.length ?? 0) >= 1
+        && (vaultState.notesSpace?.openPaths?.length ?? 0) >= 1
+        && vaultState.notesSpace?.view === 'edit'
+        && vaultState.settings?.dailyReportTime === '20:00',
+      `root=${vaultState.vault?.root} threads=${vaultState.chatSpace?.threads?.length} notes=${vaultState.notesSpace?.openPaths?.length} view=${vaultState.notesSpace?.view} reportTime=${vaultState.settings?.dailyReportTime}`,
+    )
+    await screenshot(window, artifacts, '18-final-vault-state.png')
+  } catch (error) {
+    let diagnostic = null
+    try {
+      diagnostic = await evaluate(wc, DIAGNOSTIC)
+    } catch {
+      diagnostic = null
+    }
+    let diskState = null
+    try {
+      const parsed = JSON.parse(readFileSync(stateFile, 'utf8'))
+      diskState = { tabs: parsed.session?.tabs?.length ?? -1, atoms: parsed.notebook?.atoms?.length ?? -1, notes: parsed.notebook?.notes?.length ?? -1 }
+    } catch (error) {
+      diskState = { error: error instanceof Error ? error.message : String(error) }
+    }
+    record(
+      'smoke run completed',
+      false,
+      `${error instanceof Error ? (error.stack || error.message) : String(error)}\ndiskState=${JSON.stringify(diskState)}\n${JSON.stringify(diagnostic, null, 2)}\nrenderer log tail:\n${consoleLog.slice(-25).join('\n')}`,
+    )
+  }
+
+  const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
+  writeFileSync(join(artifacts, 'smoke-report.json'), JSON.stringify(report, null, 2))
+  console.log(`\n${failures === 0 ? 'SMOKE OK' : `SMOKE FAILED (${failures})`} — screenshots in ${artifacts}`)
+  app.exit(failures === 0 ? 0 : 1)
+  return report
+}

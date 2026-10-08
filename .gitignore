@@ -6,3 +6,5 @@ dist/
 !.env.example
 *.pdf
 /Paperlight.app/
+/tests/artifacts/
+/release/

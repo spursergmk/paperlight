@@ -1,0 +1,154 @@
+# Paperlight 项目记忆（AGENTS.md）
+
+> 本文件是本项目**唯一**的常驻记忆。新会话先读这里，再读 `README.md`。
+> 任何与本文件冲突的旧文档、旧任务台账、旧启动口令都已删除，不要再从历史里恢复它们。
+
+## 一、项目是什么
+
+Paperlight 是一个**桌面 app**：本地英文文档阅读器，左侧像 IDE 一样浏览文件夹、多标签同时阅读，右侧「阅读助手」负责查询义项、追问和记笔记。支持 **PDF / EPUB / TXT / Markdown**。
+
+三个并列空间（入口：最左侧竖排 rail，⌘⌥1/2/3；阅读助手右上角也有进入笔记空间的按钮。**不要再在阅读空间的左侧栏里重复一排空间按钮**，那是与 rail 重复的冗余入口）：
+
+- **阅读空间**：文件夹浏览 + 多标签阅读 + 阅读助手（义项 / 记录本 / 对话）。
+- **笔记空间**：Obsidian 式 vault 文件夹树 + 笔记标签 + 单栏（编辑/浏览切换）+ 信息面板；所有笔记都是 vault 里的 `.md`。vault 结构：`materials/`（原始资料）→ `notes/`（镜像归档义项与笔记）、`enlightenment/`（用户的专项发现）、`Daily/`（记录清单 + 独立成文件的日报）。
+- **对话空间**：左栏两列（对话记录 + vault 内容选择），勾选内容后对话严格 grounded，回答可存回 vault。
+
+- 技术栈：Electron 44 + Vite 7 + React 19 + pdf.js 6（TypeScript）。
+- 目标形态：`npm run app` 或打包出的 `Paperlight.app`。**浏览器里的 `npm run dev` 只是调试手段，不是交付物。**
+
+## 二、铁律（每次改动都要满足）
+
+1. **一切围绕 app，且要能在三平台发布。** 新功能必须在 Electron app 里可用、可验证（`npm run smoke` 里有对应检查或截图）；发布目标是 macOS（universal）+ Windows(x64) + Linux(x64)，因此**不要写死 macOS 专有行为**（标题栏、路径分隔符、`/Volumes` 之类都要判断平台或做兼容）。
+2. **离线可用。** 不引入需要联网的运行时资源（远程字体、CDN、在线图标）。字体使用系统字体栈。app 启动不应发起任何外部网络请求，只有用户主动翻译/查询时才访问已配置的 API。
+3. **文件系统优先。** 阅读器必须能直接打开系统文件夹、双击打开文档（新标签页）、恢复上次打开的文件夹与标签页；不允许退回「每次都手动导入单个文件」的形态。
+   - 新增格式要同时改三处：`src/lib/documentKind.ts`（渲染层的类型判定）、`electron/main.mjs` 的 `DOCUMENT_EXTENSIONS`/`documentKindOf`（主进程放行与对话框过滤）、`src/components/FileExplorer.tsx` 的图标与打开条件。冒烟测试会各开一个文件，两边清单不一致会失败。
+4. **大文档必须虚拟化。** PDF 只挂载视口附近的页面（`src/lib/pagelayout.ts` + `src/components/PageStack.tsx`），EPUB 只渲染当前章，超长文本按段渐进渲染。任何「一次性渲染全部内容」的改动都算性能回归。
+5. **分界线可拖拽。** 左侧栏、阅读区、阅读助手之间是可拖拽的 divider（`src/components/Splitter.tsx`），宽度持久化，支持键盘方向键与双击复位；阅读助手的空间不能被固定死。
+6. **密钥不出本机。** API 密钥只写入本机文件（开发：项目根 `.env.local`；打包后：app 的 userData 目录），只能通过 loopback 请求使用。不要把密钥写进前端代码、日志、截图或 git。
+7. **改完必须验证。**
+   - `npm run check`：类型检查 + 生产构建 + 单元测试 + `node --check` 语法检查。`electron/*.mjs`、`server/*.mjs`、`scripts/*.mjs` 是纯 JS，**不要在里面写 TypeScript 语法**（`as const`、类型注解等会让 app 直接起不来）。
+   - `npm run smoke`：Electron 端到端冒烟，截图写到 `tests/artifacts/`，结果写到 `tests/artifacts/smoke-report.json`，失败时退出码非 0。
+   - 改动涉及打包/主进程时，跑 `npm run dist` 并确认 `./Paperlight.app` 能启动、`release/` 三个平台产物都在。
+
+## 三、架构地图
+
+```
+electron/main.mjs        Electron 主进程：窗口、菜单、内置 HTTP 服务（dist + API）、
+                         IPC（文件夹选择、目录列表、读取 PDF、应用状态文件、vault 读写）
+electron/preload.cjs     contextBridge：window.paperlight（唯一的能力入口）
+electron/smoke.mjs       端到端冒烟测试（真实窗口 + 真实 IPC + 截图）
+server/api.mjs           本地 AI 代理（配置/义项/翻译/vault 对话/笔记/日记汇总）——Vite dev 与 app 共用这一份实现
+server/api.d.mts         上面这个模块的类型声明
+src/App.tsx              编排：空间切换、会话、标签页、分栏、选区、笔记/对话、vault 接线
+src/components/          Splitter / TabStrip / FileExplorer / PageStack / PDFPage /
+                         AssistantPanel(SenseCard, NotebookPanel, ChatPanel) / WelcomeScreen /
+                         SpaceRail / VaultTree / MarkdownPreview / NotesSpace / ChatSpace / useVault
+src/components/TextReader.tsx    TXT / Markdown 重排阅读器（渐进渲染 + 锚点目录）
+src/components/EpubReader.tsx    EPUB 章节阅读器（DOMPurify 清洗后插入 DOM，图片转 blob）
+src/components/useFlowReader.ts  重排阅读器共用的滚动/位置恢复
+src/components/NotesSpace.tsx    笔记空间：vault 树 + 笔记标签 + 单栏编辑/浏览 + 信息面板
+src/components/ChatSpace.tsx     对话空间：对话记录栏 + vault 内容选择栏 + grounded 对话
+src/components/useVault.ts       vault 的唯一状态机：列目录、读写、义项/笔记/回答落盘、每日汇总
+src/components/SpaceRail.tsx     三个空间的切换入口（每个空间左侧都有）
+src/lib/vault.ts         vault 纯逻辑：路径限制、materials→notes 镜像、frontmatter 子集、笔记/日报模板、日报时间槽、文件树（纯函数，有单测）
+src/lib/vaultfs.ts       vault 文件端口：Electron bridge / 浏览器调试用的虚拟 vault
+src/lib/vaultai.ts       /api/vault-chat、/api/note、/api/daily-summary 的客户端 + 摘录预算
+src/lib/documentKind.ts  格式判定（pdf/text/epub）
+src/lib/textdoc.ts       安全 Markdown 子集解析（纯函数，有单测）
+src/lib/epub.ts          EPUB 解析：container/OPF/spine/nav/NCX（纯函数，有单测）
+src/lib/xml.ts           宽松 XML 扫描器（不依赖 DOMParser，可在 Node 里测）
+src/lib/pagelayout.ts    PDF 分页几何（纯函数，有单测）
+src/lib/persist.ts       应用状态（空间、标签页、分栏宽度、笔记、vault、两份空间布局）读写与遗留数据迁移
+src/lib/fsaccess.ts      FileSystemPort：app 桥接 / 浏览器 File System Access / 兜底
+src/lib/documents.ts     按 key 缓存 + 引用计数的 PDF 文档
+scripts/app-dev.mjs      `npm run app:dev`：Vite + Electron 同时启动
+scripts/make-icons.mjs   从 build/icon.png 生成 icon.icns / icon.ico（新图标时跑 `npm run icons`）
+scripts/check-node-files.mjs 用 Node 解析所有 .mjs/.cjs，防止 TS 语法混进纯 JS
+electron-builder.yml     macOS（dmg+zip，universal）/ Windows（nsis+zip）/ Linux（AppImage+deb）打包配置
+.github/workflows/release.yml  推 v* 标签自动出三平台安装包并附到 draft Release
+```
+
+约定：
+
+- **只有一个 AI 代理实现**（`server/api.mjs`）。不要在 `vite.config.ts` 或 Electron 里再写第二份。
+- 渲染进程没有 Node 权限；所有系统能力从 `electron/preload.cjs` 暴露，并通过 `src/lib/bridge.ts` 的类型使用。
+- 纯逻辑（分页几何、选区解析、笔记序数、vault 路径/模板/日记汇总）放 `src/lib/`，并在 `tests/*.test.ts` 里覆盖。
+- **vault 的每一次磁盘访问都走 `vault:*` IPC**：路径必须是 vault 相对路径、不能有 `..`、解析后必须落在所选文件夹内（额外做符号链接检查），写入用「临时文件 + rename」，只允许 `.md`/`.markdown`。渲染进程不要自己拼绝对路径去读盘。
+- **笔记只能是 Markdown，位置由材料决定**：义项与笔记写到 `notes/<materials 镜像>/`（`notes/_inbox/` 表示没有材料上下文），专项发现写 `enlightenment/`，记录清单写 `Daily/<日期>.md`，日报写 `Daily/<日期>-report.md`。frontmatter 只用 `src/lib/vault.ts` 的安全子集。
+- **写入时记录真实路径**：原子/笔记上的 `notesFolder` 是「应该在哪」，`notePath` 是「实际写到哪」。`senseNotePath` / `notebookNotePath` 必须优先用 `notePath`，否则先收藏、后写 vault 的义项会在记录清单里链到错误的 `_inbox` 路径（冒烟里有对应检查）。
+- **记录清单可以随时重写，日报不能**：`Daily/<日期>.md` 是本地即时整理（无模型调用，哈希含条目路径，见 `dailySourceHash`）；`Daily/<日期>-report.md` 只在设置的日报时间（默认 20:00，`settings.dailyReportTime`/`dailyReportAuto`）或用户手动触发时生成，**覆盖上一版、不留历史**。日报必须读 `enlightenment/` 里当天的发现并写进正文，不许动态地每次改动都重新生成。
+- 记录清单由 Paperlight 重写，但必须保留用户的 `## 我的补充` 一节；旧的 `Paperlight/Daily/*.md` 首次打开时迁移到 `Daily/`（汇总进日报文件）。
+- 每个空间的状态分开持久化（`state.notesSpace` / `state.chatSpace` / `state.vault`），改状态前先看 `src/lib/persist.ts` 的 `mergeState`：新字段要带默认值并在那里做清洗，坏数据必须降级而不是崩。
+- **空间组件不要在 effect 依赖里放整只 vault API 对象**（它每次渲染都会重建）：用 ref 读它，否则会出现「每次按键都重新加载笔记、覆盖草稿」这类 bug。
+- pdf.js 每个文档一个自己的 worker（不共用 `workerPort`，见 `src/lib/documents.ts`），但 `pdf.cleanup()`/`loadingTask.destroy()` 会动到 worker 级与静态缓存（字体度量、TextLayer 的离屏画布），且 `cleanup()` 可能因为「页面正在渲染」而拒绝。因此关闭标签页时只释放引用，缓存清空时才整体销毁。
+- **阅读位置必须按「页码 + 页内比例」重新锚定**（`src/components/PageStack.tsx`），不能只存像素：缩放、窗口/分栏尺寸变化、混合尺寸页面（横版插页）都会改变每页高度。
+- 每页的渲染缩放由该页自身宽度推导（`src/components/PDFPage.tsx`），不要用第 1 页的宽度套所有页。
+- pdf.js 的文字层流可能卡住：`PDFPage` 对它有超时 + 自动重试 + 「重新载入文档」兜底，任何情况下都不要让已渲染的页面被载入遮罩永久盖住。渲染时给每次渲染一个新的 canvas 元素，避免 pdf.js 复用画布导致的 `UnknownVizError`。
+- 不受信任的文档内容（EPUB 的 XHTML）**不能**用 `dangerouslySetInnerHTML`：走 `EpubReader` 的 DOMPurify `RETURN_DOM_FRAGMENT` + `replaceChildren` 路径；Markdown/TXT 一律渲染成 React 元素。
+
+## 四、命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm run app` | 构建并在本机以 app 形态运行（推荐日常使用） |
+| `npm run app:dev` | 开发模式：Vite dev server + Electron 窗口（热更新） |
+| `npm run dev` | 只起浏览器调试（无文件夹浏览时退化为文件选择器） |
+| `npm run check` | 构建 + 单元测试 |
+| `npm test` | 只跑单元测试（node --test） |
+| `npm run smoke` | Electron 端到端冒烟 + 截图 |
+| `npm run dist:mac` / `dist:win` / `dist:linux` | 打包单个平台（mac 会把 app 放到仓库根的 `./Paperlight.app`） |
+| `npm run dist` | 一次出三平台产物到 `release/` |
+| `npm run icons` | 图标变更后重新生成 icns/ico（仅 macOS） |
+| `npm run release -- minor "摘要"` | 发布：改版本号 + 写入 `CHANGELOG.md` + 提交 + 打 `vX.Y.Z` 标签 + 推送 GitHub（`major` / `patch` / `--no-push` 同理） |
+
+快捷键上的约定：`⌘N` 新建空白笔记（任意空间），标签栏的 `+` 也是「新建标签页」——阅读空间是菜单（打开文档… / 新建空白笔记），笔记空间直接建空白笔记。
+
+## 四点五、版本与发布（每次改动都要遵守）
+
+版本规则：**整数部分 = 大版本功能变更，小数部分 = 修复式小更新**。
+
+| 变化 | 版本 | 例子 |
+| --- | --- | --- |
+| 大功能：新的空间、新的知识管理形态 | 整数位 +1 | 1.0.0 → 2.0.0 |
+| 修复式小更新：逻辑 bug、界面细节、文案 | 小数位 +1 | 1.0.0 → 1.1.0 |
+| 单点热修 | 第三位 +1 | 1.1.0 → 1.1.1 |
+
+流程（不要跳步）：
+
+1. 改完代码 → 跑 `npm run check` 与 `npm run smoke`（需要时 `npm run app` 形态验证 + 重建 `./Paperlight.app`）。
+2. 用一句话写清这次改了什么，然后：
+
+   ```bash
+   npm run release -- minor "修复记录清单的来源链接"
+   npm run release -- major "新增对话空间与 vault 知识挖掘"
+   ```
+
+   脚本会：把 `package.json` / `package-lock.json` 的版本号提升 → 在 `CHANGELOG.md` 顶部写入这一版的记录（含摘要与本次改动文件清单）→ `git add -A` + 提交 + 打 `vX.Y.Z` 注释标签 → `git push origin HEAD` 与 `git push origin vX.Y.Z`。
+3. 版本已经手写在 `CHANGELOG.md` 里时，加 `--no-changelog`；只想本地留档时加 `--no-push`；要发布 `package.json` 里已经写好的版本（首次定版）加 `--keep`（例如 `npm run release -- keep "V1.0 首个正式版" --no-changelog`）。
+4. **安全护栏**：脚本会拒绝提交 `.env*`（`.env.example` 除外）、`release/`、`dist/`、`node_modules/`、`Paperlight.app/` 以及任何超过 5 MB 的文件，并把暂存区退回。发布前不要绕过它。
+5. 远端是 `https://github.com/spursergmk/paperlight.git`（HTTPS + `gh auth git-credential` / osxkeychain）。推送后确认 `git ls-remote --heads origin` 与 `--tags` 上出现了新提交与新标签。
+
+## 五、状态与数据
+
+- 应用状态文件：`<userData>/paperlight-state.json`
+  - 打包后 userData 通常为 `~/Library/Application Support/Paperlight/`；开发模式为 `app.getPath('userData')` 同名目录。
+  - 内容：当前空间（`activeSpace`）、打开的标签页与阅读位置、当前文件夹、最近文件/文件夹、分栏宽度、模型设置、义项/笔记/对话数据，以及 `vault`（root / recentRoots / collapsed）、`notesSpace`（打开的笔记、当前笔记、编辑视图、面板宽度）、`chatSpace`（多段对话、每段对话的 `contextPaths`、栏宽）。
+  - 旧的 localStorage 数据（`paperlight-senses-v1`、`paperlight-notebook-v2`、`paperlight-chat-v1`）首次启动时自动迁移。
+  - 打包版首次启动时，若 `Paperlight.app` 位于项目目录内且项目根有 `.env.local`，会把密钥配置复制到 userData（权限 0600）；移动到别处则不会复制。
+- **笔记在 vault 里，不在状态文件里**：`<vault>/materials/` 是用户自己的原始资料；`notes/<镜像>/` 放义项（`<词>--<义项>.md`）、记录本笔记（`<日期>-note-<序号>.md`）、AI 完整笔记与对话存回的笔记；`enlightenment/` 放专项发现；`Daily/` 放记录清单与日报。所有落盘动作都从 `src/components/useVault.ts` 走，不要在组件里另写一套。
+- **记录清单的刷新**：进入笔记空间、笔记空间内 1.5 秒防抖（义项/记录本变化）、App 里 2.5 秒防抖、以及每次写入非 Daily 笔记后的 2 秒防抖（`useVault.writeNote`）；去重靠清单 frontmatter 的 `hash`（含条目路径）。
+- **日报的生成**：`useVault.maybeGenerateReport` 每分钟看一次时间槽（`reportSlotDate`），每天每槽最多尝试一次（`scheduledAttempts`），成功后靠文件存在跳过；也可以由界面手动触发（`force`）。AI 失败回退 `localDailySummary`。
+- 内置 HTTP 服务只监听 `127.0.0.1`，默认端口 `4178`（被占用时自动换端口）。
+- `/api/*` 只接受 loopback 请求；写配置还要求同源 Origin + CSRF nonce。除 `translation-config` / `sense` / `translate` 外，新增 `vault-chat`（严格 grounded 对话）、`note`（AI 完整笔记）、`daily-summary`（日报：`records` + `findings`），三者同样只接受 loopback 请求并校验输入长度；vault 摘录预算 8 份 × 6000 字、合计 24000 字，专项发现预算 6 份 × 2500 字、合计 12000 字（`src/lib/vault.ts` 与 `server/api.mjs` 两侧常量要一致）。
+- 冒烟测试会给进程一个本地假密钥（`sk-paperlight-smoke-stub`）以打开 AI 代码路径，所有 AI 端点都在渲染进程里被打桩，因此不会联网。
+- 打包产物在 `release/`；macOS 的 app 会同时放到仓库根 `./Paperlight.app`（`scripts/expose-mac-app.mjs` 用 rename 而不是 copy，避免破坏 framework 的符号链接）。
+- 分发包是 ad-hoc 签名（`electron-builder.yml` 里 `mac.identity: '-'`）：`codesign --verify` 通过，因此不会出现"已损坏"，但未公证，对方第一次打开要右键→打开。配置 `CSC_LINK`/`WIN_CSC_LINK` 等 secrets 后即为正式签名 + 公证。
+
+## 六、明确不做 / 不要回退
+
+- 不恢复「GPT Boss / dsh_inputs / ACTIVE_TASK / 固定启动口令」那套工作流（已删除，见归档说明）。
+- 不把 app 退回成「单文档、每次手动导入、渲染全部页面」的网页阅读器。
+- 不做云端 vault 或多设备同步：vault 就是用户自己选的一个本地文件夹（浏览器调试模式才退化成虚拟 vault）。
+- 不在 App 里改用户 vault 里非 Markdown 的文件：写操作只允许 `.md`/`.markdown`（`materials/` 下的 PDF/EPUB/TXT 只读、只在树里出现，点开去阅读空间）；`notes/_inbox` 之外的 `notes/` 目录与 `materials/` 的对应关系由镜像规则决定，不要手工造路径。
+- 暂不做云同步、账号体系、OCR（扫描版 PDF 无文本层时只能阅读，不能选词）。
+- 暂不做 MOBI/AZW3、DOCX、图片/CBZ（需要转换或图片阅读器；见 README 的格式说明）。

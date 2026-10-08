@@ -9,7 +9,10 @@ const assetBase = `${import.meta.env.BASE_URL}pdfjs-assets/`
 // The legacy build is transpiled and polyfilled (e.g. it provides
 // Map.prototype.getOrInsertComputed, which Safari still lacks and which the
 // modern build assumes).
-export async function openPdf(data: Uint8Array): Promise<PDFDocumentProxy> {
+export async function openPdf(
+  data: Uint8Array,
+  onProgress?: (ratio: number) => void,
+): Promise<PDFDocumentProxy> {
   const { GlobalWorkerOptions, getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
   GlobalWorkerOptions.workerSrc = workerUrl
   const loadingTask = getDocument({
@@ -19,6 +22,11 @@ export async function openPdf(data: Uint8Array): Promise<PDFDocumentProxy> {
     standardFontDataUrl: `${assetBase}standard_fonts/`,
     wasmUrl: `${assetBase}wasm/`,
     iccUrl: `${assetBase}iccs/`,
+    ...(onProgress ? {
+      onProgress: (progress: { loaded: number; total: number }) => {
+        if (progress.total > 0) onProgress(Math.min(1, progress.loaded / progress.total))
+      },
+    } : {}),
   })
   return loadingTask.promise
 }

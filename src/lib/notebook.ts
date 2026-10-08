@@ -32,7 +32,7 @@ export function senseKeyOf(sense: SensePayload): string {
   return senseAtomId(sense)
 }
 
-export function toAtom(sense: SensePayload, model: string): SenseAtom {
+export function toAtom(sense: SensePayload, model: string, notesFolder?: string): SenseAtom {
   return {
     id: senseKeyOf(sense),
     term: sense.term,
@@ -49,6 +49,7 @@ export function toAtom(sense: SensePayload, model: string): SenseAtom {
     source: 'ai',
     schemaVersion: SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
+    ...(notesFolder ? { notesFolder } : {}),
   }
 }
 
@@ -77,7 +78,13 @@ export function noteLabel(note: NotebookNote): string {
   return `${note.date} 第 ${note.dailyOrdinal} 份笔记`
 }
 
-export function createNote(body: string, senseIds: string[], date = new Date(), sourceMessageId?: string): NotebookNote {
+export function createNote(
+  body: string,
+  senseIds: string[],
+  date = new Date(),
+  sourceMessageId?: string,
+  notesFolder?: string,
+): NotebookNote {
   const dateKey = localDateKey(date)
   const dailyOrdinal = nextDailyOrdinal(dateKey)
   return {
@@ -87,6 +94,7 @@ export function createNote(body: string, senseIds: string[], date = new Date(), 
     body: body.trim(),
     senseIds: Array.from(new Set(senseIds.filter(Boolean))),
     ...(sourceMessageId ? { sourceMessageId } : {}),
+    ...(notesFolder ? { notesFolder } : {}),
     createdAt: new Date().toISOString(),
   }
 }
