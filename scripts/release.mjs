@@ -94,18 +94,62 @@ function assertSafe(files) {
   }
 }
 
-function updateVersion(version) {
-  for (const name of PACKAGE_FILES) {
-    const file = join(projectRoot, name)
-    if (!existsSync(file)) continue
-    const text = readFileSync(file, 'utf8')
-    const updated = name === 'package.json'
-      ? text.replace(/("version"\s*:\s*")[^"]+(")/, `$1${version}$2`)
-      : text
-        .replace(/("version"\s*:\s*")[^"]+(")/, `$1${version}$2`)
-        .replace(/(\n  "packages": \{\n    "": \{\n(?:.|\n)*?"version"\s*:\s*")[^"]+(")/, `$1${version}$2`)
-    writeFileSync(file, updated)
+/**
+ * 只改写 package.json / package-lock.json 里属于本包的那两个 version 字段。
+ * 写完之前会把两份 JSON 解析出来对比（把 version 字段去掉后必须完全一致），
+ * 避免"全局替换"顺手改掉依赖版本号。
+ */
+function versionTexts(version) {
+  const files = new Map()
+  const stripPackage = (value) => {
+    const copy = { ...value }
+    delete copy.version
+    return copy
   }
+  const stripLock = (value) => {
+    const copy = { ...value }
+    delete copy.version
+    if (copy.packages && copy.packages['']) {
+      copy.packages = { ...copy.packages, '': { ...copy.packages[''], version: undefined } }
+    }
+    return copy
+  }
+  const rewrite = (name, text, replace, strip) => {
+    const next = replace(text)
+    if (next === text) return null
+    let before
+    let after
+    try {
+      before = JSON.parse(text)
+      after = JSON.parse(next)
+    } catch {
+      fail(`${name} 不是合法 JSON，已中止`)
+    }
+    if (JSON.stringify(strip(before)) !== JSON.stringify(strip(after))) {
+      fail(`${name} 的版本改写影响了其它字段，已中止（只允许改本包的 version）`)
+    }
+    return next
+  }
+
+  const pkgPath = join(projectRoot, 'package.json')
+  const pkgText = readFileSync(pkgPath, 'utf8')
+  const nextPkg = rewrite('package.json', pkgText,
+    (text) => text.replace(/("version"\s*:\s*")[^"]+(")/, `$1${version}$2`),
+    stripPackage)
+  if (!nextPkg) fail('package.json 里找不到 version 字段')
+  files.set(pkgPath, nextPkg)
+
+  const lockPath = join(projectRoot, 'package-lock.json')
+  if (existsSync(lockPath)) {
+    const lockText = readFileSync(lockPath, 'utf8')
+    const nextLock = rewrite('package-lock.json', lockText,
+      (text) => text
+        .replace(/^(\s*"version":\s*")[^"]+(")/m, `$1${version}$2`)
+        .replace(/(\n  "packages": \{\n    "": \{\n[^}]*?"version":\s*")[^"]+(")/, `$1${version}$2`),
+      stripLock)
+    if (nextLock) files.set(lockPath, nextLock)
+  }
+  return files
 }
 
 function entryFor(version, date, files) {
@@ -189,7 +233,7 @@ if (!writeEntry) {
 console.log(`版本：${keepVersion ? `${version}（保持 package.json 里的版本）` : `${pkg.version} → ${version}（${bump}）`}`)
 console.log(`改动：${meaningful.length} 个文件${summary ? ` · ${summary}` : ''}`)
 
-updateVersion(version)
+for (const [file, text] of versionTexts(version)) writeFileSync(file, text)
 if (writeEntry) prependChangelog(entryFor(version, date, meaningful))
 
 git(['add', '-A'])
@@ -204,8 +248,16 @@ console.log(`✓ 已提交并打标签 v${version}`)
 
 if (push) {
   const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'])
-  git(['push', 'origin', `HEAD:${branch}`], { stdio: 'inherit' })
-  git(['push', 'origin', `v${version}`], { stdio: 'inherit' })
+  try {
+    git(['push', 'origin', `HEAD:${branch}`], { stdio: 'inherit' })
+    git(['push', 'origin', `v${version}`], { stdio: 'inherit' })
+  } catch {
+    console.error('\n✗ 推送失败（本地提交与标签已经就绪，修好之后重新 push 即可）：')
+    console.error('  · 凭据缺少 workflow 权限（要推送 .github/workflows/* 就必须有）：gh auth refresh -h github.com -s workflow')
+    console.error('  · macOS 上改用钥匙串里的凭据：git -c credential.helper= -c credential.helper=osxkeychain push origin HEAD')
+    console.error(`  · 先确认远端可达：git ls-remote --heads origin；再 git push origin ${branch} && git push origin v${version}`)
+    process.exit(1)
+  }
   console.log(`✓ 已推送 origin/${branch} 与 v${version}`)
 } else {
   console.log('（--no-push：没有推送，本地提交与标签已就绪）')
