@@ -1348,6 +1348,145 @@ export async function runSmokeTest({ window, projectRoot }) {
       `root=${vaultState.vault?.root} threads=${vaultState.chatSpace?.threads?.length} notes=${vaultState.notesSpace?.openPaths?.length} view=${vaultState.notesSpace?.view} reportTime=${vaultState.settings?.dailyReportTime}`,
     )
     await screenshot(window, artifacts, '18-final-vault-state.png')
+
+    // Same-lexeme AI results with changing IDs require an explicit merge choice;
+    // distinct senses remain separate and a confirmed mapping becomes stable.
+    const queryTypedSense = async (term) => evaluate(wc, `(() => {
+      const input = document.querySelector('.query-row #query-term')
+      if (!input) return false
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, ${JSON.stringify(term)})
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.query-go').click()
+      return true
+    })()`)
+    const withinFirst = { sense: {
+      term: 'within', lemma: 'within', partOfSpeech: 'preposition', senseId: 'inside-framework',
+      contextualMeaning: '在框架或范围之内', definition: 'inside a framework or boundary', contextSentence: 'AI-provided wording must not replace the source quote.',
+      examples: [{ text: 'within a framework', translation: '在框架之内', sourceType: 'ai_generated', citation: null }],
+      guidance: { scenarios: ['描述范围关系'], advice: ['用于说明边界'], frequency: '常见', alternatives: [], synonyms: [], antonyms: [], morphology: { root: '', prefix: '', suffix: '', note: '' } },
+    } }
+    const withinVariant = { sense: {
+      ...withinFirst.sense, senseId: 'limited-range', contextualMeaning: '处在限定范围以内',
+      definition: 'inside a specified range', contextSentence: 'Another AI paraphrase, not a source quote.',
+      examples: [
+        withinFirst.sense.examples[0],
+        { text: 'within the agreed limits', translation: '在约定限制之内', sourceType: 'ai_generated', citation: null },
+      ],
+      guidance: { ...withinFirst.sense.guidance, advice: ['用于说明边界', '与限制或期限搭配'] },
+    } }
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, `document.querySelector('.reader-toolbar') !== null`, { label: 'semantic merge reader' })
+    wc.send('app:open-paths', [bigPdf])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Foucault-liberal-political-economy.pdf')`, { label: 'first semantic source' })
+    await ensureTextLayer(wc, 'first semantic source')
+    await installSenseStub(wc, withinFirst)
+    const selectedWithinA = await selectPhrase('.textLayer', 'within')
+    await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '在框架或范围之内'`, { label: 'first within semantic result' })
+    await evaluate(wc, `document.querySelector('.sense-add').click(); true`)
+    await waitFor(wc, `document.querySelector('.sense-add.added') !== null`, { label: 'first within semantic captured' })
+
+    wc.send('app:open-paths', [expressionPdfPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'second semantic source' })
+    await ensureTextLayer(wc, 'second semantic source')
+    await installSenseStub(wc, withinVariant)
+    const selectedWithinB = await selectPhrase('.textLayer', 'within')
+    await waitFor(wc, `document.querySelector('.sense-meta')?.textContent.includes('limited-range')`, { label: 'variant AI semantic result' })
+    await evaluate(wc, `document.querySelector('.sense-add').click(); true`)
+    await waitFor(wc, `document.querySelector('.semantic-merge-review') !== null`, { label: 'semantic merge confirmation' })
+    await evaluate(wc, `document.querySelector('.semantic-merge-review')?.scrollIntoView({ block: 'start', behavior: 'instant' }); true`)
+    await sleep(200)
+    await screenshot(window, artifacts, '20-semantic-merge-confirmation.png')
+    const mergeCandidateCount = await evaluate(wc, `document.querySelectorAll('.semantic-merge-candidate').length`)
+    await evaluate(wc, `document.querySelector('.semantic-merge-candidate .secondary-button').click(); true`)
+    await waitFor(wc, `!document.querySelector('.semantic-merge-review') && document.querySelector('.sense-add.added')`, { label: 'confirmed semantic merge' })
+    const mergedWithin = await evaluate(wc, `(() => {
+      const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+      const atoms = (state.notebook?.atoms || []).filter((atom) => atom.lemma === 'within')
+      const atom = atoms.find((item) => item.id === 'within|preposition|inside-framework')
+      return { count: atoms.length, id: atom?.id, definition: atom?.definition, alternateIds: atom?.alternateSemanticIds || [], quotes: (atom?.contexts || []).map((context) => context.quote), sources: (atom?.contexts || []).map((context) => context.sourcePath), examples: (atom?.examples || []).map((example) => example.text), advice: atom?.guidance?.advice || [] }
+    })()`)
+    record('same semantic with a changed AI ID asks once, preserves explanation and accumulates two true source contexts',
+      selectedWithinA && selectedWithinB && mergeCandidateCount === 1
+        && mergedWithin.count === 1 && mergedWithin.id === 'within|preposition|inside-framework'
+        && mergedWithin.definition === 'inside a framework or boundary'
+        && mergedWithin.alternateIds.includes('within|preposition|limited-range')
+        && mergedWithin.sources.some((path) => path === bigPdf) && mergedWithin.sources.some((path) => path === expressionPdfPath)
+        && mergedWithin.quotes.includes('within') && mergedWithin.examples.includes('within the agreed limits')
+        && mergedWithin.advice.includes('与限制或期限搭配'), JSON.stringify(mergedWithin))
+
+    // The confirmed alternate ID is now deterministic and no longer prompts.
+    await selectPhrase('.textLayer', 'within')
+    await waitFor(wc, `document.querySelector('.sense-add.added') !== null && !document.querySelector('.semantic-merge-review')`, { label: 'known semantic alias' })
+    record('a confirmed alternate semantic ID resolves automatically on the next lookup', true)
+
+    // Saving only an AI excerpt also uses the merge decision and links the new
+    // note to the canonical semantic ID after the user confirms the merge.
+    const withinNoteVariant = { sense: {
+      ...withinFirst.sense, senseId: 'inside-framework-note', contextualMeaning: '在框架内部',
+      definition: 'inside the structure of a framework',
+    } }
+    await installSenseStub(wc, withinNoteVariant)
+    await queryTypedSense('within')
+    await waitFor(wc, `document.querySelector('.sense-meta')?.textContent.includes('inside-framework-note')`, { label: 'within excerpt semantic result' })
+    await evaluate(wc, `document.querySelector('.save-note-button').click(); true`)
+    await waitFor(wc, `document.querySelector('.semantic-merge-review') !== null`, { label: 'excerpt semantic merge confirmation' })
+    await evaluate(wc, `document.querySelector('.semantic-merge-candidate .secondary-button').click(); true`)
+    await waitFor(wc, `!document.querySelector('.semantic-merge-review')`, { label: 'excerpt merge saved' })
+    const excerptLink = await evaluate(wc, `(() => {
+      const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+      const note = (state.notebook?.notes || []).find((item) => item.body.includes('在框架内部'))
+      return { senseIds: note?.senseIds || [], canonical: (state.notebook?.atoms || []).some((atom) => atom.id === 'within|preposition|inside-framework') }
+    })()`)
+    record('saving one semantic excerpt confirms integration and links to the canonical record',
+      excerptLink.canonical && excerptLink.senseIds.includes('within|preposition|inside-framework')
+        && !excerptLink.senseIds.includes('within|preposition|inside-framework-note'), JSON.stringify(excerptLink))
+
+    const bankFinance = { sense: {
+      ...withinFirst.sense, term: 'bank', lemma: 'bank', senseId: 'financial-institution',
+      contextualMeaning: '银行', definition: 'a financial institution', contextSentence: 'A bank holds and lends money.',
+    } }
+    const bankRiver = { sense: {
+      ...bankFinance.sense, senseId: 'river-edge', contextualMeaning: '河岸',
+      definition: 'the land beside a river', contextSentence: 'They sat on the river bank.',
+    } }
+    await installSenseStub(wc, bankFinance)
+    await queryTypedSense('bank')
+    await waitFor(wc, `document.querySelector('.sense-meta')?.textContent.includes('financial-institution')`, { label: 'bank financial semantic' })
+    await evaluate(wc, `document.querySelector('.sense-add').click(); true`)
+    await waitFor(wc, `document.querySelector('.sense-add.added') !== null`, { label: 'first bank semantic captured' })
+    await installSenseStub(wc, bankRiver)
+    await queryTypedSense('bank')
+    await waitFor(wc, `document.querySelector('.sense-meta')?.textContent.includes('river-edge')`, { label: 'bank river semantic' })
+    await evaluate(wc, `document.querySelector('.sense-add').click(); true`)
+    await waitFor(wc, `document.querySelector('.semantic-merge-review') !== null`, { label: 'different bank semantic decision' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.semantic-merge-review footer button')).find((button) => button.textContent.includes('作为不同语义')).click(); true`)
+    await waitFor(wc, `document.querySelector('.sense-add.added') !== null && !document.querySelector('.semantic-merge-review')`, { label: 'distinct bank semantic captured' })
+    const bankSemantics = await evaluate(wc, `(() => {
+      const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+      return (state.notebook?.atoms || []).filter((atom) => atom.lemma === 'bank').map((atom) => ({ id: atom.id, meaning: atom.contextualMeaning }))
+    })()`)
+    record('different meanings of the same English word remain separate after explicit choice',
+      bankSemantics.length === 2 && new Set(bankSemantics.map((atom) => atom.id)).size === 2
+        && bankSemantics.some((atom) => atom.meaning === '银行') && bankSemantics.some((atom) => atom.meaning === '河岸'), JSON.stringify(bankSemantics))
+
+    // Save the confirmed record and ensure its alternate model identity survives in Vault Markdown.
+    await installSenseStub(wc, withinVariant)
+    await queryTypedSense('within')
+    await waitFor(wc, `document.querySelector('.sense-add.added') !== null`, { label: 'within alias before vault save' })
+    await evaluate(wc, `document.querySelector('.vault-action-row .vault-button').click(); true`)
+    const withinNotePath = join(vaultDir, 'notes', 'books', 'book1', 'within--inside-framework.md')
+    let withinNote = ''
+    for (let attempt = 0; attempt < 30 && !withinNote; attempt += 1) {
+      await sleep(200)
+      try { withinNote = readFileSync(withinNotePath, 'utf8') } catch { withinNote = '' }
+    }
+    record('confirmed semantic IDs and source contexts persist in Vault Markdown',
+      withinNote.includes('alternateSemanticIds: [')
+        && withinNote.includes('within|preposition|limited-range')
+        && withinNote.includes('within|preposition|inside-framework-note')
+        && withinNote.includes('Foucault-liberal-political-economy.pdf') && withinNote.includes('book1.pdf'),
+      withinNote.split('\n').slice(0, 12).join(' | '))
   } catch (error) {
     let diagnostic = null
     try {

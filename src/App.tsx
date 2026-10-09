@@ -43,7 +43,8 @@ import {
 } from './lib/persist'
 import { askSense, expandSenses, lookupSense, sentenceAround, termFromSelection } from './lib/sense'
 import {
-  createNote, mergeSemanticAtom, relateSense, senseKeyOf, toAtom,
+  confirmSemanticMerge, createNote, mergeSemanticAtom, possibleSemanticMergeCandidates, relateSense, semanticRecordForId,
+  selectionMatchesSemanticTerm, senseKeyOf, toAtom,
 } from './lib/notebook'
 import { recordReadingInterval } from './lib/readingActivity'
 import {
@@ -54,7 +55,7 @@ import {
 } from './lib/translation'
 import type { ApiConfigStatus } from './lib/translation'
 import type {
-  AppSpace, ChatMessage, ChatThread, NoteViewMode, NotebookNote, SensePayload, SenseSummary,
+  AppSpace, ChatMessage, ChatThread, NoteViewMode, NotebookNote, SenseAtom, SensePayload, SenseSummary,
   ExpressionContext, InputMarker, InputMarkerPurpose, InputMarkerVisualStyle, TextSelection, TranslateMode,
 } from './types'
 
@@ -62,6 +63,7 @@ type LeftTab = 'files' | 'pages' | 'outline'
 
 type FlowOutlineItem = TextOutlineItem | EpubOutlineItem
 type InputMarkerDraft = Omit<InputMarker, 'id' | 'createdAt'> & { x: number; y: number }
+type SemanticCaptureDestination = 'notebook' | 'vault'
 
 interface LoadedDocument {
   kind: DocumentKind
@@ -169,6 +171,12 @@ function App() {
   const [senseError, setSenseError] = useState('')
   const [allSenses, setAllSenses] = useState<SenseSummary[] | null>(null)
   const [expanding, setExpanding] = useState(false)
+  const [pendingSemanticCapture, setPendingSemanticCapture] = useState<{
+    atom: SenseAtom
+    candidates: SenseAtom[]
+    destination: SemanticCaptureDestination
+    note?: NotebookNote
+  } | null>(null)
   const [selection, setSelection] = useState<TextSelection | null>(null)
   const [pendingSourceJump, setPendingSourceJump] = useState<{ path: string; position: number } | null>(null)
   const [expressionCapture, setExpressionCapture] = useState<{
@@ -233,7 +241,7 @@ function App() {
   const activeInputMarkers = activePath ? state.inputMarkers.filter((marker) => marker.sourcePath === activePath) : []
   const chat = notebook.chat
   const senseId = sense ? senseKeyOf(sense) : null
-  const senseInNotebook = Boolean(senseId && atoms.some((atom) => atom.id === senseId))
+  const senseInNotebook = Boolean(senseId && semanticRecordForId(senseId, atoms))
   const relations = useMemo(() => (sense ? relateSense(sense, atoms) : []), [sense, atoms])
   const chatMessages = senseId ? chat[senseId] || [] : []
   const savedMessageIds = useMemo(() => new Set(
@@ -536,34 +544,90 @@ function App() {
     }
   }, [openNoteInNotesSpace])
 
-  const saveSenseToVault = useCallback(() => {
-    if (!sense) return
-    const atom = toAtom(sense, model, readerNotesFolder, selection?.documentPath === activePath ? selection : null)
-    void runVaultAction(
-      async () => {
-        const existingAtStart = stateRef.current.notebook.atoms.find((item) => item.id === atom.id)
-        const merged = existingAtStart ? mergeSemanticAtom(existingAtStart, atom) : atom
-        const path = await vaultRef.current.saveSenseNote(merged)
+  const commitSemanticCapture = useCallback((incoming: SenseAtom, mergeTargetId: string | null, destination: SemanticCaptureDestination, note?: NotebookNote) => {
+    setPendingSemanticCapture(null)
+    const findResolved = (current: SenseAtom[]) => mergeTargetId
+      ? current.find((item) => item.id === mergeTargetId)
+      : semanticRecordForId(incoming.id, current)
+    const resolve = (existing?: SenseAtom) => {
+      if (!existing) return incoming
+      return incoming.id === existing.id
+        ? mergeSemanticAtom(existing, incoming)
+        : confirmSemanticMerge(existing, incoming)
+    }
+
+    if (destination === 'vault') {
+      if (!vaultRef.current.ready) {
+        setVaultActionMessage({ kind: 'error', text: '先在笔记空间里选择一个 vault 文件夹。' })
+        return
+      }
+      void runVaultAction(async () => {
+        const record = resolve(findResolved(stateRef.current.notebook.atoms))
+        const path = await vaultRef.current.saveSenseNote(record)
         setNotebook((current) => {
-          const existing = current.atoms.find((item) => item.id === atom.id)
-          // An atom collected before the material context existed keeps its
-          // history but learns where its note now lives.
-          const stored = existing
-            ? { ...mergeSemanticAtom(existing, merged), notesFolder: existing.notesFolder || merged.notesFolder, notePath: path }
-            : { ...merged, notePath: path }
+          const existing = current.atoms.find((item) => item.id === record.id)
+          const merged = existing ? mergeSemanticAtom(existing, record) : record
+          const stored = {
+            ...merged,
+            notesFolder: merged.notesFolder || record.notesFolder,
+            notePath: path,
+          }
           return {
             ...current,
             atoms: existing
-              ? current.atoms.map((item) => (item.id === atom.id ? stored : item))
+              ? current.atoms.map((item) => item.id === record.id ? stored : item)
               : [stored, ...current.atoms],
           }
         })
-        setActiveAtomId(atom.id)
+        setActiveAtomId(record.id)
         return path
-      },
-      (path) => `语义已写入 vault：${path}`,
-    )
-  }, [activePath, model, readerNotesFolder, runVaultAction, sense, selection, setNotebook])
+      }, (path) => `语义已写入 vault：${path}`)
+      return
+    }
+
+    const existing = findResolved(stateRef.current.notebook.atoms)
+    const resolved = resolve(existing)
+    setNotebook((current) => {
+      const latest = findResolved(current.atoms)
+      const stored = latest ? resolve(latest) : resolved
+      return {
+        ...current,
+        atoms: latest
+          ? current.atoms.map((item) => item.id === latest.id ? stored : item)
+          : [stored, ...current.atoms],
+        notes: note
+          ? [{ ...note, senseIds: Array.from(new Set(note.senseIds.map((id) => id === incoming.id ? stored.id : id))) }, ...current.notes]
+          : current.notes,
+      }
+    })
+    setActiveAtomId(resolved.id)
+  }, [runVaultAction, setNotebook])
+
+  const requestSemanticCapture = useCallback((destination: SemanticCaptureDestination) => {
+    if (!sense) return
+    if (destination === 'vault' && !vaultRef.current.ready) {
+      setVaultActionMessage({ kind: 'error', text: '先在笔记空间里选择一个 vault 文件夹。' })
+      return
+    }
+    const selectedSource = selection?.documentPath === activePath
+      && selectionMatchesSemanticTerm(selection.text, [sense.term, sense.lemma, queryTerm])
+      ? selection : null
+    const atom = toAtom(sense, model, readerNotesFolder, selectedSource)
+    const current = stateRef.current.notebook.atoms
+    const existing = semanticRecordForId(atom.id, current)
+    if (existing) {
+      commitSemanticCapture(atom, existing.id, destination)
+      return
+    }
+    const candidates = possibleSemanticMergeCandidates(atom, current)
+    if (candidates.length > 0) {
+      setPendingSemanticCapture({ atom, candidates, destination })
+      return
+    }
+    commitSemanticCapture(atom, null, destination)
+  }, [activePath, commitSemanticCapture, model, queryTerm, readerNotesFolder, sense, selection])
+
+  const saveSenseToVault = useCallback(() => requestSemanticCapture('vault'), [requestSemanticCapture])
 
   const generateCompleteNote = useCallback(() => {
     if (!sense) return
@@ -1012,6 +1076,7 @@ function App() {
   const runSenseLookup = useCallback(async (term: string, context: string) => {
     const cleaned = term.trim()
     if (!cleaned) return
+    setPendingSemanticCapture(null)
     const requestId = ++senseRequestRef.current
     lastContextRef.current = context
     setSenseLoading(true)
@@ -1315,15 +1380,7 @@ function App() {
   }, [])
 
   function addCurrentSense() {
-    if (!sense) return
-    const atom = toAtom(sense, model, readerNotesFolder, selection?.documentPath === activePath ? selection : null)
-    setNotebook((current) => ({
-      ...current,
-      atoms: current.atoms.some((item) => item.id === atom.id)
-        ? current.atoms.map((item) => item.id === atom.id ? mergeSemanticAtom(item, atom) : item)
-        : [atom, ...current.atoms],
-    }))
-    setActiveAtomId(atom.id)
+    requestSemanticCapture('notebook')
   }
 
   async function expandCurrent() {
@@ -1370,15 +1427,22 @@ function App() {
   // Saving any excerpt also stores the term ↔ sense atom so the link resolves.
   function saveExcerpt(body: string, sourceMessageId?: string) {
     if (!sense || (sourceMessageId && savedMessageIds.has(sourceMessageId))) return
-    const atom = toAtom(sense, model, readerNotesFolder, selection?.documentPath === activePath ? selection : null)
+    const selectedSource = selection?.documentPath === activePath
+      && selectionMatchesSemanticTerm(selection.text, [sense.term, sense.lemma, queryTerm])
+      ? selection : null
+    const atom = toAtom(sense, model, readerNotesFolder, selectedSource)
     const note = createNote(body, [atom.id], new Date(), sourceMessageId, readerNotesFolder)
-    setNotebook((current) => ({
-      ...current,
-      atoms: current.atoms.some((item) => item.id === atom.id)
-        ? current.atoms.map((item) => item.id === atom.id ? mergeSemanticAtom(item, atom) : item)
-        : [atom, ...current.atoms],
-      notes: [note, ...current.notes],
-    }))
+    const existing = semanticRecordForId(atom.id, stateRef.current.notebook.atoms)
+    if (existing) {
+      commitSemanticCapture(atom, existing.id, 'notebook', note)
+      return
+    }
+    const candidates = possibleSemanticMergeCandidates(atom, stateRef.current.notebook.atoms)
+    if (candidates.length > 0) {
+      setPendingSemanticCapture({ atom, candidates, destination: 'notebook', note })
+      return
+    }
+    commitSemanticCapture(atom, null, 'notebook', note)
   }
 
   function addNoteToActiveAtom(body: string) {
@@ -2077,8 +2141,16 @@ function App() {
             onTranslate={() => selection && void runTranslation(selection)}
             selection={selection}
             senseInNotebook={senseInNotebook}
+            semanticMergeCandidates={pendingSemanticCapture?.candidates || []}
             relations={relations}
             onAddSense={addCurrentSense}
+            onConfirmSemanticMerge={(semanticId) => {
+              if (pendingSemanticCapture) commitSemanticCapture(pendingSemanticCapture.atom, semanticId, pendingSemanticCapture.destination, pendingSemanticCapture.note)
+            }}
+            onKeepSeparateSemantic={() => {
+              if (pendingSemanticCapture) commitSemanticCapture(pendingSemanticCapture.atom, null, pendingSemanticCapture.destination, pendingSemanticCapture.note)
+            }}
+            onCancelSemanticMerge={() => setPendingSemanticCapture(null)}
             model={model}
             onJumpToAtom={(id) => { setActiveAtomId(id); setRightTab('notebook') }}
             atoms={atoms}

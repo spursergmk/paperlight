@@ -14,7 +14,7 @@
 
 当前开发分支已有的可运行增量包括：表达池（Markdown 持久化、识别/探索来源、重复语境合并、AI 候选需确认）、表达与语义/笔记的本地搜索、PDF/EPUB/TXT/Markdown 阅读标记、保守的原文定位恢复，以及按活跃交互估算阅读时间并生成五段 Daily。macOS App 已做隔离配置启动检查；完整 P0/P1 验收、签名/公证、全文尺度阅读助手、完整 Enlightenment 研究关联和网页导入仍未完成。试用迭代只更新仓库根目录的 `Paperlight.app`，不生成安装包。
 
-语义数据保留 V1 的确定性 ID、旧文件路径、`senses` frontmatter 与 `/api/sense` 契约；新记录添加 `semantic` 标记与 `semantics` 关联字段。用户改过的语义 Markdown 正文会被保留，语境只更新在 Paperlight 管理的区块里。
+语义数据保留 V1 的确定性 ID、旧文件路径、`senses` frontmatter 与 `/api/sense` 契约；新记录添加 `semantic` 标记与 `semantics` 关联字段。相同 AI 语义 ID 自动累积来源；同一词元和词性但 AI ID 不同时，会先让用户选择合并语境或保留为不同语义。确认合并后保留旧解释，并记录备用 ID 以避免下次重复询问。用户改过的语义 Markdown 正文会被保留，语境只更新在 Paperlight 管理的区块里。
 
 ## 快速开始
 

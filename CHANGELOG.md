@@ -19,20 +19,20 @@ Paperlight 的版本号规则：**整数部分 = 大版本功能变更，小数�
 - 表达池以 Markdown 保存表达本体、Recognition/Exploration 来源、多个材料语境和表达联系；PDF/EPUB 重复摘录会合并到同一表达，AI 探索候选必须由用户确认后才写入。
 - 阅读 PDF/EPUB/TXT/Markdown 与阅读助手回答可直接收录表达；对话消息支持直接摘录。表达池提供本地搜索、编辑、删除、关系和来源回跳。
 - PDF、EPUB、文本材料支持进度/形式/内容输入标记；视觉高亮、下划线不修改原始材料。定位使用原文摘录和上下文校验，无法可靠恢复时明确标出。
-- 语义记录累积带来源的语境；归档到原 V1 文件路径时保留用户编辑的 Markdown，只更新 Paperlight 标记的语境块。继续读取旧 ID、文件路径、`senses` frontmatter 与 `/api/sense`。
+- 语义记录累积带来源的语境。完全相同的语义 ID 自动累积；同词性、同词元但 AI ID 不同的记录先由用户决定合并还是分开，确认合并后保留旧解释并记住新 ID。语义摘录和普通记事共用此流程，笔记链接最终指向规范记录。归档到原 V1 文件路径时保留用户编辑的 Markdown，只更新 Paperlight 标记的语境块；继续读取旧 ID、文件路径、`senses` frontmatter 与 `/api/sense`。
 - 新增本地表达/语义/笔记检索；Daily 改为五段，并只把前台阅读器中近期有交互的时长计为估算阅读时间，跨午夜分日。Daily 管理区有内容指纹，检测到手改内容时先保留原文快照再重建。
 - `PAPERLIGHT_USER_DATA_DIR` 为开发版提供隔离应用状态目录，避免试用 V2 与正式 V1 共用状态文件。
 
 ### 尚未完成
 
-- P0/P1 全量验收尚未结束：仍需完成完整语义增量整合交互、更多格式与来源的标记回溯复核、阅读助手单词至全文尺度、Enlightenment 专项研究关联和网页正文导入等。
+- P0/P1 全量验收尚未结束：语义确认合并已覆盖 Electron 试用闭环，但旧 Vault 的真实迁移演练、更多 ID/格式差异仍需检查；还需完成更多来源的标记回溯复核、阅读助手单词至全文尺度、Enlightenment 专项研究关联和网页正文导入等。
 - P0/P1 未完成前不维护分发安装包。当前只更新了 macOS universal `Paperlight.app` 供本地试用；采用 ad-hoc 签名，无公证。包版本未升级，未创建或推送 Git 标签，也未发布 GitHub Release。
 - 构建仍有主 JS chunk 大于 500 KB 的 Vite 警告。
 
 ### 当前验证
 
-- `npm run check`：89 个测试通过，含构建、单元测试和 Node 语法检查；Daily 手动编辑保护有单测。
-- `npm run smoke`：Electron 桌面 smoke 通过；覆盖 V1 阅读/笔记/对话回归、PDF/EPUB 表达、AI 候选确认、PDF 标记重开、EPUB 标记跳回章节、五段 Daily、阅读时间估算和旧 Daily 迁移。
+- `npm run check`：93 个测试通过，含构建、单元测试和 Node 语法检查；覆盖语义候选判定、确认后别名、原文来源、Vault frontmatter 与用户正文保留。
+- `npm run smoke`：Electron 桌面 smoke 通过；覆盖 V1 阅读/笔记/对话回归、PDF/EPUB 表达、AI 候选确认、PDF 标记重开、EPUB 标记跳回章节、五段 Daily、阅读时间估算、旧 Daily 迁移、语义跨文档合并/分开及语义摘录链接。
 - `npm run app:mac`：只生成并替换仓库根目录 `Paperlight.app`；universal 架构检查和 `codesign --verify --deep --strict` 通过，原有 `release/` 文件未改动。
 - 打包 App 通过 loopback 调试检查，renderer 已挂载且 `window.paperlight` 安全桥接可用；试用状态目录独立，未复制项目 API Key。
 

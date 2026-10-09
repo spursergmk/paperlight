@@ -33,8 +33,12 @@ export default function AssistantPanel({
   onTranslate,
   selection,
   senseInNotebook,
+  semanticMergeCandidates,
   relations,
   onAddSense,
+  onConfirmSemanticMerge,
+  onKeepSeparateSemantic,
+  onCancelSemanticMerge,
   model,
   onJumpToAtom,
   atoms,
@@ -82,8 +86,12 @@ export default function AssistantPanel({
   onTranslate: () => void
   selection: TextSelection | null
   senseInNotebook: boolean
+  semanticMergeCandidates: SenseAtom[]
   relations: SenseRelation[]
   onAddSense: () => void
+  onConfirmSemanticMerge: (semanticId: string) => void
+  onKeepSeparateSemantic: () => void
+  onCancelSemanticMerge: () => void
   model: string
   onJumpToAtom: (id: string) => void
   atoms: SenseAtom[]
@@ -186,6 +194,29 @@ export default function AssistantPanel({
 
           {sense && !senseLoading && (
             <>
+              {semanticMergeCandidates.length > 0 && (
+                <section className="semantic-merge-review" aria-label="确认语义整合" role="group">
+                  <h4>这个词已有语义记录</h4>
+                  <p>本次结果的 AI 标识不同。选择一个已有语义来积累新语境，或保留为不同语义；已有解释不会被覆盖。</p>
+                  <div className="semantic-merge-options">
+                    {semanticMergeCandidates.map((candidate) => (
+                      <article className="semantic-merge-candidate" key={candidate.id}>
+                        <div>
+                          <strong>{candidate.contextualMeaning}</strong>
+                          <span>{candidate.partOfSpeech} · {candidate.senseId}</span>
+                          <p>{candidate.definition}</p>
+                        </div>
+                        <button type="button" className="secondary-button" onClick={() => onConfirmSemanticMerge(candidate.id)}>合并语境</button>
+                      </article>
+                    ))}
+                  </div>
+                  <footer>
+                    <button type="button" className="text-action" onClick={onKeepSeparateSemantic}>作为不同语义收录</button>
+                    <button type="button" className="text-action" onClick={onCancelSemanticMerge}>取消</button>
+                  </footer>
+                </section>
+              )}
+
               <SenseCard
                 sense={sense}
                 model={model}

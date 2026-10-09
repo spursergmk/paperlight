@@ -461,6 +461,7 @@ export function senseNoteMarkdown(atom: SenseAtom): string {
     semanticId: atom.id,
     semantics: [atom.id],
     senses: [atom.id],
+    alternateSemanticIds: atom.alternateSemanticIds || [],
     source: atom.model || 'ai',
     ...(atom.notesFolder ? { folder: atom.notesFolder } : {}),
   }, body.join('\n'))
@@ -495,12 +496,17 @@ export function mergeSemanticNoteMarkdown(existing: string, atom: SenseAtom): st
     : `${parsed.body.trimEnd()}\n\n${block}\n`
   const senses = frontmatterList(parsed.data, 'senses')
   const semantics = frontmatterList(parsed.data, 'semantics')
+  const alternateSemanticIds = Array.from(new Set([
+    ...frontmatterList(parsed.data, 'alternateSemanticIds'),
+    ...(atom.alternateSemanticIds || []),
+  ])).filter((id) => id && id !== atom.id)
   return stringifyNote({
     ...parsed.data,
     kind: 'semantic',
     semanticId: atom.id,
     semantics: semantics.includes(atom.id) ? semantics : [...semantics, atom.id],
     senses: senses.includes(atom.id) ? senses : [...senses, atom.id],
+    alternateSemanticIds,
     updated: new Date().toISOString(),
   }, body)
 }

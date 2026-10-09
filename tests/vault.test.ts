@@ -176,10 +176,11 @@ test('noteKindFor prefers frontmatter and understands the vault layout', () => {
 })
 
 test('a collected sense becomes one Markdown note inside its material folder', () => {
-  const source = senseNoteMarkdown(makeAtom({ notesFolder: 'books/book1' }))
+  const source = senseNoteMarkdown(makeAtom({ notesFolder: 'books/book1', alternateSemanticIds: ['within|prep|limits-v2'] }))
   const { data, body } = parseNote(source)
   assert.equal(frontmatterString(data, 'kind'), 'semantic')
   assert.deepEqual(frontmatterList(data, 'senses'), ['numerous|adjective|many'])
+  assert.deepEqual(frontmatterList(data, 'alternateSemanticIds'), ['within|prep|limits-v2'])
   assert.equal(frontmatterString(data, 'folder'), 'books/book1')
   assert.match(body, /# numerous（adjective · many）/)
   assert.match(body, /出处：Oxford, 2020/)
@@ -199,13 +200,14 @@ test('semantic note updates append contexts while preserving user-edited Markdow
   const second = makeAtom({ contexts: [
     ...(first.contexts || []),
     { id: 'ctx-two', createdAt: '2026-02-15T08:00:00.000Z', sourceKind: 'epub', sourcePath: 'materials/two.epub', sourceName: 'two.epub', quote: 'A different source sentence.' },
-  ] })
+  ], alternateSemanticIds: ['within|preposition|alternate-model-id'] })
   const edited = senseNoteMarkdown(first).replace('**英文释义**：existing in large numbers', '**英文释义**：我手动改过的释义') + '\n### 我的补充\n\n保留这段笔记。\n'
   const merged = parseNote(mergeSemanticNoteMarkdown(edited, second))
   assert.match(merged.body, /我手动改过的释义/)
   assert.match(merged.body, /保留这段笔记/)
   assert.match(merged.body, /A different source sentence/)
   assert.deepEqual(frontmatterList(merged.data, 'semantics'), [first.id])
+  assert.deepEqual(frontmatterList(merged.data, 'alternateSemanticIds'), ['within|preposition|alternate-model-id'])
   assert.equal(frontmatterString(merged.data, 'kind'), 'semantic')
 })
 

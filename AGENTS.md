@@ -80,7 +80,7 @@ electron-builder.yml     macOS（dmg+zip，universal）/ Windows（nsis+zip）/ 
 - 纯逻辑（分页几何、选区解析、笔记序数、vault 路径/模板/日记汇总）放 `src/lib/`，并在 `tests/*.test.ts` 里覆盖。
 - **vault 的每一次磁盘访问都走 `vault:*` IPC**：路径必须是 vault 相对路径、不能有 `..`、解析后必须落在所选文件夹内（额外做符号链接检查），写入用「临时文件 + rename」，只允许 `.md`/`.markdown`。渲染进程不要自己拼绝对路径去读盘。
 - **笔记只能是 Markdown，位置由材料决定**：语义与笔记写到 `notes/<materials 镜像>/`（`notes/_inbox/` 表示没有材料上下文），专项发现写 `enlightenment/`，记录清单写 `Daily/<日期>.md`，日报写 `Daily/<日期>-report.md`。frontmatter 只用 `src/lib/vault.ts` 的安全子集。
-- **V1 语义兼容优先**：V1 的 `SenseAtom` 身份、旧文件路径、`senses` frontmatter、`/api/sense` 与历史链接必须继续可读。V2 新建笔记可写 `kind: semantic` 与 `semantics`，不做批量重命名或破坏性迁移。AI 重复查询只能追加语境，不得覆盖用户改过的 Markdown 正文；Paperlight 只替换自己标记的语境块。
+- **V1 语义兼容优先**：V1 的 `SenseAtom` 身份、旧文件路径、`senses` frontmatter、`/api/sense` 与历史链接必须继续可读。V2 新建笔记可写 `kind: semantic` 与 `semantics`，不做批量重命名或破坏性迁移。完全相同的语义 ID 可自动累积；不同 AI ID 即使词元/词性相同也必须先询问用户，不得直接调用 `mergeSemanticAtom` 跨 ID 合并。确认后保留 alternate ID、原解释和来源；AI 更新不得覆盖用户改过的 Markdown 正文，Paperlight 只替换自己标记的语境块。
 - **表达记录保持来源**：Vault 的 `expressions/*.md` 是表达本体、语境和联系的权威数据；确定性规范化只合并大小写/空白/标点差异，不因语义相近自动合并不同表达。AI 候选只有用户确认后才写盘，并保留生成来源。
 - **写入时记录真实路径**：原子/笔记上的 `notesFolder` 是「应该在哪」，`notePath` 是「实际写到哪」。`senseNotePath` / `notebookNotePath` 必须优先用 `notePath`，否则先收藏、后写 vault 的语义会在记录清单里链到错误的 `_inbox` 路径（冒烟里有对应检查）。
 - **Daily 固定五段**：读了多久、读了什么、表达、语义、总结与勉励（继往开来）。阅读活动只有在阅读空间、窗口前台、文档加载完成且近 60 秒有交互时按 15 秒节拍估算；跨午夜分日，UI 使用约分钟显示。活动源不等同于应用运行时长。

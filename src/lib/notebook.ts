@@ -44,7 +44,8 @@ function stableContextId(value: string): string {
 export function toAtom(sense: SensePayload, model: string, notesFolder?: string, source?: TextSelection | null): SenseAtom {
   const now = new Date().toISOString()
   const sourcePath = source?.documentPath?.trim()
-  const quote = sense.contextSentence?.trim() || source?.text.trim() || ''
+  const selectedQuote = source?.text.trim() || ''
+  const quote = selectedQuote || sense.contextSentence?.trim() || ''
   const extension = sourcePath?.split(/[?#]/)[0]?.split('.').pop()?.toLowerCase()
   const contexts: SemanticContextInstance[] = sourcePath && quote ? [{
     id: stableContextId(`${sourcePath}|${source?.locationLabel || source?.pageNumber || ''}|${quote}`),
@@ -66,7 +67,7 @@ export function toAtom(sense: SensePayload, model: string, notesFolder?: string,
     senseId: sense.senseId,
     contextualMeaning: sense.contextualMeaning,
     definition: sense.definition,
-    contextSentence: sense.contextSentence,
+    contextSentence: selectedQuote || sense.contextSentence,
     examples: Array.isArray(sense.examples) ? sense.examples : [],
     guidance: sense.guidance,
     provider: 'ai',
@@ -79,13 +80,92 @@ export function toAtom(sense: SensePayload, model: string, notesFolder?: string,
   }
 }
 
-/** Merge same-ID semantic records while retaining the first explanation and adding distinct contexts. */
+function semanticAnchor(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase('en').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+}
+
+/** A remembered selection is provenance only when it actually contains the queried lexical item. */
+export function selectionMatchesSemanticTerm(selectionText: string, terms: string[]): boolean {
+  const selected = new Set(semanticAnchor(selectionText).split(/\s+/).filter(Boolean))
+  return terms.some((term) => {
+    const tokens = semanticAnchor(term).split(/\s+/).filter(Boolean)
+    return tokens.length > 0 && tokens.every((token) => selected.has(token))
+  })
+}
+
+/** Different model IDs for the same lemma/POS need a user decision before merging. */
+export function possibleSemanticMergeCandidates(incoming: SenseAtom, atoms: SenseAtom[]): SenseAtom[] {
+  const lemma = semanticAnchor(incoming.lemma || incoming.term)
+  const partOfSpeech = semanticAnchor(incoming.partOfSpeech)
+  if (!lemma || !partOfSpeech) return []
+  return atoms.filter((atom) => atom.id !== incoming.id
+    && !(atom.alternateSemanticIds || []).includes(incoming.id)
+    && semanticAnchor(atom.lemma || atom.term) === lemma
+    && semanticAnchor(atom.partOfSpeech) === partOfSpeech)
+}
+
+/** Resolve an AI/V1 identity after the user has confirmed a semantic merge. */
+export function semanticRecordForId(id: string, atoms: SenseAtom[]): SenseAtom | undefined {
+  return atoms.find((atom) => atom.id === id || (atom.alternateSemanticIds || []).includes(id))
+}
+
+/** User-confirmed merge across model IDs; retain the incoming identity as an alias. */
+export function confirmSemanticMerge(existing: SenseAtom, incoming: SenseAtom): SenseAtom {
+  const alternateSemanticIds = Array.from(new Set([
+    ...(existing.alternateSemanticIds || []),
+    ...(incoming.alternateSemanticIds || []),
+    ...(incoming.id !== existing.id ? [incoming.id] : []),
+  ])).filter((id) => id && id !== existing.id)
+  return mergeSemanticAtom(existing, { ...incoming, id: existing.id, alternateSemanticIds })
+}
+
+function mergeTextItems<T>(existing: T[], incoming: T[], keyOf: (item: T) => string, limit = 60): T[] {
+  const result = [...existing]
+  const keys = new Set(existing.map((item) => semanticAnchor(keyOf(item))).filter(Boolean))
+  for (const item of incoming) {
+    const key = semanticAnchor(keyOf(item))
+    if (key && !keys.has(key)) {
+      result.push(item)
+      keys.add(key)
+    }
+  }
+  return result.slice(0, limit)
+}
+
+/** Merge a confirmed same-ID semantic while preserving existing scalar explanations. */
 export function mergeSemanticAtom(existing: SenseAtom, incoming: SenseAtom): SenseAtom {
+  if (existing.id !== incoming.id) throw new Error('语义身份不同，必须先由用户确认合并目标。')
   const contexts = new Map<string, SemanticContextInstance>()
   for (const context of [...(existing.contexts || []), ...(incoming.contexts || [])]) contexts.set(context.id, context)
+  const oldGuidance = existing.guidance
+  const newGuidance = incoming.guidance
+  const guidance = {
+    scenarios: mergeTextItems(oldGuidance?.scenarios || [], newGuidance?.scenarios || [], (item) => item),
+    advice: mergeTextItems(oldGuidance?.advice || [], newGuidance?.advice || [], (item) => item),
+    frequency: oldGuidance?.frequency || newGuidance?.frequency || '',
+    alternatives: mergeTextItems(oldGuidance?.alternatives || [], newGuidance?.alternatives || [], (item) => `${item.term} ${item.note}`),
+    synonyms: mergeTextItems(oldGuidance?.synonyms || [], newGuidance?.synonyms || [], (item) => `${item.term} ${item.contrast}`),
+    antonyms: mergeTextItems(oldGuidance?.antonyms || [], newGuidance?.antonyms || [], (item) => `${item.term} ${item.contrast}`),
+    morphology: {
+      root: oldGuidance?.morphology?.root || newGuidance?.morphology?.root || '',
+      prefix: oldGuidance?.morphology?.prefix || newGuidance?.morphology?.prefix || '',
+      suffix: oldGuidance?.morphology?.suffix || newGuidance?.morphology?.suffix || '',
+      note: oldGuidance?.morphology?.note || newGuidance?.morphology?.note || '',
+    },
+  }
+  const examples = mergeTextItems(existing.examples || [], incoming.examples || [], (item) => item.text, 100)
   return {
     ...existing,
+    contextualMeaning: existing.contextualMeaning || incoming.contextualMeaning,
+    definition: existing.definition || incoming.definition,
+    contextSentence: existing.contextSentence || incoming.contextSentence,
+    examples,
+    guidance,
     contexts: [...contexts.values()].slice(-200),
+    alternateSemanticIds: Array.from(new Set([
+      ...(existing.alternateSemanticIds || []),
+      ...(incoming.alternateSemanticIds || []),
+    ])).filter((id) => id && id !== existing.id).slice(-100),
     notesFolder: existing.notesFolder || incoming.notesFolder,
     notePath: existing.notePath || incoming.notePath,
   }

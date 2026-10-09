@@ -81,6 +81,8 @@ export interface SenseAtom {
   notePath?: string
   /** Additional real reading instances; older V1 records have only contextSentence. */
   contexts?: SemanticContextInstance[]
+  /** User-confirmed alternate V1/AI IDs that resolve to this semantic record. */
+  alternateSemanticIds?: string[]
 }
 
 /** Canonical V2 name; V1 storage records are read without rewriting their identity. */
