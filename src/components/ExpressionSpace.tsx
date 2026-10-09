@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { BookOpen, Check, ChevronRight, CircleHelp, FileText, Link2, Plus, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { BookOpen, Check, ChevronRight, CircleHelp, FileText, Link2, Plus, RefreshCw, Search, Sparkles, Square, Trash2 } from 'lucide-react'
 import type { ExpressionCandidate, ExpressionContext, ExpressionRelationKind } from '../types'
 import { exploreExpressions } from '../lib/expression-ai'
+import { isAbortError } from '../lib/abort'
 import type { VaultApi } from './useVault'
 import SpaceRail from './SpaceRail'
 
@@ -30,6 +31,7 @@ export default function ExpressionSpace({
   const [explorePrompt, setExplorePrompt] = useState('')
   const [candidates, setCandidates] = useState<ExpressionCandidate[]>([])
   const [exploring, setExploring] = useState(false)
+  const exploreControllerRef = useRef<AbortController | null>(null)
   const [capturedCandidate, setCapturedCandidate] = useState<string[]>([])
   const [notice, setNotice] = useState('')
   const [relationTarget, setRelationTarget] = useState('')
@@ -41,6 +43,8 @@ export default function ExpressionSpace({
     return records.filter((record) => record.expression.toLocaleLowerCase('en').includes(normalizedQuery))
   }, [normalizedQuery, records])
   const selected = visibleRecords.find((item) => item.id === selectedId) || visibleRecords[0] || null
+
+  useEffect(() => () => exploreControllerRef.current?.abort(), [])
 
   useEffect(() => {
     if (!visibleRecords.length) {
@@ -73,6 +77,9 @@ export default function ExpressionSpace({
 
   const runExplore = async () => {
     if (!exploreMode || !explorePrompt.trim()) return
+    exploreControllerRef.current?.abort()
+    const controller = new AbortController()
+    exploreControllerRef.current = controller
     setExploring(true)
     setCandidates([])
     setCapturedCandidate([])
@@ -82,12 +89,22 @@ export default function ExpressionSpace({
         mode: exploreMode,
         ...(exploreMode === 'intent' ? { intent: explorePrompt } : { expression: explorePrompt }),
         model,
-      })
+      }, controller.signal)
+      if (controller.signal.aborted) return
       setCandidates(next)
       if (!next.length) setNotice('暂时没有候选表达，请换一种问法。')
-    } catch (error) { setNotice(error instanceof Error ? error.message : '表达探索失败。') }
-    finally { setExploring(false) }
+    } catch (error) {
+      if (isAbortError(error)) setNotice('已停止生成。')
+      else setNotice(error instanceof Error ? error.message : '表达探索失败。')
+    } finally {
+      if (exploreControllerRef.current === controller) {
+        exploreControllerRef.current = null
+        setExploring(false)
+      }
+    }
   }
+
+  const cancelExplore = () => exploreControllerRef.current?.abort()
 
   const saveCandidate = async (candidate: ExpressionCandidate) => {
     try {
@@ -156,12 +173,12 @@ export default function ExpressionSpace({
 
       <main className="expression-main">
         {exploreMode && <section className="expression-explorer">
-          <header><div><span className="eyebrow">AI ASSISTED EXPLORATION</span><h2>{exploreMode === 'intent' ? '从表达意图开始' : '围绕已有表达探索'}</h2></div><button type="button" className="subtle-button" onClick={() => setExploreMode(null)}>收起</button></header>
+          <header><div><span className="eyebrow">AI ASSISTED EXPLORATION</span><h2>{exploreMode === 'intent' ? '从表达意图开始' : '围绕已有表达探索'}</h2></div><button type="button" className="subtle-button" onClick={() => { cancelExplore(); setExploreMode(null) }}>收起</button></header>
           <div className="expression-mode-switch">
-            <button type="button" className={exploreMode === 'intent' ? 'active' : ''} onClick={() => { setExploreMode('intent'); setExplorePrompt(''); setCandidates([]) }}>我想表达某种意思</button>
-            <button type="button" className={exploreMode === 'related' ? 'active' : ''} onClick={() => { setExploreMode('related'); setExplorePrompt(selected?.expression || ''); setCandidates([]) }}>从已有表达出发</button>
+            <button type="button" className={exploreMode === 'intent' ? 'active' : ''} onClick={() => { cancelExplore(); setExploreMode('intent'); setExplorePrompt(''); setCandidates([]) }}>我想表达某种意思</button>
+            <button type="button" className={exploreMode === 'related' ? 'active' : ''} onClick={() => { cancelExplore(); setExploreMode('related'); setExplorePrompt(selected?.expression || ''); setCandidates([]) }}>从已有表达出发</button>
           </div>
-          <div className="expression-explore-input"><input aria-label={exploreMode === 'intent' ? '想表达的意思' : '已有表达'} placeholder={exploreMode === 'intent' ? '例如：委婉地指出一个方案的限制' : '输入一个词组或句式'} value={explorePrompt} onChange={(event) => setExplorePrompt(event.target.value)} /><button type="button" className="primary-button" disabled={exploring || !explorePrompt.trim()} onClick={() => void runExplore()}>{exploring ? <><span className="mini-spinner" /> 探索中…</> : <><Sparkles size={14} /> 获取候选</>}</button></div>
+          <div className="expression-explore-input"><input aria-label={exploreMode === 'intent' ? '想表达的意思' : '已有表达'} placeholder={exploreMode === 'intent' ? '例如：委婉地指出一个方案的限制' : '输入一个词组或句式'} value={explorePrompt} onChange={(event) => setExplorePrompt(event.target.value)} /><button type="button" className="primary-button" disabled={!exploring && !explorePrompt.trim()} onClick={() => exploring ? cancelExplore() : void runExplore()}>{exploring ? <><Square size={13} /> 停止</> : <><Sparkles size={14} /> 获取候选</>}</button></div>
           <p className="expression-source-note">候选是 AI 生成内容，不代表来自真实材料；只有点击「收录」后才会进入表达池。</p>
           {candidates.map((candidate) => <article className="expression-candidate" key={`${candidate.expression}-${candidate.meaning}`}>
             <div><strong>{candidate.expression}</strong><span>{candidate.meaning}</span><small>{[candidate.usageScenario, candidate.relation].filter(Boolean).join(' · ')}</small><em>AI 生成候选</em></div>

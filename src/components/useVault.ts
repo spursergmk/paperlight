@@ -18,6 +18,7 @@ import type { ReaderAnswerOptions } from '../lib/vault'
 import {
   buildGroundingContext, generateVaultNote, generateVaultReport, type VaultContextFile,
 } from '../lib/vaultai'
+import { isAbortError } from '../lib/abort'
 import { isVirtualVault, vaultDisplayName, vaultErrorText, vaultFileSystem } from '../lib/vaultfs'
 import {
   createExpressionRecord, expressionRecordMarkdown, expressionRecordPath, mergeExpressionRecord,
@@ -72,6 +73,8 @@ export interface VaultApi {
   report: ReportInfo | null
   organizingDaily: boolean
   generatingReport: boolean
+  canCancelReport: boolean
+  cancelReport(): void
   chooseVault(): Promise<string | null>
   useVaultPath(path: string): Promise<boolean>
   refresh(): Promise<void>
@@ -100,15 +103,15 @@ export interface VaultApi {
   deleteExpression(id: string): Promise<void>
   saveSenseNote(atom: SenseAtom): Promise<string>
   saveNotebookNote(note: NotebookNote, atoms: SenseAtom[]): Promise<string>
-  generateSenseNote(sense: SensePayload, context: string, senseIds?: string[], notesFolder?: string): Promise<string>
-  generateTopicNote(topic: string, notesFolder?: string): Promise<string>
+  generateSenseNote(sense: SensePayload, context: string, senseIds?: string[], notesFolder?: string, signal?: AbortSignal, onGenerationComplete?: () => void): Promise<string>
+  generateTopicNote(topic: string, notesFolder?: string, signal?: AbortSignal, onGenerationComplete?: () => void): Promise<string>
   saveChatAnswer(thread: ChatThread, question: string, answer: string, sources: string[], grounded?: boolean): Promise<string>
   saveReaderAnswer(answer: ReaderAnswerOptions): Promise<string>
   groundingContext(paths: string[]): Promise<{ context: VaultContextFile[]; skipped: string[] }>
   /** Rebuilds the day's record list (local, cheap, no model call). */
   refreshDaily(date?: string, options?: { force?: boolean; silent?: boolean }): Promise<DailyInfo | null>
   /** Writes the day's report (AI when configured), overwriting the previous one. */
-  generateReport(date?: string, options?: { force?: boolean; silent?: boolean }): Promise<ReportInfo | null>
+  generateReport(date?: string, options?: { force?: boolean; silent?: boolean; signal?: AbortSignal }): Promise<ReportInfo | null>
   /** Scheduler entry point: generates the report once its time slot has passed. */
   maybeGenerateReport(): Promise<void>
 }
@@ -141,6 +144,7 @@ export function useVault(options: {
   const [report, setReport] = useState<ReportInfo | null>(null)
   const [organizingDaily, setOrganizingDaily] = useState(false)
   const [generatingReport, setGeneratingReport] = useState(false)
+  const [canCancelReport, setCanCancelReport] = useState(false)
   const [expressions, setExpressions] = useState<ExpressionRecord[]>([])
   const [expressionsLoading, setExpressionsLoading] = useState(false)
 
@@ -169,6 +173,7 @@ export function useVault(options: {
   const legacyChecked = useRef(new Set<string>())
   const scheduledAttempts = useRef(new Set<string>())
   const reportGenerationInProgress = useRef(new Set<string>())
+  const reportControllerRef = useRef<AbortController | null>(null)
   const noticeTimer = useRef<number | null>(null)
   const dailyTimer = useRef<number | null>(null)
   const refreshDailyRef = useRef<((date?: string, options?: { force?: boolean; silent?: boolean }) => Promise<DailyInfo | null>) | null>(null)
@@ -526,6 +531,8 @@ export function useVault(options: {
     context: string,
     senseIds: string[] = [],
     notesFolder?: string,
+    signal?: AbortSignal,
+    onGenerationComplete?: () => void,
   ) => {
     setBusy(true)
     try {
@@ -535,7 +542,9 @@ export function useVault(options: {
         sense,
         context,
         model: modelRef.current,
-      })
+      }, signal)
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      onGenerationComplete?.()
       const date = localDateKey()
       const title = titleFromMarkdown(result.markdown, result.title || sense.term || 'AI 笔记')
       const path = uniquePath(aiNotePath(notesFolder ?? INBOX_FOLDER, date, title), new Set([...takenPaths]))
@@ -554,7 +563,7 @@ export function useVault(options: {
     }
   }, [takenPaths, writeNote])
 
-  const generateTopicNote = useCallback(async (topic: string, notesFolder?: string) => {
+  const generateTopicNote = useCallback(async (topic: string, notesFolder?: string, signal?: AbortSignal, onGenerationComplete?: () => void) => {
     setBusy(true)
     try {
       const result = await generateVaultNote({
@@ -562,7 +571,9 @@ export function useVault(options: {
         term: topic,
         question: topic,
         model: modelRef.current,
-      })
+      }, signal)
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      onGenerationComplete?.()
       const date = localDateKey()
       const title = titleFromMarkdown(result.markdown, result.title || topic)
       const path = uniquePath(aiNotePath(notesFolder ?? INBOX_FOLDER, date, title), new Set([...takenPaths]))
@@ -787,13 +798,27 @@ export function useVault(options: {
 
   refreshDailyRef.current = refreshDaily
 
-  const generateReport = useCallback(async (date = localDateKey(), runOptions: { force?: boolean; silent?: boolean } = {}) => {
+  const cancelReport = useCallback(() => {
+    if (!reportControllerRef.current || reportControllerRef.current.signal.aborted) return
+    reportControllerRef.current.abort()
+    flashNotice('已停止日报生成。已有的 Daily 内容会保留。')
+  }, [flashNotice])
+
+  const generateReport = useCallback(async (date = localDateKey(), runOptions: { force?: boolean; silent?: boolean; signal?: AbortSignal } = {}) => {
     const current = rootRef.current
     if (!current || reportGenerationInProgress.current.has(date)) return null
+    const controller = new AbortController()
+    const cancelFromCaller = () => controller.abort()
+    if (runOptions.signal?.aborted) controller.abort()
+    else runOptions.signal?.addEventListener('abort', cancelFromCaller, { once: true })
+    reportControllerRef.current = controller
+    const signal = controller.signal
     reportGenerationInProgress.current.add(date)
     setGeneratingReport(true)
+    setCanCancelReport(true)
     if (!runOptions.silent) setBusy(true)
     try {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       let listing = entriesRef.current
       try {
         listing = await port.tree(current)
@@ -801,15 +826,18 @@ export function useVault(options: {
       } catch {
         listing = entriesRef.current
       }
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       const { entries: list, hash, files: findingFiles, readingActivity } = await readDayState(date, listing)
 
       // The user's own findings are read in full: the report must reflect them.
       const findings: Array<{ path: string; content: string }> = []
       for (const file of findingFiles.slice(0, FINDING_FILE_LIMIT)) {
+        if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
         try {
           findings.push({ path: file.path, content: excerptForGrounding(await readNote(file.path), FINDING_CHARS_PER_FILE) })
         } catch { /* an unreadable finding is simply skipped */ }
       }
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
 
       if (list.length === 0 && findings.length === 0 && readingActivity.seconds === 0) {
         setReport(null)
@@ -830,20 +858,24 @@ export function useVault(options: {
             ],
             findings,
             model: modelRef.current,
-          })
+          }, signal)
           if (generated) {
             summary = generated.trim()
             source = 'ai'
           }
         } catch (caught) {
+          if (isAbortError(caught)) throw caught
           flashNotice(`AI 日报生成失败，已改用本地整理：${vaultErrorText(caught, '未知错误')}`)
         }
       } else {
         flashNotice('还没有配置 API：日报先按本地规则整理。')
       }
 
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+      setCanCancelReport(false)
       const generatedAt = new Date().toISOString()
       const path = dailyNotePath(date)
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       await refreshDaily(date, {
         silent: true,
         summary: { text: summary, source, generatedAt, hash },
@@ -860,11 +892,14 @@ export function useVault(options: {
       if (!runOptions.silent) flashNotice(`${date} 的总结已${source === 'ai' ? '由 AI 整理' : '按本地规则整理'}并写入当天的 Daily。`)
       return info
     } catch (caught) {
-      setError(vaultErrorText(caught, '无法生成日报。'))
+      if (!isAbortError(caught)) setError(vaultErrorText(caught, '无法生成日报。'))
       return null
     } finally {
+      runOptions.signal?.removeEventListener('abort', cancelFromCaller)
+      if (reportControllerRef.current === controller) reportControllerRef.current = null
       reportGenerationInProgress.current.delete(date)
       setGeneratingReport(false)
+      setCanCancelReport(false)
       if (!runOptions.silent) setBusy(false)
     }
   }, [flashNotice, port, readDayState, readNote, refreshDaily])
@@ -997,6 +1032,8 @@ export function useVault(options: {
     report,
     organizingDaily,
     generatingReport,
+    canCancelReport,
+    cancelReport,
     chooseVault,
     useVaultPath,
     refresh,

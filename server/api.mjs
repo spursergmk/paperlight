@@ -673,15 +673,19 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
       sendJson(res, 403, { error: '语义查询只允许从本机 Paperlight 访问。' })
       return
     }
+    let disconnect
     try {
       const request = parseSenseRequest(await readJsonBody(req, MAX_TRANSLATION_BYTES))
+      disconnect = clientDisconnectSignal(req, res)
       const model = request.model || DEFAULT_MODEL
       const modelText = await callModel({
         root,
         model,
         systemPrompt: senseSystemPrompt,
         userPrompt: senseTaskPrompt(request),
+        signal: disconnect.signal,
       })
+      if (disconnect.signal.aborted || res.destroyed) return
       let parsed
       try {
         parsed = extractJsonObject(modelText)
@@ -710,8 +714,11 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
         sendJson(res, 200, { answer: parsed.answer })
       }
     } catch (error) {
+      if (disconnect?.signal.aborted || res.destroyed) return
       if (error instanceof RequestError) sendJson(res, error.status, { error: error.message })
       else sendJson(res, 500, { error: '语义查询失败。' })
+    } finally {
+      disconnect?.dispose()
     }
   }
 
@@ -721,14 +728,18 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
       sendJson(res, 403, { error: '表达探索只允许从本机 Paperlight 访问。' })
       return
     }
+    let disconnect
     try {
       const request = parseExpressionExploreRequest(await readJsonBody(req, MAX_EXPRESSION_EXPLORE_BYTES))
+      disconnect = clientDisconnectSignal(req, res)
       const modelText = await callModel({
         root,
         model: request.model || DEFAULT_MODEL,
         systemPrompt: expressionExploreSystemPrompt,
         userPrompt: expressionExplorePrompt(request),
+        signal: disconnect.signal,
       })
+      if (disconnect.signal.aborted || res.destroyed) return
       const parsed = extractJsonObject(modelText)
       if (!Array.isArray(parsed.candidates)) throw new RequestError(502, '模型返回的表达候选无法解析。')
       const candidates = parsed.candidates.slice(0, 8).flatMap((item) => {
@@ -745,8 +756,11 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
       })
       sendJson(res, 200, { candidates })
     } catch (error) {
+      if (disconnect?.signal.aborted || res.destroyed) return
       if (error instanceof RequestError) sendJson(res, error.status, { error: error.message })
       else sendJson(res, 500, { error: '表达探索失败。' })
+    } finally {
+      disconnect?.dispose()
     }
   }
 
@@ -756,6 +770,7 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
       sendJson(res, 403, { error: '翻译只允许从本机 Paperlight 访问。' })
       return
     }
+    let disconnect
     try {
       const input = await readJsonBody(req, MAX_TRANSLATION_BYTES)
       const text = typeof input.text === 'string' ? input.text.trim() : ''
@@ -764,17 +779,22 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
         return
       }
       const model = typeof input.model === 'string' && input.model.trim() ? input.model.trim() : DEFAULT_MODEL
+      disconnect = clientDisconnectSignal(req, res)
       const instructions = 'You are a careful English-to-Chinese translator. Translate the selected English text into clear, natural Simplified Chinese. Use the surrounding text only to resolve meaning and references. Preserve names, numbers, citations, and technical terms where appropriate. Return only the translation, with no preface or explanation.'
       const context = JSON.stringify({
         preceding_context: typeof input.before === 'string' ? input.before.slice(-700) : '',
         selected_text: text,
         following_context: typeof input.after === 'string' ? input.after.slice(0, 700) : '',
       })
-      const translated = (await callModel({ root, model, systemPrompt: instructions, userPrompt: context })).trim()
+      const translated = (await callModel({ root, model, systemPrompt: instructions, userPrompt: context, signal: disconnect.signal })).trim()
+      if (disconnect.signal.aborted || res.destroyed) return
       sendJson(res, 200, { translation: translated || '未收到译文，请重试。' })
     } catch (error) {
+      if (disconnect?.signal.aborted || res.destroyed) return
       if (error instanceof RequestError) sendJson(res, error.status, { error: error.message })
       else sendJson(res, 500, { error: '翻译请求失败。' })
+    } finally {
+      disconnect?.dispose()
     }
   }
 
@@ -819,21 +839,28 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
       sendJson(res, 403, { error: '笔记生成只允许从本机 Paperlight 访问。' })
       return
     }
+    let disconnect
     try {
       const request = parseNoteRequest(await readJsonBody(req, MAX_NOTE_BYTES))
+      disconnect = clientDisconnectSignal(req, res)
       const model = request.model || DEFAULT_MODEL
       const markdown = extractMarkdown(await callModel({
         root,
         model,
         systemPrompt: noteSystemPrompt,
         userPrompt: notePrompt(request),
+        signal: disconnect.signal,
       }))
+      if (disconnect.signal.aborted || res.destroyed) return
       if (!markdown) throw new RequestError(502, '模型没有返回笔记内容，请重试。')
       const fallback = request.term || request.sense?.term || 'Paperlight 笔记'
       sendJson(res, 200, { note: { title: markdownTitle(markdown, fallback), markdown } })
     } catch (error) {
+      if (disconnect?.signal.aborted || res.destroyed) return
       if (error instanceof RequestError) sendJson(res, error.status, { error: error.message })
       else sendJson(res, 500, { error: '笔记生成失败。' })
+    } finally {
+      disconnect?.dispose()
     }
   }
 
@@ -843,20 +870,27 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
       sendJson(res, 403, { error: '日记汇总只允许从本机 Paperlight 访问。' })
       return
     }
+    let disconnect
     try {
       const request = parseDailySummaryRequest(await readJsonBody(req, MAX_NOTE_BYTES))
+      disconnect = clientDisconnectSignal(req, res)
       const model = request.model || DEFAULT_MODEL
       const summary = extractMarkdown(await callModel({
         root,
         model,
         systemPrompt: dailySummarySystemPrompt,
         userPrompt: dailySummaryPrompt(request),
+        signal: disconnect.signal,
       }))
+      if (disconnect.signal.aborted || res.destroyed) return
       if (!summary) throw new RequestError(502, '模型没有返回汇总内容，请重试。')
       sendJson(res, 200, { summary })
     } catch (error) {
+      if (disconnect?.signal.aborted || res.destroyed) return
       if (error instanceof RequestError) sendJson(res, error.status, { error: error.message })
       else sendJson(res, 500, { error: '日记汇总失败。' })
+    } finally {
+      disconnect?.dispose()
     }
   }
 

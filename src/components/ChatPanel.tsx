@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, FilePlus2, Send, Sparkles, StickyNote } from 'lucide-react'
+import { Check, FilePlus2, Send, Sparkles, Square, StickyNote } from 'lucide-react'
 import MarkdownPreview from './MarkdownPreview'
 import SenseCard from './SenseCard'
 import type { ChatMessage, SensePayload } from '../types'
@@ -9,6 +9,7 @@ interface ChatPanelProps {
   model: string
   messages: ChatMessage[]
   sending: boolean
+  onCancel: () => void
   error: string
   savedMessageIds: ReadonlySet<string>
   onSend: (question: string) => void
@@ -27,7 +28,7 @@ const SUGGESTIONS = [
 ]
 
 export default function ChatPanel({
-  sense, model, messages, sending, error, savedMessageIds, onSend, onSaveExcerpt,
+  sense, model, messages, sending, onCancel, error, savedMessageIds, onSend, onSaveExcerpt,
   onSaveReaderMessage, onOpenSavedAnswer, vaultReady, vaultBusy, onOpenNotebook,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState('')
@@ -93,7 +94,7 @@ export default function ChatPanel({
       )}
 
       {sending && <p className="chat-typing">正在思考…</p>}
-      {error && <p className="api-config-message error" role="status">{error}</p>}
+      {error && <p className={`api-config-message${error === '已停止生成。' ? ' success' : ' error'}`} role="status">{error}</p>}
 
       {sense && messages.length === 0 && !sending && (
         <div className="chat-suggestions">
@@ -116,9 +117,9 @@ export default function ChatPanel({
             }
           }}
         />
-        <button type="button" disabled={!sense || sending || !draft.trim()} onClick={() => submit(draft)}>
-          <Send size={14} />
-        </button>
+        {sending
+          ? <button type="button" className="stop-generation" aria-label="停止生成" title="停止生成" onClick={onCancel}><Square size={14} /></button>
+          : <button type="button" aria-label="发送追问" disabled={!sense || !draft.trim()} onClick={() => submit(draft)}><Send size={14} /></button>}
       </div>
       <p className="chat-hint">Enter 发送 · Shift+Enter 换行 · 对话内容可存成带日期编号的笔记</p>
     </div>

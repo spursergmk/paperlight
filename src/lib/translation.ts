@@ -72,9 +72,29 @@ export async function translateSelection(
   selection: TextSelection,
   mode: TranslateMode,
   model: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (mode === 'mock') {
-    await new Promise((resolve) => window.setTimeout(resolve, 380))
+    await new Promise<void>((resolve, reject) => {
+      let timeout = 0
+      const cleanup = () => {
+        window.clearTimeout(timeout)
+        signal?.removeEventListener('abort', onAbort)
+      }
+      const onAbort = () => {
+        cleanup()
+        reject(new DOMException('Aborted', 'AbortError'))
+      }
+      if (signal?.aborted) {
+        onAbort()
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      timeout = window.setTimeout(() => {
+        cleanup()
+        resolve()
+      }, 380)
+    })
     const normalized = selection.text.trim().toLowerCase().replace(/\s+/g, ' ')
     const exact = demoTranslations.get(normalized)
     if (exact) return exact
@@ -84,6 +104,7 @@ export async function translateSelection(
   const response = await fetch('/api/translate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal,
     body: JSON.stringify({
       text: selection.text,
       before: selection.before,

@@ -31,6 +31,7 @@ import {
 } from './lib/documentKind'
 import { openEpub, type EpubBook, type EpubOutlineItem } from './lib/epub'
 import { displayNameForPath, fileSystem } from './lib/fsaccess'
+import { isAbortError } from './lib/abort'
 import {
   outlineFromBlocks, parseTextDocument, type MarkdownBlock, type TextOutlineItem,
 } from './lib/textdoc'
@@ -285,9 +286,22 @@ function App() {
   const restoredRef = useRef(false)
   const translationRequestRef = useRef(0)
   const senseRequestRef = useRef(0)
+  const translationControllerRef = useRef<AbortController | null>(null)
+  const senseControllerRef = useRef<AbortController | null>(null)
+  const expandControllerRef = useRef<AbortController | null>(null)
+  const readerChatControllerRef = useRef<AbortController | null>(null)
+  const completeNoteControllerRef = useRef<AbortController | null>(null)
   const lastContextRef = useRef('')
   const lastReadingInteractionRef = useRef(0)
   const lastReadingTickRef = useRef(0)
+
+  useEffect(() => () => {
+    translationControllerRef.current?.abort()
+    senseControllerRef.current?.abort()
+    expandControllerRef.current?.abort()
+    readerChatControllerRef.current?.abort()
+    completeNoteControllerRef.current?.abort()
+  }, [])
 
   const session = state.session
   const layout = state.layout
@@ -636,7 +650,9 @@ function App() {
       setVaultActionMessage({ kind: 'success', text: successText(path) })
       openNoteInNotesSpace(path)
     } catch (error) {
-      setVaultActionMessage({ kind: 'error', text: error instanceof Error ? error.message : '写入 vault 失败。' })
+      setVaultActionMessage(isAbortError(error)
+        ? { kind: 'success', text: '已停止生成，未保存笔记。' }
+        : { kind: 'error', text: error instanceof Error ? error.message : '写入 vault 失败。' })
     } finally {
       setVaultActionBusy(false)
     }
@@ -727,13 +743,26 @@ function App() {
 
   const saveSenseToVault = useCallback(() => requestSemanticCapture('vault'), [requestSemanticCapture])
 
+  const [completeNoteGenerating, setCompleteNoteGenerating] = useState(false)
   const generateCompleteNote = useCallback(() => {
     if (!sense) return
+    completeNoteControllerRef.current?.abort()
+    const controller = new AbortController()
+    completeNoteControllerRef.current = controller
+    setCompleteNoteGenerating(true)
     void runVaultAction(
-      () => vaultRef.current.generateSenseNote(sense, lastContextRef.current, senseId ? [senseId] : [], readerNotesFolder),
+      () => vaultRef.current.generateSenseNote(
+        sense, lastContextRef.current, senseId ? [senseId] : [], readerNotesFolder, controller.signal,
+        () => setCompleteNoteGenerating(false),
+      ),
       (path) => `AI 完整笔记已生成：${path}`,
-    )
+    ).finally(() => {
+      if (completeNoteControllerRef.current === controller) completeNoteControllerRef.current = null
+      setCompleteNoteGenerating(false)
+    })
   }, [readerNotesFolder, runVaultAction, sense, senseId])
+
+  const cancelCompleteNote = useCallback(() => completeNoteControllerRef.current?.abort(), [])
 
   // A sense needs archiving when it has no file yet — or when the file it was
   // written to is gone (deleted or moved outside the notes tree).
@@ -1270,26 +1299,37 @@ function App() {
   // ------------------------------------------------------------- sense + chat
 
   const runTranslation = useCallback(async (next: TextSelection, requestedMode = mode, requestedModel = model) => {
+    translationControllerRef.current?.abort()
+    const controller = new AbortController()
+    translationControllerRef.current = controller
     const requestId = ++translationRequestRef.current
     setTranslationLoading(true)
     setTranslationError('')
     try {
-      const result = await translateSelection(next, requestedMode, requestedModel)
+      const result = await translateSelection(next, requestedMode, requestedModel, controller.signal)
       if (requestId === translationRequestRef.current) setTranslation(result)
     } catch (error) {
-      if (requestId === translationRequestRef.current) {
+      if (requestId === translationRequestRef.current && !isAbortError(error)) {
         setTranslationError(error instanceof Error ? error.message : '翻译失败，请稍后重试。')
       }
     } finally {
-      if (requestId === translationRequestRef.current) setTranslationLoading(false)
+      if (requestId === translationRequestRef.current) {
+        translationControllerRef.current = null
+        setTranslationLoading(false)
+      }
     }
   }, [mode, model])
+
+  const cancelTranslation = useCallback(() => translationControllerRef.current?.abort(), [])
 
   const runSenseLookup = useCallback(async (term: string, context: string) => {
     const cleaned = term.trim()
     if (!cleaned) return
     setPendingSemanticCapture(null)
     const requestId = ++senseRequestRef.current
+    senseControllerRef.current?.abort()
+    const controller = new AbortController()
+    senseControllerRef.current = controller
     lastContextRef.current = context
     setSenseAnswerId(null)
     setSenseLoading(true)
@@ -1297,7 +1337,7 @@ function App() {
     setAllSenses(null)
     setChatError('')
     try {
-      const result = await lookupSense(cleaned, context, model)
+      const result = await lookupSense(cleaned, context, model, controller.signal)
       if (requestId !== senseRequestRef.current) return
       setSense({
         ...result,
@@ -1308,13 +1348,18 @@ function App() {
       setSenseAnswerId(`reader-answer:${requestId}`)
       setRightTab('sense')
     } catch (error) {
-      if (requestId === senseRequestRef.current) {
+      if (requestId === senseRequestRef.current && !isAbortError(error)) {
         setSenseError(error instanceof Error ? error.message : '语义查询失败。')
       }
     } finally {
-      if (requestId === senseRequestRef.current) setSenseLoading(false)
+      if (requestId === senseRequestRef.current) {
+        senseControllerRef.current = null
+        setSenseLoading(false)
+      }
     }
   }, [model])
+
+  const cancelSenseLookup = useCallback(() => senseControllerRef.current?.abort(), [])
 
   const captureSelectedExpression = useCallback((event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) => {
     const target = event.target instanceof HTMLElement ? event.target : null
@@ -1709,14 +1754,20 @@ function App() {
     if (!term || expanding) return
     setExpanding(true)
     setSenseError('')
+    expandControllerRef.current?.abort()
+    const controller = new AbortController()
+    expandControllerRef.current = controller
     try {
-      setAllSenses(await expandSenses(term, model))
+      setAllSenses(await expandSenses(term, model, controller.signal))
     } catch (error) {
-      setSenseError(error instanceof Error ? error.message : '无法获取其他语义。')
+      if (!isAbortError(error)) setSenseError(error instanceof Error ? error.message : '无法获取其他语义。')
     } finally {
+      expandControllerRef.current = null
       setExpanding(false)
     }
   }
+
+  function cancelExpand() { expandControllerRef.current?.abort() }
 
   function pushChat(message: ChatMessage) {
     if (!senseId) return
@@ -1727,6 +1778,9 @@ function App() {
     if (!sense || !senseId) return
     const history = (chat[senseId] || []).slice(-8).map((message) => ({ role: message.role, content: message.content }))
     pushChat(newMessage('user', question))
+    readerChatControllerRef.current?.abort()
+    const controller = new AbortController()
+    readerChatControllerRef.current = controller
     setChatSending(true)
     setChatError('')
     try {
@@ -1736,14 +1790,18 @@ function App() {
         question,
         history,
         model,
-      })
+      }, controller.signal)
       pushChat(newMessage('assistant', answer))
     } catch (error) {
-      setChatError(error instanceof Error ? error.message : '对话失败，请重试。')
+      if (isAbortError(error)) setChatError('已停止生成。')
+      else setChatError(error instanceof Error ? error.message : '对话失败，请重试。')
     } finally {
+      readerChatControllerRef.current = null
       setChatSending(false)
     }
   }
+
+  function cancelReaderChat() { readerChatControllerRef.current?.abort() }
 
   // Saving any excerpt also stores the term ↔ sense atom so the link resolves.
   function saveExcerpt(body: string, sourceMessageId?: string) {
@@ -2509,16 +2567,19 @@ function App() {
             queryTerm={queryTerm}
             onQueryTerm={setQueryTerm}
             onQuery={() => void runSenseLookup(queryTerm, lastContextRef.current)}
+            onCancelQuery={cancelSenseLookup}
             sense={sense}
             senseLoading={senseLoading}
             senseError={senseError}
             allSenses={allSenses}
             expanding={expanding}
             onExpand={() => void expandCurrent()}
+            onCancelExpand={cancelExpand}
             translation={translation}
             translationLoading={translationLoading}
             translationError={translationError}
             onTranslate={() => selection && void runTranslation(selection)}
+            onCancelTranslation={cancelTranslation}
             selection={selection}
             senseInNotebook={senseInNotebook}
             semanticMergeCandidates={pendingSemanticCapture?.candidates || []}
@@ -2550,6 +2611,7 @@ function App() {
             chatMessages={chatMessages}
             savedMessageIds={savedMessageIds}
             chatSending={chatSending}
+            onCancelChat={cancelReaderChat}
             chatError={chatError}
             onSend={(question) => void sendChat(question)}
             onSaveExcerpt={(message) => saveExcerpt(message.content, message.id)}
@@ -2567,6 +2629,8 @@ function App() {
             onOpenNotesSpace={() => switchSpace('notes')}
             onSaveSenseToVault={saveSenseToVault}
             onGenerateCompleteNote={generateCompleteNote}
+            completeNoteGenerating={completeNoteGenerating}
+            onCancelCompleteNote={cancelCompleteNote}
             onSaveNoteToVault={saveNotebookNoteToVault}
           />
         </div>}

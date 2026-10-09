@@ -1,5 +1,5 @@
 import {
-  Bookmark, BookOpen, Check, ChevronDown, FilePlus2, Languages, Library, Maximize2, Minimize2, Sparkles,
+  Bookmark, BookOpen, Check, ChevronDown, FilePlus2, Languages, Library, Maximize2, Minimize2, Sparkles, Square,
   StickyNote, X,
 } from 'lucide-react'
 import SenseCard from './SenseCard'
@@ -21,16 +21,19 @@ export default function AssistantPanel({
   queryTerm,
   onQueryTerm,
   onQuery,
+  onCancelQuery,
   sense,
   senseLoading,
   senseError,
   allSenses,
   expanding,
   onExpand,
+  onCancelExpand,
   translation,
   translationLoading,
   translationError,
   onTranslate,
+  onCancelTranslation,
   selection,
   senseInNotebook,
   semanticMergeCandidates,
@@ -51,6 +54,7 @@ export default function AssistantPanel({
   chatMessages,
   savedMessageIds,
   chatSending,
+  onCancelChat,
   chatError,
   onSend,
   onSaveExcerpt,
@@ -67,6 +71,8 @@ export default function AssistantPanel({
   onOpenNotesSpace,
   onSaveSenseToVault,
   onGenerateCompleteNote,
+  completeNoteGenerating,
+  onCancelCompleteNote,
   onSaveNoteToVault,
   vaultTarget,
 }: {
@@ -78,16 +84,19 @@ export default function AssistantPanel({
   queryTerm: string
   onQueryTerm: (value: string) => void
   onQuery: () => void
+  onCancelQuery: () => void
   sense: SensePayload | null
   senseLoading: boolean
   senseError: string
   allSenses: SenseSummary[] | null
   expanding: boolean
   onExpand: () => void
+  onCancelExpand: () => void
   translation: string
   translationLoading: boolean
   translationError: string
   onTranslate: () => void
+  onCancelTranslation: () => void
   selection: TextSelection | null
   senseInNotebook: boolean
   semanticMergeCandidates: SenseAtom[]
@@ -108,6 +117,7 @@ export default function AssistantPanel({
   chatMessages: ChatMessage[]
   savedMessageIds: Set<string>
   chatSending: boolean
+  onCancelChat: () => void
   chatError: string
   onSend: (question: string) => void
   onSaveExcerpt: (message: ChatMessage) => void
@@ -124,6 +134,8 @@ export default function AssistantPanel({
   onOpenNotesSpace: () => void
   onSaveSenseToVault: () => void
   onGenerateCompleteNote: () => void
+  completeNoteGenerating: boolean
+  onCancelCompleteNote: () => void
   onSaveNoteToVault: (note: NotebookNote) => void
   /** Vault folder the reading session writes to, e.g. `notes/books/book1`. */
   vaultTarget: string
@@ -191,7 +203,7 @@ export default function AssistantPanel({
             {selection && <span className="query-meta">来自「{selection.documentName || '当前文档'}」第 {selection.pageNumber} 页的选区 · 点击查询或按 Enter 开始</span>}
           </div>
 
-          {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在结合上下文判断语义…</div>}
+          {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在结合上下文判断语义… <button type="button" className="text-action" aria-label="停止语义查询" onClick={onCancelQuery}><Square size={12} /> 停止</button></div>}
 
           {senseError && !senseLoading && (
             <div className="panel-error">
@@ -235,8 +247,8 @@ export default function AssistantPanel({
               />
 
               <div className="sense-actions">
-                <button className="text-action" type="button" disabled={expanding} onClick={onExpand}>
-                  {expanding ? '正在获取…' : allSenses ? '重新获取全部语义' : '查看这个词的其他语义'}
+                <button className="text-action" type="button" onClick={expanding ? onCancelExpand : onExpand}>
+                  {expanding ? <><Square size={12} /> 停止获取</> : allSenses ? '重新获取全部语义' : '查看这个词的其他语义'}
                 </button>
                 <button className="text-action" type="button" onClick={() => onTab('chat')}>继续和 Agent 对话</button>
               </div>
@@ -259,7 +271,7 @@ export default function AssistantPanel({
 
               <details className="context-details">
                 <summary>整句翻译参考 <ChevronDown size={13} /></summary>
-                {translationLoading ? <div className="loading-copy"><span className="mini-spinner" /> 正在翻译…</div>
+                {translationLoading ? <div className="loading-copy"><span className="mini-spinner" /> 正在翻译… <button type="button" className="text-action" aria-label="停止翻译" onClick={onCancelTranslation}><Square size={12} /> 停止</button></div>
                   : translationError ? <p className="panel-error-text">{translationError}</p>
                     : translation ? <p>{translation}</p>
                       : selection ? <button className="text-action" type="button" onClick={onTranslate}>翻译选中内容</button>
@@ -300,7 +312,7 @@ export default function AssistantPanel({
                   <Sparkles size={13} /> 生成 AI 完整笔记
                 </button>
               </div>
-              {vaultBusy && <p className="loading-copy"><span className="mini-spinner" /> 正在写入 vault…</p>}
+              {vaultBusy && <p className="loading-copy"><span className="mini-spinner" /> {completeNoteGenerating ? '正在生成完整笔记…' : '正在写入 vault…'} {completeNoteGenerating && <button type="button" className="text-action" aria-label="停止笔记生成" onClick={onCancelCompleteNote}><Square size={12} /> 停止</button>}</p>}
               {vaultMessage && <p className={`api-config-message ${vaultMessage.kind}`} role="status">{vaultMessage.text}</p>}
               {!vaultReady && <p className="vault-hint">还没有选择笔记 vault：点右上角 <Library size={11} /> 进入笔记空间选择文件夹。</p>}
               {vaultReady && <p className="vault-hint"><Library size={11} /> 这条阅读会话的语义与笔记会存到 <code>{vaultTarget}/</code></p>}
@@ -337,6 +349,7 @@ export default function AssistantPanel({
         model={model}
         messages={chatMessages}
         sending={chatSending}
+        onCancel={onCancelChat}
         error={chatError}
         savedMessageIds={savedMessageIds}
         onSend={onSend}

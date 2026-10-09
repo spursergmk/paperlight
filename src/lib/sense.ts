@@ -1,24 +1,25 @@
 import type { SensePayload, SenseSummary } from '../types'
 
-async function postSense<T>(body: unknown): Promise<T> {
+async function postSense<T>(body: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch('/api/sense', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
   const payload = await response.json().catch(() => ({})) as { error?: string } & Partial<T>
   if (!response.ok) throw new Error(payload.error || '语义查询失败。')
   return payload as T
 }
 
-export async function lookupSense(term: string, context: string, model: string): Promise<SensePayload> {
-  const result = await postSense<{ sense: SensePayload }>({ task: 'lookup', term, context, model })
+export async function lookupSense(term: string, context: string, model: string, signal?: AbortSignal): Promise<SensePayload> {
+  const result = await postSense<{ sense: SensePayload }>({ task: 'lookup', term, context, model }, signal)
   if (!result.sense) throw new Error('未收到语义结果，请重试。')
   return result.sense
 }
 
-export async function expandSenses(term: string, model: string): Promise<SenseSummary[]> {
-  const result = await postSense<{ senses: SenseSummary[] }>({ task: 'expand', term, model })
+export async function expandSenses(term: string, model: string, signal?: AbortSignal): Promise<SenseSummary[]> {
+  const result = await postSense<{ senses: SenseSummary[] }>({ task: 'expand', term, model }, signal)
   return Array.isArray(result.senses) ? result.senses : []
 }
 
@@ -28,8 +29,8 @@ export async function askSense(input: {
   question: string
   history: Array<{ role: 'user' | 'assistant'; content: string }>
   model: string
-}): Promise<string> {
-  const result = await postSense<{ answer: string }>({ task: 'ask', ...input })
+}, signal?: AbortSignal): Promise<string> {
+  const result = await postSense<{ answer: string }>({ task: 'ask', ...input }, signal)
   return result.answer || '未收到回答，请重试。'
 }
 

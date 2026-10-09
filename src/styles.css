@@ -471,6 +471,7 @@ body:has(.splitter.dragging) .reader-scroll { pointer-events: none; }
 .chat-input { display: flex; align-items: flex-end; gap: 6px; margin-top: 12px; }
 .chat-input textarea { flex: 1; min-height: 46px; max-height: 130px; padding: 8px; border: 1px solid #e5e5de; border-radius: 7px; color: #55604f; background: #fff; font-size: 10px; font-family: inherit; line-height: 1.6; resize: vertical; }
 .chat-input button { flex: 0 0 auto; width: 31px; height: 31px; display: grid; place-items: center; border: 0; border-radius: 7px; color: #fff; background: #607c66; cursor: pointer; }
+.chat-input button.stop-generation { background: #a85e4c; }
 .chat-input button:disabled { opacity: .45; cursor: default; }
 .chat-hint { margin: 7px 0 0; color: #b0b3aa; font-size: 8px; }
 

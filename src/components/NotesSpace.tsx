@@ -91,6 +91,8 @@ export default function NotesSpace({
   const [aiTopic, setAiTopic] = useState('')
   const [aiOpen, setAiOpen] = useState(false)
   const [aiBusy, setAiBusy] = useState(false)
+  const [aiGenerating, setAiGenerating] = useState(false)
+  const aiNoteControllerRef = useRef<AbortController | null>(null)
   const [researchTarget, setResearchTarget] = useState('')
 
   // The vault API object is rebuilt on every render, so callbacks read it
@@ -108,6 +110,10 @@ export default function NotesSpace({
   savingRef.current = saving
   const vaultReady = vault.ready
   const vaultFiles = vault.files
+
+  useEffect(() => () => {
+    aiNoteControllerRef.current?.abort()
+  }, [])
 
   const tree = useMemo(() => filterVaultTree(vault.tree, query), [query, vault.tree])
   const activeEntry = vaultFiles.find((entry) => entry.path === activePath) || null
@@ -368,6 +374,11 @@ export default function NotesSpace({
     }
   }, [onOpen])
 
+  const cancelReport = useCallback(() => {
+    vaultRef.current.cancelReport()
+    setStatus('已停止生成。Daily 原有内容已保留。')
+  }, [])
+
   const openWikiLink = useCallback((target: string) => {
     const normalized = target.trim()
     if (normalized.startsWith('chat:')) {
@@ -428,19 +439,32 @@ export default function NotesSpace({
     const topic = aiTopic.trim()
     if (!topic) return
     setAiBusy(true)
+    setAiGenerating(true)
     setNoteError('')
+    aiNoteControllerRef.current?.abort()
+    const controller = new AbortController()
+    aiNoteControllerRef.current = controller
     try {
       await save()
-      const path = await vaultRef.current.generateTopicNote(topic, activeNotesFolder || undefined)
+      const path = await vaultRef.current.generateTopicNote(
+        topic, activeNotesFolder || undefined, controller.signal,
+        () => setAiGenerating(false),
+      )
+      if (controller.signal.aborted) return
       onOpen(path)
       setAiTopic('')
       setAiOpen(false)
     } catch (caught) {
-      setNoteError(caught instanceof Error ? caught.message : 'AI 笔记生成失败。')
+      if (controller.signal.aborted) setStatus('已停止生成，未创建笔记。')
+      else setNoteError(caught instanceof Error ? caught.message : 'AI 笔记生成失败。')
     } finally {
+      if (aiNoteControllerRef.current === controller) aiNoteControllerRef.current = null
       setAiBusy(false)
+      setAiGenerating(false)
     }
   }, [activeNotesFolder, aiTopic, onOpen, save])
+
+  const cancelTopicNote = useCallback(() => aiNoteControllerRef.current?.abort(), [])
 
   const words = useMemo(() => countWords(draft), [draft])
   const report = vault.report
@@ -718,6 +742,7 @@ export default function NotesSpace({
               <button type="button" className="subtle-button" disabled={vault.generatingReport} onClick={() => void runReport(Boolean(report && report.date === localDateKey()))}>
                 {vault.generatingReport ? <><span className="mini-spinner" /> 生成中…</> : <><Sparkles size={12} /> {report && report.date === localDateKey() ? '更新总结' : '生成总结'}</>}
               </button>
+              {vault.generatingReport && <button type="button" className="subtle-button" aria-label={vault.canCancelReport ? '停止日报生成' : '日报正在写入'} disabled={!vault.canCancelReport} onClick={cancelReport}>{vault.canCancelReport ? '停止生成' : '正在写入…'}</button>}
             </div>
           </section>
 
@@ -760,9 +785,9 @@ export default function NotesSpace({
                   onChange={(event) => setAiTopic(event.target.value)}
                   onKeyDown={(event) => { if (event.key === 'Enter') void generateFromTopic() }}
                 />
-                <button type="button" className="notes-create-ok" disabled={!aiTopic.trim() || aiBusy} onClick={() => void generateFromTopic()}>
-                  {aiBusy ? '生成中…' : '生成'}
-                </button>
+                {aiBusy && aiGenerating
+                  ? <button type="button" className="notes-create-ok" onClick={cancelTopicNote}>停止</button>
+                  : <button type="button" className="notes-create-ok" disabled={!aiTopic.trim() || aiBusy} onClick={() => void generateFromTopic()}>{aiBusy ? '正在写入…' : '生成'}</button>}
               </div>
             ) : (
               <button type="button" className="subtle-button" disabled={!vault.apiConfigured} onClick={() => setAiOpen(true)}>

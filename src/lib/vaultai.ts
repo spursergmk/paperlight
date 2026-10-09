@@ -56,8 +56,8 @@ export async function generateVaultNote(input: {
   context?: string
   question?: string
   model: string
-}): Promise<{ title: string; markdown: string }> {
-  const result = await postVault<{ note?: { title?: string; markdown?: string } }>('/api/note', input)
+}, signal?: AbortSignal): Promise<{ title: string; markdown: string }> {
+  const result = await postVault<{ note?: { title?: string; markdown?: string } }>('/api/note', input, signal)
   const markdown = result.note?.markdown || ''
   if (!markdown.trim()) throw new Error('未收到笔记内容，请重试。')
   return { title: result.note?.title || input.term || 'Paperlight 笔记', markdown }
@@ -68,8 +68,8 @@ export async function generateVaultReport(input: {
   records: Array<{ kind: string; label: string; body: string; path?: string }>
   findings: VaultContextFile[]
   model: string
-}): Promise<string> {
-  const result = await postVault<{ summary?: string }>('/api/daily-summary', input)
+}, signal?: AbortSignal): Promise<string> {
+  const result = await postVault<{ summary?: string }>('/api/daily-summary', input, signal)
   return (result.summary || '').trim()
 }
 

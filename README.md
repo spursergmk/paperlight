@@ -213,7 +213,7 @@ EPUB 的原始 CSS 会被丢弃，统一使用阅读器自己的排版；书内�
 
 ## 版本与更新记录
 
-当前工作区为 **Paperlight 2.3.0 Preview**，在 `codex/paperlight-v2` 开发分支试用，尚未正式发布。V2 批次依次使用 2.1.0、2.2.0、2.3.0、2.4.0；开发批次 commit 推送到开发分支，不推送正式版本标签或 GitHub Release。
+当前工作区为 **Paperlight 2.4.0 Preview**，在 `codex/paperlight-v2` 开发分支试用，尚未正式发布。V2 批次依次使用 2.1.0、2.2.0、2.3.0、2.4.0；开发批次 commit 推送到开发分支，不推送正式版本标签或 GitHub Release。
 
 运行本地试用版：
 

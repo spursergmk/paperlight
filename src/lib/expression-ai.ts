@@ -6,11 +6,12 @@ export async function exploreExpressions(input: {
   expression?: string
   context?: string
   model: string
-}): Promise<ExpressionCandidate[]> {
+}, signal?: AbortSignal): Promise<ExpressionCandidate[]> {
   const response = await fetch('/api/expression-explore', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
+    signal,
   })
   const payload = await response.json().catch(() => ({})) as { error?: string; candidates?: unknown }
   if (!response.ok) throw new Error(payload.error || '表达探索失败。')

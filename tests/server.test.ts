@@ -199,6 +199,61 @@ test('disconnecting a vault chat aborts the upstream model request', async () =>
   }
 })
 
+test('disconnecting AI generation routes aborts the upstream provider call', async () => {
+  const originalFetch = globalThis.fetch
+  const originalKey = process.env.OPENAI_API_KEY
+  process.env.OPENAI_API_KEY = 'test-only-paperlight-key'
+  const cases = [
+    ['/api/sense', { task: 'lookup', term: 'steady', context: 'a steady pace', model: 'test-model' }],
+    ['/api/translate', { text: 'a steady pace', before: '', after: '', model: 'test-model' }],
+    ['/api/expression-explore', { mode: 'intent', intent: '委婉地提出不同意见', model: 'test-model' }],
+    ['/api/note', { task: 'topic', term: 'steady', question: 'steady', model: 'test-model' }],
+    ['/api/daily-summary', { date: '2026-02-14', records: [{ kind: 'expression', label: 'steady pace', body: '从容的节奏' }], findings: [], model: 'test-model' }],
+  ] as const
+
+  try {
+    await withServer(async (port) => {
+      for (const [path, body] of cases) {
+        let providerSignal: AbortSignal | undefined
+        let providerStarted!: () => void
+        let providerStopped!: () => void
+        const started = new Promise<void>((resolve) => { providerStarted = resolve })
+        const stopped = new Promise<void>((resolve) => { providerStopped = resolve })
+        globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+          providerSignal = init?.signal ?? undefined
+          providerStarted()
+          return new Promise<Response>((_resolve, reject) => {
+            const onAbort = () => {
+              providerStopped()
+              reject(new DOMException('Aborted', 'AbortError'))
+            }
+            if (providerSignal?.aborted) onAbort()
+            else providerSignal?.addEventListener('abort', onAbort, { once: true })
+          })
+        }) as typeof fetch
+
+        const req = request({
+          host: '127.0.0.1', port, method: 'POST', path,
+          headers: { Host: `127.0.0.1:${port}`, 'Content-Type': 'application/json' },
+        })
+        req.on('error', () => undefined)
+        req.end(JSON.stringify(body))
+        await started
+        req.destroy()
+        await Promise.race([
+          stopped,
+          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`${path} upstream abort timed out`)), 1500)),
+        ])
+        assert.equal(providerSignal?.aborted, true, `${path} aborts its provider request`)
+      }
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = originalKey
+  }
+})
+
 test('expression exploration validates intent and related-expression requests on loopback only', async () => {
   await withServer(async (port) => {
     const host = `127.0.0.1:${port}`

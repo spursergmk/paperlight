@@ -96,11 +96,22 @@ async function installSenseStub(wc, stubSense, chatAnswer = 'numerous 侧重数�
   await evaluate(wc, `(() => {
     window.__senseLookupRequests = []
     window.__senseChatRequests = []
+    window.__senseAbortObserved = { lookup: false, ask: false }
     const original = window.fetch.bind(window)
     window.fetch = (input, init) => {
       const url = typeof input === 'string' ? input : (input && input.url) || ''
       if (url.includes('/api/sense')) {
         const body = init && init.body ? JSON.parse(init.body) : {}
+        const slow = (body.task === 'lookup' && body.term === 'PAPERLIGHT-SLOW-LOOKUP-9F3A')
+          || (body.task === 'ask' && body.question === 'PAPERLIGHT-SLOW-READER-CHAT-9F3A')
+        if (slow) return new Promise((_resolve, reject) => {
+          const stop = () => {
+            window.__senseAbortObserved[body.task] = true
+            reject(new DOMException('Aborted', 'AbortError'))
+          }
+          if (init?.signal?.aborted) stop()
+          else init?.signal?.addEventListener('abort', stop, { once: true })
+        })
         const payload = body.task === 'lookup'
           ? (window.__senseLookupRequests.push(body), ${JSON.stringify(stubSense)})
           : (window.__senseChatRequests.push(body), { answer: ${JSON.stringify(chatAnswer)} })
@@ -119,6 +130,9 @@ async function installVaultStub(wc) {
   await evaluate(wc, `(() => {
     window.__vaultChatRequests = []
     window.__vaultReportRequests = []
+    window.__vaultAbortObserved = { report: false, note: false }
+    window.__holdNextVaultReport = false
+    window.__holdNextVaultNote = false
     const original = window.fetch.bind(window)
     window.fetch = (input, init) => {
       const url = typeof input === 'string' ? input : (input && input.url) || ''
@@ -148,15 +162,44 @@ async function installVaultStub(wc) {
       }
       if (url.includes('/api/daily-summary')) {
         window.__vaultReportRequests.push(body)
+        if (window.__holdNextVaultReport) return new Promise((_resolve, reject) => {
+          window.__holdNextVaultReport = false
+          const signal = init?.signal
+          const stop = () => {
+            window.__vaultAbortObserved.report = true
+            reject(new DOMException('Aborted', 'AbortError'))
+          }
+          if (signal?.aborted) stop()
+          else signal?.addEventListener('abort', stop, { once: true })
+        })
         const count = (body.records || []).length
         const findings = (body.findings || []).length
         return Promise.resolve(new Response(JSON.stringify({ summary: 'AI 日报：' + (body.date || '') + ' 收录 ' + count + ' 条记录、' + findings + ' 条专项发现。' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       }
       if (url.includes('/api/note')) {
+        if (window.__holdNextVaultNote) return new Promise((_resolve, reject) => {
+          window.__holdNextVaultNote = false
+          const signal = init?.signal
+          const stop = () => {
+            window.__vaultAbortObserved.note = true
+            reject(new DOMException('Aborted', 'AbortError'))
+          }
+          if (signal?.aborted) stop()
+          else signal?.addEventListener('abort', stop, { once: true })
+        })
         return Promise.resolve(new Response(JSON.stringify({ note: { title: 'AI 完整笔记', markdown: '# AI 完整笔记\\n\\n## 核心含义\\n\\n由测试桩生成。' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       }
       if (url.includes('/api/expression-explore')) {
         window.__expressionExploreRequests = (window.__expressionExploreRequests || []).concat([body])
+        if (body.intent === 'PAPERLIGHT-SLOW-EXPRESSION-9F3A') return new Promise((_resolve, reject) => {
+          const signal = init?.signal
+          const stop = () => {
+            window.__expressionExploreAbortObserved = true
+            reject(new DOMException('Aborted', 'AbortError'))
+          }
+          if (signal?.aborted) stop()
+          else signal?.addEventListener('abort', stop, { once: true })
+        })
         return Promise.resolve(new Response(JSON.stringify({ candidates: [{ expression: 'see eye to eye', meaning: '意见一致', usageScenario: '表达观点一致', relation: '与其他表达意思相近' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       }
       return original(input, init)
@@ -193,8 +236,10 @@ export async function runSmokeTest({ window, projectRoot }) {
   mkdirSync(join(library, 'collection'), { recursive: true })
   const bigPdf = join(library, 'Foucault-liberal-political-economy.pdf')
   const secondPdf = join(library, 'collection', 'Knowledge-and-Power.pdf')
+  const sourcePdfPath = join(library, 'book1.pdf')
   writeFileSync(bigPdf, createTestPdf({ pages: 120, title: 'Foucault and Liberal Political Economy' }))
   writeFileSync(secondPdf, createTestPdf({ pages: 24, title: 'Knowledge and Power' }))
+  writeFileSync(sourcePdfPath, createTestPdf({ pages: 4, title: 'Book One' }))
   const printedContentsPdfPath = join(library, 'collection', 'Printed-Contents.pdf')
   writeFileSync(printedContentsPdfPath, createTestPdf({
     pages: 4,
@@ -295,6 +340,35 @@ export async function runSmokeTest({ window, projectRoot }) {
     readingEvents: (window.__paperlightReadingSmokeEvents || []).slice(-20),
     errors: (window.__paperlightErrors || []).slice(-6),
   }))()`
+
+  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source') {
+    try {
+      await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'target PDF welcome screen' })
+      wc.send('app:open-paths', [sourcePdfPath])
+      await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'target source PDF opened' })
+      const firstPage = await ensureTextLayer(wc, 'target source PDF first page', { timeout: 25000 })
+      record('target source PDF first page has selectable text', firstPage.ok, JSON.stringify(firstPage))
+      if (!firstPage.ok) throw new Error(`first page failed: ${JSON.stringify(firstPage)}`)
+      await evaluate(wc, `(() => {
+        const input = document.querySelector('.page-number-input')
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, '2')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+        return true
+      })()`)
+      await waitFor(wc, `document.querySelector('.page-number-input')?.value === '2'`, { label: 'target source PDF jumped to page 2' })
+      await waitFor(wc, `document.querySelectorAll('.pdf-page-shell[data-page-number="2"] .textLayer span').length >= 2`, { timeout: 25000, label: 'target source PDF page 2 text layer' })
+      record('target source PDF page 2 renders a selectable text layer', true)
+    } catch (error) {
+      record('target PDF render run completed', false, error instanceof Error ? error.stack || error.message : String(error))
+    }
+    const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
+    writeFileSync(join(artifacts, 'smoke-target-report.json'), JSON.stringify(report, null, 2))
+    console.log(`${failures === 0 ? 'TARGET SMOKE OK' : `TARGET SMOKE FAILED (${failures})`}`)
+    app.exit(failures === 0 ? 0 : 1)
+    return report
+  }
 
   if (process.env.PAPERLIGHT_SMOKE_TARGET === 'epub-outline') {
     try {
@@ -756,7 +830,27 @@ export async function runSmokeTest({ window, projectRoot }) {
     record('selecting text only fills the reader query without sending an AI request',
       selectionMade === true && selectionPrefill.query.length > 0 && selectionPrefill.lookups === 0 && !selectionPrefill.hasResult,
       JSON.stringify(selectionPrefill))
-    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('#query-term')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'PAPERLIGHT-SLOW-LOOKUP-9F3A')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.query-go').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('[aria-label="停止语义查询"]') !== null`, { label: 'reader lookup stop control' })
+    await evaluate(wc, `document.querySelector('[aria-label="停止语义查询"]').click(); true`)
+    await waitFor(wc, `window.__senseAbortObserved?.lookup === true && document.querySelector('.query-go')?.disabled === false`, { label: 'reader lookup abort settles and restores query control' })
+    const readerLookupCancelled = await evaluate(wc, `({ aborted: window.__senseAbortObserved.lookup, loading: Boolean(document.querySelector('.loading-copy')), queryEnabled: !document.querySelector('.query-go').disabled })`)
+    record('stopping reader semantic lookup aborts its request and restores the query control', readerLookupCancelled.aborted && !readerLookupCancelled.loading && readerLookupCancelled.queryEnabled, JSON.stringify(readerLookupCancelled))
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('#query-term')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'numerous')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.query-go').click()
+      return true
+    })()`)
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'sense card' })
     await screenshot(window, artifacts, '08-sense.png')
 
@@ -817,6 +911,40 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `Array.from(document.querySelectorAll('.chat-messages p')).some((p) => p.textContent.includes('更书面'))`, { label: 'chat answer' })
     record('follow-up questions are answered in the chat panel', true)
     await screenshot(window, artifacts, '09-assistant.png')
+    const readerChatBeforeCancel = await evaluate(wc, `Array.from(document.querySelectorAll('.chat-messages li')).map((item) => ({
+      role: item.classList.contains('user') ? 'user' : 'assistant',
+      text: item.querySelector('.message-body')?.textContent || '',
+    }))`)
+    await evaluate(wc, `(() => {
+      const textarea = document.querySelector('.chat-input textarea')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(textarea, 'PAPERLIGHT-SLOW-READER-CHAT-9F3A')
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.chat-input button[aria-label="发送追问"]').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.chat-input button[aria-label="停止生成"]') !== null`, { label: 'reader chat stop control' })
+    await evaluate(wc, `document.querySelector('.chat-input button[aria-label="停止生成"]').click(); true`)
+    await waitFor(wc, `window.__senseAbortObserved?.ask === true && document.querySelector('.chat-input textarea')?.disabled === false`, { label: 'reader chat abort settles and restores input' })
+    const readerChatCancelled = await evaluate(wc, `(() => {
+      const after = Array.from(document.querySelectorAll('.chat-messages li')).map((item) => ({
+        role: item.classList.contains('user') ? 'user' : 'assistant',
+        text: item.querySelector('.message-body')?.textContent || '',
+      }))
+      const before = ${JSON.stringify(readerChatBeforeCancel)}
+      return {
+        aborted: window.__senseAbortObserved.ask,
+        priorPreserved: before.every((message, index) => after[index]?.role === message.role && after[index]?.text === message.text),
+        lastIsQuestion: after.at(-1)?.role === 'user' && after.at(-1)?.text.includes('PAPERLIGHT-SLOW-READER-CHAT-9F3A'),
+        noPartialAnswer: after.filter((message) => message.role === 'assistant').length === before.filter((message) => message.role === 'assistant').length,
+        inputEnabled: !document.querySelector('.chat-input textarea').disabled,
+        stopped: document.querySelector('.chat-panel [role="status"]')?.textContent.includes('已停止生成'),
+      }
+    })()`)
+    record('stopping reader follow-up aborts the request, restores input and preserves prior messages',
+      readerChatCancelled.aborted && readerChatCancelled.priorPreserved && readerChatCancelled.lastIsQuestion
+        && readerChatCancelled.noPartialAnswer && readerChatCancelled.inputEnabled && readerChatCancelled.stopped,
+      JSON.stringify(readerChatCancelled))
 
     // Mixed page geometry: a landscape fold-out must be drawn at its own scale,
     // and correcting its height must not move the page being read.
@@ -1114,6 +1242,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Plain-Notes.txt'))`, { label: 'paragraph-bookmarked text closed' })
     wc.send('app:open-paths', [textPath])
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'paragraph-bookmarked text reopened' })
+    await waitFor(wc, `document.querySelector('.flow-page') && Array.from(document.querySelectorAll('.flow-paragraph')).some((node) => node.textContent.includes('unique text marker target'))`, { label: 'bookmarked TXT paragraphs loaded after reopening' })
     await evaluate(wc, `if (!document.querySelector('.input-marker-menu')) document.querySelector('.input-marker-menu-toggle').click(); true`)
     await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.querySelector('small')?.textContent.includes('进度') && item.textContent.includes('unique text marker target'))`, { label: 'saved paragraph bookmark available after reopen' })
     await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).find((item) => item.querySelector('small')?.textContent.includes('进度') && item.textContent.includes('unique text marker target')).querySelector('button:first-child').click(); true`)
@@ -1401,6 +1530,10 @@ export async function runSmokeTest({ window, projectRoot }) {
     // Recognition is available directly from source text; deterministic exact
     // duplicates across PDF and EPUB accumulate separate contexts in one file.
     const expressionPdfPath = join(vaultDir, 'materials', 'books', 'book1', 'book1.pdf')
+    for (const title of ['Knowledge-and-Power.pdf', 'Mixed-Geometry.pdf']) {
+      await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab')).find((tab) => tab.textContent.includes(${JSON.stringify(title)}))?.querySelector('.doc-tab-close')?.click(); true`)
+      await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes(${JSON.stringify(title)}))`, { label: `close completed background PDF ${title}` })
+    }
     const selectPhrase = async (selector, phrase) => evaluate(wc, `(() => {
       const root = document.querySelector(${JSON.stringify(selector)})
       if (!root) return false
@@ -1682,7 +1815,28 @@ export async function runSmokeTest({ window, projectRoot }) {
     })()`)
     const explorationInputColor = await evaluate(wc, `getComputedStyle(document.querySelector('.expression-explore-input input')).color`)
     record('expression exploration input text has a readable foreground color', explorationInputColor === 'rgb(48, 56, 47)', explorationInputColor)
-    await evaluate(wc, `Array.from(document.querySelectorAll('.expression-explore-input button')).find((button) => button.textContent.includes('获取候选')).click(); true`)
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('.expression-explore-input input')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'PAPERLIGHT-SLOW-EXPRESSION-9F3A')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.expression-explore-input button').click()
+      return true
+    })()`)
+    await waitFor(wc, `Array.from(document.querySelectorAll('.expression-explore-input button')).some((button) => button.textContent.includes('停止'))`, { label: 'expression exploration stop control' })
+    await evaluate(wc, `document.querySelector('.expression-explore-input button').click(); true`)
+    await waitFor(wc, `window.__expressionExploreAbortObserved === true && document.querySelector('.expression-explore-input button')?.textContent.includes('获取候选')`, { label: 'expression exploration abort settles and restores action' })
+    record('stopping expression exploration aborts its request and keeps the editor usable',
+      await evaluate(wc, `window.__expressionExploreAbortObserved === true && document.querySelector('.expression-explore-input input')?.value === 'PAPERLIGHT-SLOW-EXPRESSION-9F3A'`),
+      'AbortSignal observed; input preserved')
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('.expression-explore-input input')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, '我想表达意见一致')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.expression-explore-input button').click()
+      return true
+    })()`)
     await waitFor(wc, `document.querySelector('.expression-candidate strong')?.textContent === 'see eye to eye'`, { label: 'AI exploration candidate' })
     expressionFiles = readdirSync(expressionDir).filter((name) => name.endsWith('.md'))
     const expressionListCount = await evaluate(wc, `document.querySelectorAll('.expression-list-item').length`)
@@ -1928,6 +2082,19 @@ export async function runSmokeTest({ window, projectRoot }) {
     wc.send('app:command', 'space-reader')
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'return to material reader before saving its semantic record' })
     await evaluate(wc, `Array.from(document.querySelectorAll('.right-tabs button')).find((button) => button.textContent.includes('语义')).click(); true`)
+    const inboxBeforeCancelledNote = existsSync(join(vaultDir, 'notes', 'inbox'))
+      ? readdirSync(join(vaultDir, 'notes', 'inbox')).sort()
+      : []
+    await evaluate(wc, `window.__holdNextVaultNote = true; Array.from(document.querySelectorAll('.vault-button')).find((button) => button.textContent.includes('生成 AI 完整笔记')).click(); true`)
+    await waitFor(wc, `document.querySelector('[aria-label="停止笔记生成"]') !== null`, { label: 'complete reader note stop control' })
+    await evaluate(wc, `document.querySelector('[aria-label="停止笔记生成"]').click(); true`)
+    await waitFor(wc, `window.__vaultAbortObserved?.note === true && document.querySelector('.api-config-message.success[role="status"]')?.textContent.includes('已停止生成')`, { label: 'complete reader note abort settles without a write' })
+    const inboxAfterCancelledNote = existsSync(join(vaultDir, 'notes', 'inbox'))
+      ? readdirSync(join(vaultDir, 'notes', 'inbox')).sort()
+      : []
+    record('stopping a generated reader note aborts AI work and writes no partial Markdown',
+      inboxBeforeCancelledNote.join('|') === inboxAfterCancelledNote.join('|'),
+      JSON.stringify({ aborted: true, inboxBeforeCancelledNote, inboxAfterCancelledNote }))
     await evaluate(wc, `Array.from(document.querySelectorAll('.vault-button')).find((button) => button.textContent.includes('语义存入 vault')).click(); true`)
     await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'notes desk after saving the sense' })
     let senseSaved = false
@@ -2073,6 +2240,24 @@ export async function runSmokeTest({ window, projectRoot }) {
       backfilled = existsSync(senseNoteFile)
     }
     record('a sense whose note is missing can be archived again in one click', backfill && backfilled, `${senseNoteFile} → ${backfilled}`)
+
+    // A cancelled AI report leaves the previously generated Daily byte-for-byte intact.
+    const dailyBeforeCancelledReport = Buffer.from(readFileSync(dailyFile))
+    const reportRequestsBeforeCancel = await evaluate(wc, `(window.__vaultReportRequests || []).length`)
+    await evaluate(wc, `(() => {
+      window.__holdNextVaultReport = true
+      const button = Array.from(document.querySelectorAll('.notes-side-pane button')).find((b) => b.textContent.includes('生成总结') || b.textContent.includes('更新总结'))
+      button?.click()
+      return Boolean(button)
+    })()`)
+    await waitFor(wc, `document.querySelector('[aria-label="停止日报生成"]') !== null
+      && window.__holdNextVaultReport === false
+      && (window.__vaultReportRequests || []).length > ${reportRequestsBeforeCancel}`, { label: 'Daily AI request reaches the cancellable model call' })
+    await evaluate(wc, `document.querySelector('[aria-label="停止日报生成"]').click(); true`)
+    await waitFor(wc, `window.__vaultAbortObserved?.report === true && document.querySelector('[aria-label="停止日报生成"]') === null`, { label: 'Daily summary abort settles before writing' })
+    const dailyAfterCancelledReport = Buffer.from(readFileSync(dailyFile))
+    record('stopping Daily AI generation aborts the request and leaves the previous Markdown unchanged',
+      dailyBeforeCancelledReport.equals(dailyAfterCancelledReport), `bytes preserved: ${dailyBeforeCancelledReport.equals(dailyAfterCancelledReport)}`)
 
     // Generate the fifth section in the same canonical Daily file.
     await evaluate(wc, `(() => {
