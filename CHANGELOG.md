@@ -32,7 +32,7 @@ Paperlight 的版本号规则：**整数部分 = 大版本功能变更，小数�
 ### 当前验证
 
 - `npm run check`：93 个测试通过，含构建、单元测试和 Node 语法检查；覆盖语义候选判定、确认后别名、原文来源、Vault frontmatter 与用户正文保留。
-- `npm run smoke`：Electron 桌面 smoke 通过；覆盖 V1 阅读/笔记/对话回归、PDF/EPUB 表达、AI 候选确认、PDF 标记重开、EPUB 标记跳回章节、五段 Daily、阅读时间估算、旧 Daily 迁移、语义跨文档合并/分开及语义摘录链接。
+- `npm run smoke`：Electron 桌面 smoke 通过；覆盖 V1 阅读/笔记/对话回归、PDF/EPUB 表达、AI 候选确认、PDF/EPUB/TXT/Markdown 标记关闭重开、EPUB/TXT 标记返回来源位置、五段 Daily、阅读时间估算、旧 Daily 迁移、语义跨文档合并/分开及语义摘录链接。
 - `npm run app:mac`：只生成并替换仓库根目录 `Paperlight.app`；universal 架构检查和 `codesign --verify --deep --strict` 通过，原有 `release/` 文件未改动。
 - 打包 App 通过 loopback 调试检查，renderer 已挂载且 `window.paperlight` 安全桥接可用；试用状态目录独立，未复制项目 API Key。
 

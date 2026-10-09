@@ -178,6 +178,9 @@ export async function runSmokeTest({ window, projectRoot }) {
     'These classifications operate within a broader framework of knowledge.',
     '',
     'Paperlight plain text paragraph two, also selectable.',
+    ...Array.from({ length: 36 }, (_, index) => `Plain text paragraph ${index + 3}: a stable reading position should return to its original context.`),
+    'The unique text marker target remains visible after the document is reopened.',
+    ...Array.from({ length: 24 }, (_, index) => `Trailing text paragraph ${index + 1}: the marked passage has room below it for source navigation.`),
   ].join('\n'))
   const epubPath = join(library, 'collection', 'Paperlight-Book.epub')
   writeFileSync(epubPath, await createTestEpub({
@@ -187,6 +190,25 @@ export async function runSmokeTest({ window, projectRoot }) {
   }))
 
   const wc = window.webContents
+  const selectTextForMarker = async (selector, phrase) => evaluate(wc, `(() => {
+    const root = document.querySelector(${JSON.stringify(selector)})
+    if (!root) return false
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    let node
+    while ((node = walker.nextNode())) {
+      const offset = (node.nodeValue || '').indexOf(${JSON.stringify(phrase)})
+      if (offset < 0) continue
+      const range = document.createRange()
+      range.setStart(node, offset)
+      range.setEnd(node, offset + ${JSON.stringify(phrase)}.length)
+      const selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.querySelector('.reader-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      return true
+    }
+    return false
+  })()`)
   const stateFile = join(app.getPath('userData'), 'paperlight-state.json')
   const consoleLog = []
   wc.on('console-message', (...args) => {
@@ -659,6 +681,31 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'markdown sense card' })
     await screenshot(window, artifacts, '13-markdown.png')
 
+    await installSenseStub(wc, { sense: {
+      term: 'reflowed', lemma: 'reflowed', partOfSpeech: 'adjective', senseId: 'markdown-marker',
+      contextualMeaning: '重新排版的', definition: 'arranged again in a flowing layout', contextSentence: 'reflowed reading position',
+      examples: [], guidance: { scenarios: [], advice: [], frequency: '', alternatives: [], synonyms: [], antonyms: [], morphology: { root: '', prefix: '', suffix: '', note: '' } },
+    } })
+    const markdownMarkerSelection = await selectTextForMarker('.flow-page', 'reflowed reading position')
+    await waitFor(wc, `document.querySelector('.input-mark-inline') !== null`, { label: 'Markdown input marker action' })
+    await evaluate(wc, `document.querySelector('.input-mark-inline').click(); true`)
+    await waitFor(wc, `document.querySelector('.input-marker-composer') !== null`, { label: 'Markdown marker composer' })
+    await evaluate(wc, `(() => {
+      const select = document.querySelector('.input-marker-visual-choice select')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+      setter.call(select, 'underline')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      document.querySelector('.input-marker-composer > footer .primary-button').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'Markdown underline restored from source text' })
+    await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
+    await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Reading-Notes.md'))`, { label: 'marked Markdown closed' })
+    wc.send('app:open-paths', [markdownPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Reading-Notes.md')`, { label: 'marked Markdown reopened' })
+    await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'Markdown marker restored after reopen' })
+    record('Markdown visual input marks persist after closing and reopening the source', markdownMarkerSelection)
+
     // ------------------------------------------------------------------- text
     wc.send('app:open-paths', [textPath])
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'plain text tab' })
@@ -668,6 +715,54 @@ export async function runSmokeTest({ window, projectRoot }) {
       headings: document.querySelectorAll('.flow-heading').length,
     })`)
     record('plain text opens as readable paragraphs', textView.paragraphs.length >= 2 && textView.headings === 0, JSON.stringify(textView))
+
+    const textMarkerQuote = 'The unique text marker target remains visible after the document is reopened.'
+    await evaluate(wc, `(() => {
+      const target = Array.from(document.querySelectorAll('.flow-paragraph')).find((paragraph) => paragraph.textContent.includes('unique text marker target'))
+      target?.scrollIntoView({ block: 'center', behavior: 'instant' })
+      return Boolean(target)
+    })()`)
+    await waitFor(wc, `document.querySelector('.reader-scroll')?.scrollTop > 0`, { label: 'plain text marker position' })
+    await sleep(200)
+    await installSenseStub(wc, { sense: {
+      term: 'marker', lemma: 'marker', partOfSpeech: 'noun', senseId: 'text-marker',
+      contextualMeaning: '标记', definition: 'a sign that identifies a location', contextSentence: 'An AI paraphrase cannot replace the selected quote.',
+      examples: [], guidance: { scenarios: [], advice: [], frequency: '', alternatives: [], synonyms: [], antonyms: [], morphology: { root: '', prefix: '', suffix: '', note: '' } },
+    } })
+    const textMarkerSelection = await selectTextForMarker('.flow-page', textMarkerQuote)
+    await waitFor(wc, `document.querySelector('.input-mark-inline') !== null`, { label: 'plain text input marker action' })
+    await evaluate(wc, `document.querySelector('.input-mark-inline').click(); true`)
+    await waitFor(wc, `document.querySelector('.input-marker-composer') !== null`, { label: 'plain text marker composer' })
+    await evaluate(wc, `(() => {
+      const select = document.querySelector('.input-marker-visual-choice select')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+      setter.call(select, 'highlight')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      document.querySelector('.input-marker-composer > footer .primary-button').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.input-marker-visual.highlight') !== null`, { label: 'plain text highlight restored from source text' })
+    const savedTextMarker = await evaluate(wc, `(() => {
+      const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+      const marker = (state.inputMarkers || []).find((item) => item.sourcePath === ${JSON.stringify(textPath)} && item.quote === ${JSON.stringify(textMarkerQuote)})
+      return { scrollRatio: marker?.scrollRatio, quote: marker?.quote }
+    })()`)
+    record('TXT input markers retain a source reading position', textMarkerSelection && savedTextMarker.scrollRatio > 0.3, JSON.stringify(savedTextMarker))
+    await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
+    await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Plain-Notes.txt'))`, { label: 'marked text source closed' })
+    wc.send('app:open-paths', [textPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'marked text source reopened' })
+    await waitFor(wc, `document.querySelector('.input-marker-visual.highlight') !== null`, { label: 'plain text marker restored after reopen' })
+    await evaluate(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); scroller.scrollTop = 0; scroller.dispatchEvent(new Event('scroll', { bubbles: true })); document.querySelector('.input-marker-menu-toggle').click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.input-marker-list-item button')?.textContent.includes('unique text marker target')`, { label: 'text marker listed after reopen' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item button')).find((button) => button.textContent.includes('unique text marker target')).click(); true`)
+    await sleep(220)
+    const textMarkerJump = await evaluate(wc, `(() => {
+      const scroller = document.querySelector('.reader-scroll')
+      const visual = document.querySelector('.input-marker-visual.highlight')
+      return { scrollTop: scroller?.scrollTop || 0, visualTop: visual && scroller ? visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null }
+    })()`)
+    record('TXT marker menu jumps back to the marked source passage', textMarkerJump.scrollTop > 0 && textMarkerJump.visualTop >= 70 && textMarkerJump.visualTop <= 220, JSON.stringify(textMarkerJump))
 
     // ------------------------------------------------------------------- EPUB
     wc.send('app:open-paths', [epubPath])
@@ -1068,6 +1163,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     record('a material from materials/ opens in the reading desk', materialText.ok, JSON.stringify(materialText))
 
     // A sense collected while reading it lands in the mirrored notes/ folder.
+    await installSenseStub(wc, stubSense)
     await evaluate(wc, `(() => {
       const spans = Array.from(document.querySelectorAll('.textLayer span')).filter((span) => (span.textContent || '').trim().length > 4)
       if (spans.length === 0) return false

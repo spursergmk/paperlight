@@ -178,7 +178,7 @@ function App() {
     note?: NotebookNote
   } | null>(null)
   const [selection, setSelection] = useState<TextSelection | null>(null)
-  const [pendingSourceJump, setPendingSourceJump] = useState<{ path: string; position: number } | null>(null)
+  const [pendingSourceJump, setPendingSourceJump] = useState<{ path: string; position: number; marker?: InputMarker } | null>(null)
   const [expressionCapture, setExpressionCapture] = useState<{
     text: string
     context: Partial<ExpressionContext>
@@ -1226,6 +1226,9 @@ function App() {
       locationLabel: context.locationLabel,
       startOffset: context.startOffset,
       endOffset: context.endOffset,
+      scrollRatio: sourceKind === 'text' && sourcePath === activePath
+        ? (scrollRatios.current[sourcePath] ?? activeTab?.scrollRatio)
+        : undefined,
       comment: '',
       x: Math.max(190, Math.min(window.innerWidth - 190, x)),
       y: Math.max(60, Math.min(window.innerHeight - 320, y)),
@@ -1310,11 +1313,11 @@ function App() {
     if (marker.sourcePath !== activePath) {
       if (marker.sourcePath.startsWith('materials/') && stateRef.current.vault.root) {
         const path = absoluteVaultPath(stateRef.current.vault.root, marker.sourcePath)
-        setPendingSourceJump({ path, position: marker.pageNumber || 1 })
+        setPendingSourceJump({ path, position: marker.pageNumber || 1, marker })
         switchSpace('reader')
         openDocument(path)
       } else if (marker.sourcePath.startsWith('/')) {
-        setPendingSourceJump({ path: marker.sourcePath, position: marker.pageNumber || 1 })
+        setPendingSourceJump({ path: marker.sourcePath, position: marker.pageNumber || 1, marker })
         switchSpace('reader')
         openDocument(marker.sourcePath)
       }
@@ -1328,11 +1331,18 @@ function App() {
         scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight) * marker.scrollRatio
       } else flowApiRef.current?.scrollToTop()
     }
-    window.setTimeout(() => {
+    const alignVisualMarker = (attempt = 0) => {
       const visual = document.querySelector<HTMLElement>(`.input-marker-visual[data-marker-id="${CSS.escape(marker.id)}"]`)
       const scroller = document.querySelector<HTMLElement>('.reader-scroll')
-      if (visual && scroller) scroller.scrollTop += visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 110
-    }, 120)
+      if (visual && scroller) {
+        const offset = visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 110
+        if (Math.abs(offset) > 4) scroller.scrollTop += offset
+        if (attempt < 3 && Math.abs(offset) > 4) window.setTimeout(() => alignVisualMarker(attempt + 1), 50)
+      } else if (marker.visualStyle && attempt < 12) {
+        window.setTimeout(() => alignVisualMarker(attempt + 1), 50)
+      }
+    }
+    window.setTimeout(() => alignVisualMarker(), 120)
   }
 
   const selectText = useCallback(() => {
@@ -1633,7 +1643,12 @@ function App() {
     if (!pendingSourceJump || pendingSourceJump.path !== activePath || activeDoc?.status !== 'ready') return
     if (activeDoc.kind === 'pdf') pageApiRef.current?.scrollToPage(pendingSourceJump.position)
     else if (activeDoc.kind === 'epub') handleChapterChange(pendingSourceJump.position - 1)
-    else if (pendingSourceJump.position > 1) flowApiRef.current?.scrollBy((pendingSourceJump.position - 1) * 480)
+    else if (activeDoc.kind === 'text') {
+      const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+      if (scroller && pendingSourceJump.marker?.scrollRatio !== undefined) {
+        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight) * pendingSourceJump.marker.scrollRatio
+      } else if (pendingSourceJump.position > 1) flowApiRef.current?.scrollBy((pendingSourceJump.position - 1) * 480)
+    }
     setPendingSourceJump(null)
   }, [activeDoc, activePath, handleChapterChange, pendingSourceJump])
 

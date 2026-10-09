@@ -106,7 +106,7 @@ PAPERLIGHT_USER_DATA_DIR="$HOME/Library/Application Support/Paperlight-V2-Sandbo
 ### 输入标记
 
 - 进度（书签）、形式、内容是标记目的；高亮和下划线是可选的视觉呈现。标记不改写原始 PDF/EPUB。
-- PDF/EPUB 使用原文摘录、邻近文字和位置作保守恢复；无法可靠定位时会显示未恢复状态，不会静默指向相似但错误的句子。
+- PDF/EPUB 使用原文摘录、邻近文字和位置作保守恢复；TXT/Markdown 另外保存阅读比例，重开后可从标记菜单返回并恢复视觉标记。无法可靠定位时会显示未恢复状态，不会静默指向相似但错误的句子。
 
 ### 对话空间
 
