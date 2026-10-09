@@ -281,6 +281,7 @@ function App() {
       }
     }, 15_000)
     window.addEventListener('pointerdown', markInteraction, true)
+    window.addEventListener('pointermove', markInteraction, { capture: true, passive: true })
     window.addEventListener('keydown', markInteraction, true)
     window.addEventListener('wheel', markInteraction, { capture: true, passive: true })
     window.addEventListener('scroll', markInteraction, true)
@@ -288,6 +289,7 @@ function App() {
     return () => {
       window.clearInterval(interval)
       window.removeEventListener('pointerdown', markInteraction, true)
+      window.removeEventListener('pointermove', markInteraction, true)
       window.removeEventListener('keydown', markInteraction, true)
       window.removeEventListener('wheel', markInteraction, true)
       window.removeEventListener('scroll', markInteraction, true)

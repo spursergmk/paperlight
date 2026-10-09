@@ -258,6 +258,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       return rect ? { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) } : null
     })()`)
     if (readerPoint) {
+      await sleep(350) // let the reader's post-paint activity listeners attach
       window.show()
       window.focus()
       await sleep(150)
@@ -265,6 +266,12 @@ export async function runSmokeTest({ window, projectRoot }) {
       wc.sendInputEvent({ type: 'mouseDown', x: readerPoint.x, y: readerPoint.y, button: 'left', clickCount: 1 })
       wc.sendInputEvent({ type: 'mouseUp', x: readerPoint.x, y: readerPoint.y, button: 'left', clickCount: 1 })
       wc.sendInputEvent({ type: 'mouseWheel', x: readerPoint.x, y: readerPoint.y, deltaX: 0, deltaY: 24, canScroll: true })
+      // Some macOS automation environments report window focus but do not
+      // deliver WebContents.sendInputEvent as DOM pointer events. Exercise the
+      // app's same foreground interaction listener deterministically as well.
+      await evaluate(wc, `document.querySelector('.pdf-page canvas')?.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, composed: true, pointerType: 'mouse', isPrimary: true }),
+      )`)
     }
     const readingFocus = await evaluate(wc, `({ focused: document.hasFocus(), hidden: document.hidden, activeSpace: JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').activeSpace, path: JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath })`)
     console.log(`  [reading timer probe] ${JSON.stringify(readingFocus)}`)

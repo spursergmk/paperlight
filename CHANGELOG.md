@@ -10,9 +10,9 @@ Paperlight 的版本号规则：**整数部分 = 大版本功能变更，小数�
 
 每次更新：先写清楚改动，然后由用户明确批准后才运行 `npm run release -- minor "一句话摘要"`（或 `major` / `patch`）——脚本会改版本号、提交并推送标签。没有明确批准时，只更新本地工作树，不创建正式标签或 Release。
 
-## Unreleased · V2.0 worktree（未发布、尚未完成）
+## Unreleased · V2.0 试用分支（未发布、尚未完成）
 
-正式版本号仍为 **1.0.2**。以下内容位于隔离分支 `codex/paperlight-v2`，不能据此宣称 Paperlight V2.0 已完成。
+正式版本号仍为 **1.0.2**。以下内容位于本地分支 `codex/paperlight-v2`，不能据此宣称 Paperlight V2.0 已完成。
 
 ### 已实现并验证的增量
 
@@ -26,14 +26,15 @@ Paperlight 的版本号规则：**整数部分 = 大版本功能变更，小数�
 ### 尚未完成
 
 - P0/P1 全量验收尚未结束：仍需完成完整语义增量整合交互、更多格式与来源的标记回溯复核、阅读助手单词至全文尺度、Enlightenment 专项研究关联和网页正文导入等。
-- 三平台本地打包已完成并验证 macOS App 可启动；当前没有签名/公证凭据，未做正式签名、公证或发布验收。包版本未升级，未创建或推送 Git 标签，也未发布 GitHub Release。
+- P0/P1 未完成前不维护分发安装包。当前只更新了 macOS universal `Paperlight.app` 供本地试用；采用 ad-hoc 签名，无公证。包版本未升级，未创建或推送 Git 标签，也未发布 GitHub Release。
 - 构建仍有主 JS chunk 大于 500 KB 的 Vite 警告。
 
 ### 当前验证
 
 - `npm run check`：89 个测试通过，含构建、单元测试和 Node 语法检查；Daily 手动编辑保护有单测。
 - `npm run smoke`：Electron 桌面 smoke 通过；覆盖 V1 阅读/笔记/对话回归、PDF/EPUB 表达、AI 候选确认、PDF 标记重开、EPUB 标记跳回章节、五段 Daily、阅读时间估算和旧 Daily 迁移。
-- `npm run dist`：macOS universal（App/DMG/ZIP）、Windows x64（安装包/ZIP）、Linux x64（AppImage）均生成；隔离配置启动 macOS App 后保持运行并正常退出。产物仅留在 worktree 的 `release/` 与 `Paperlight.app`，未发布。
+- `npm run app:mac`：只生成并替换仓库根目录 `Paperlight.app`；universal 架构检查和 `codesign --verify --deep --strict` 通过，原有 `release/` 文件未改动。
+- 打包 App 通过 loopback 调试检查，renderer 已挂载且 `window.paperlight` 安全桥接可用；试用状态目录独立，未复制项目 API Key。
 
 ## [1.0.2] - 2026-10-08
 
