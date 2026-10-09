@@ -1,18 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { BookOpen, Check, ChevronRight, CircleHelp, FileText, Link2, Plus, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react'
-import type { ExpressionCandidate, ExpressionContext, ExpressionRelationKind, NotebookNote, SenseAtom } from '../types'
+import type { ExpressionCandidate, ExpressionContext, ExpressionRelationKind } from '../types'
 import { exploreExpressions } from '../lib/expression-ai'
-import { parseNote } from '../lib/vault'
 import type { VaultApi } from './useVault'
 import SpaceRail from './SpaceRail'
-
-interface SearchHit {
-  kind: 'expression' | 'semantic' | 'notebook' | 'note'
-  id: string
-  title: string
-  body: string
-  path?: string
-}
 
 const RELATION_LABELS: Record<ExpressionRelationKind, string> = {
   variant: '变体',
@@ -24,22 +15,15 @@ const RELATION_LABELS: Record<ExpressionRelationKind, string> = {
 }
 
 export default function ExpressionSpace({
-  vault, semantics, notebookNotes, model, onSwitchSpace, onOpenSemantic, onOpenSource,
+  vault, model, onSwitchSpace, onOpenSource,
 }: {
   vault: VaultApi
-  semantics: SenseAtom[]
-  notebookNotes: NotebookNote[]
   model: string
   onSwitchSpace: (space: import('../types').AppSpace) => void
-  onOpenSemantic: (id: string) => void
   onOpenSource: (context: ExpressionContext) => void
 }) {
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [searchHits, setSearchHits] = useState<SearchHit[]>([])
-  const [searching, setSearching] = useState(false)
-  const [searchError, setSearchError] = useState('')
-  const [searchDone, setSearchDone] = useState(false)
   const [form, setForm] = useState<{ expression: string; meaning: string; note: string } | null>(null)
   const [editForm, setEditForm] = useState<{ expression: string; meaning: string; note: string } | null>(null)
   const [exploreMode, setExploreMode] = useState<'intent' | 'related' | null>(null)
@@ -50,103 +34,23 @@ export default function ExpressionSpace({
   const [notice, setNotice] = useState('')
   const [relationTarget, setRelationTarget] = useState('')
   const [relationKind, setRelationKind] = useState<ExpressionRelationKind>('similar')
-  const cache = useRef(new Map<string, { signature: string; text: string }>())
-
   const records = vault.expressions
-  const selected = records.find((item) => item.id === selectedId) || records[0] || null
   const normalizedQuery = query.trim().toLocaleLowerCase('en')
   const visibleRecords = useMemo(() => {
     if (!normalizedQuery) return records
-    return records.filter((record) => [
-      record.expression, record.meaning, record.note,
-      ...record.contexts.flatMap((context) => [context.quote || '', context.sourceName || '', context.usageScenario || '']),
-    ].join('\n').toLocaleLowerCase('en').includes(normalizedQuery))
+    return records.filter((record) => record.expression.toLocaleLowerCase('en').includes(normalizedQuery))
   }, [normalizedQuery, records])
+  const selected = visibleRecords.find((item) => item.id === selectedId) || visibleRecords[0] || null
 
   useEffect(() => {
-    if (!selectedId && records.length) setSelectedId(records[0]!.id)
-    if (selectedId && !records.some((record) => record.id === selectedId)) setSelectedId(records[0]?.id || null)
-  }, [records, selectedId])
-
-  useEffect(() => {
-    if (!normalizedQuery || !vault.ready) {
-      setSearchHits([])
-      setSearchError('')
-      setSearchDone(false)
+    if (!visibleRecords.length) {
+      if (normalizedQuery && selectedId) setSelectedId(null)
+      else if (!normalizedQuery && selectedId && !records.some((record) => record.id === selectedId)) setSelectedId(records[0]?.id || null)
+      else if (!normalizedQuery && !selectedId && records.length) setSelectedId(records[0]!.id)
       return
     }
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        setSearching(true)
-        setSearchError('')
-        setSearchDone(false)
-        try {
-          const hits: SearchHit[] = []
-          for (const record of records) {
-            if ([record.expression, record.meaning, record.note, ...record.contexts.map((item) => item.quote || '')]
-              .join('\n').toLocaleLowerCase('en').includes(normalizedQuery)) {
-              hits.push({ kind: 'expression', id: record.id, title: record.expression, body: record.meaning || record.note })
-            }
-          }
-          for (const semantic of semantics) {
-            const body = [semantic.contextualMeaning, semantic.definition, semantic.contextSentence,
-              ...semantic.examples.map((item) => item.text), ...semantic.guidance.advice].join('\n')
-            if ([semantic.term, semantic.lemma, body].join('\n').toLocaleLowerCase('en').includes(normalizedQuery)) {
-              hits.push({ kind: 'semantic', id: semantic.id, title: `${semantic.term} · ${semantic.contextualMeaning}`, body })
-            }
-          }
-          for (const note of notebookNotes) {
-            if (note.body.toLocaleLowerCase('en').includes(normalizedQuery)) {
-              hits.push({ kind: 'notebook', id: note.id, title: `${note.date} 第 ${note.dailyOrdinal} 份笔记`, body: note.body })
-            }
-          }
-          // Expressions have their own searchable collection above. Treating
-          // their backing Markdown as ordinary notes creates duplicate hits
-          // and a dead-end Vault-note link for paths under expressions/.
-          const files = vault.files.filter((file) =>
-            /\.(?:md|markdown)$/i.test(file.path) && !file.path.startsWith('expressions/'))
-          let cursor = 0
-          let noteHitCount = 0
-          const workers = Array.from({ length: Math.min(8, files.length) }, async () => {
-            while (!cancelled) {
-              const index = cursor++
-              const file = files[index]
-              if (!file) return
-              const signature = `${file.size}:${file.mtimeMs}`
-              let text = cache.current.get(file.path)?.signature === signature ? cache.current.get(file.path)!.text : ''
-              if (!text) {
-                try {
-                  text = await vault.readNote(file.path)
-                  cache.current.set(file.path, { signature, text })
-                } catch { continue }
-              }
-              if (text.toLocaleLowerCase('en').includes(normalizedQuery)) {
-                noteHitCount += 1
-                if (noteHitCount <= 100) {
-                  const parsed = parseNote(text)
-                  const title = typeof parsed.data.title === 'string' ? parsed.data.title : file.path
-                  const index = parsed.body.toLocaleLowerCase('en').indexOf(normalizedQuery)
-                  const body = parsed.body.slice(Math.max(0, index - 90), Math.min(parsed.body.length, index + 240)).replace(/\s+/g, ' ')
-                  hits.push({ kind: 'note', id: file.path, title, body, path: file.path })
-                }
-              }
-            }
-          })
-          await Promise.all(workers)
-          if (cancelled) return
-          setSearchHits(hits)
-          setSearchDone(true)
-          if (noteHitCount > 100) setSearchError(`笔记结果超过 100 条，当前显示前 100 条；表达与语义仍全部检索。`)
-        } catch (error) {
-          if (!cancelled) setSearchError(error instanceof Error ? error.message : '本地检索失败。')
-        } finally {
-          if (!cancelled) setSearching(false)
-        }
-      })()
-    }, 250)
-    return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [normalizedQuery, records, semantics, notebookNotes, vault.files, vault.ready, vault.readNote])
+    if (!visibleRecords.some((record) => record.id === selectedId)) setSelectedId(visibleRecords[0]!.id)
+  }, [normalizedQuery, records, selectedId, visibleRecords])
 
   const saveManual = async () => {
     if (!form?.expression.trim()) return
@@ -222,18 +126,6 @@ export default function ExpressionSpace({
     } catch (error) { setNotice(error instanceof Error ? error.message : '删除失败。') }
   }
 
-  const activateHit = (hit: SearchHit) => {
-    if (hit.kind === 'expression') setSelectedId(hit.id)
-    else if (hit.kind === 'semantic') onOpenSemantic(hit.id)
-    else if (hit.kind === 'note' && hit.path) {
-      const recordContext: ExpressionContext = {
-        id: `search-${hit.id}`, createdAt: '', sourceKind: hit.path.startsWith('enlightenment/') ? 'enlightenment' : 'note',
-        sourcePath: hit.path, sourceName: hit.title,
-      }
-      onOpenSource(recordContext)
-    }
-  }
-
   return (
     <div className="expression-workspace">
       <SpaceRail active="expressions" onSelect={onSwitchSpace} onChooseVault={() => void vault.chooseVault()} vaultName={vault.rootName} />
@@ -243,7 +135,7 @@ export default function ExpressionSpace({
           <button className="tiny-icon" type="button" title="重新读取 Vault" onClick={() => void vault.refreshExpressions()}><RefreshCw size={14} /></button>
         </header>
         <p className="expression-intro">从真实材料中识别，或从想表达的意思出发探索。每条表达可以积累多个语境。</p>
-        <label className="expression-search"><Search size={14} /><input aria-label="检索表达、语义和笔记" placeholder="检索表达、语义、笔记…" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        <label className="expression-search"><Search size={14} /><input aria-label="搜索表达" placeholder="搜索表达…" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
         <div className="expression-actions">
           <button type="button" className="primary-button" onClick={() => setForm({ expression: '', meaning: '', note: '' })}><Plus size={14} /> 手动添加</button>
           <button type="button" className="secondary-button" onClick={() => { setExploreMode('intent'); setExplorePrompt(''); setCandidates([]) }}><Sparkles size={14} /> 探索表达</button>
@@ -258,18 +150,7 @@ export default function ExpressionSpace({
               <small>{record.contexts.length} 个语境 · {record.cognitivePaths.map((path) => path === 'recognition' ? '识别' : path === 'exploration' ? '探索' : '手动').join(' / ')}</small>
             </button>
           ))}
-          {query.trim() && <div className="memory-search-results">
-            <h2>统一检索</h2>
-            {searching && <span className="mini-spinner" />}
-            {searchDone && searchHits.length === 0 && <p>表达、语义、记录本笔记与 Vault Markdown 中没有匹配内容。</p>}
-            {searchHits.map((hit, index) => (
-              <button type="button" key={`${hit.kind}-${hit.id}-${index}`} onClick={() => activateHit(hit)}>
-                <small>{hit.kind === 'expression' ? '表达' : hit.kind === 'semantic' ? '语义' : hit.kind === 'notebook' ? '记录本' : 'Vault 笔记'}</small>
-                <strong>{hit.title}</strong><span>{hit.body.slice(0, 180)}</span>
-              </button>
-            ))}
-            {searchError && <p className="panel-error-text">{searchError}</p>}
-          </div>}
+          {query.trim() && visibleRecords.length === 0 && <p className="expression-search-empty">没有找到匹配的表达。</p>}
         </div>}
       </section>
 
@@ -322,7 +203,7 @@ export default function ExpressionSpace({
             {records.length > 1 && <div className="expression-relation-create"><select aria-label="选择相关表达" value={relationTarget} onChange={(event) => setRelationTarget(event.target.value)}><option value="">选择一条表达…</option>{records.filter((record) => record.id !== selected.id).map((record) => <option key={record.id} value={record.id}>{record.expression}</option>)}</select><select aria-label="关系类型" value={relationKind} onChange={(event) => setRelationKind(event.target.value as ExpressionRelationKind)}>{Object.entries(RELATION_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select><button type="button" className="subtle-button" disabled={!relationTarget} onClick={() => void saveRelation()}><Link2 size={13} /> 关联</button></div>}
           </section>
           <footer className="expression-record-meta">创建于 {new Date(selected.createdAt).toLocaleString()} · 更新于 {new Date(selected.updatedAt).toLocaleString()}</footer>
-        </> : !form && !exploreMode && <div className="expression-welcome"><BookOpen size={32} /><h2>{vault.ready ? '从一个表达开始' : '请先选择 Vault'}</h2><p>{vault.ready ? '阅读真实材料时收录，或输入想表达的意思来探索。每条记录会保留来源和语境。' : '表达池与语义、笔记并列保存为 Vault 中的 Markdown。'}</p>{vault.ready ? <button className="primary-button" type="button" onClick={() => setForm({ expression: '', meaning: '', note: '' })}><Plus size={14} /> 添加第一条表达</button> : <button className="primary-button" type="button" onClick={() => void vault.chooseVault()}>选择 Vault</button>}</div>}
+        </> : !form && !exploreMode && normalizedQuery ? <div className="expression-welcome"><Search size={26} /><h2>没有找到匹配的表达</h2><p>表达池搜索只匹配表达本体。试试表达中的英文词组或句子。</p></div> : !form && !exploreMode && <div className="expression-welcome"><BookOpen size={32} /><h2>{vault.ready ? '从一个表达开始' : '请先选择 Vault'}</h2><p>{vault.ready ? '阅读真实材料时收录，或输入想表达的意思来探索。每条记录会保留来源和语境。' : '表达池与语义、笔记并列保存为 Vault 中的 Markdown。'}</p>{vault.ready ? <button className="primary-button" type="button" onClick={() => setForm({ expression: '', meaning: '', note: '' })}><Plus size={14} /> 添加第一条表达</button> : <button className="primary-button" type="button" onClick={() => void vault.chooseVault()}>选择 Vault</button>}</div>}
         {notice && <div className="vault-notice" role="status">{notice}</div>}
       </main>
     </div>

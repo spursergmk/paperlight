@@ -151,6 +151,54 @@ test('the vault knowledge endpoints validate input and stay loopback-only', asyn
   })
 })
 
+test('disconnecting a vault chat aborts the upstream model request', async () => {
+  const originalFetch = globalThis.fetch
+  const originalKey = process.env.OPENAI_API_KEY
+  let providerSignal: AbortSignal | undefined
+  let providerStarted!: () => void
+  let providerStopped!: () => void
+  const started = new Promise<void>((resolve) => { providerStarted = resolve })
+  const stopped = new Promise<void>((resolve) => { providerStopped = resolve })
+  process.env.OPENAI_API_KEY = 'test-only-paperlight-key'
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    providerSignal = init?.signal ?? undefined
+    providerStarted()
+    return new Promise<Response>((_resolve, reject) => {
+      if (providerSignal?.aborted) {
+        providerStopped()
+        reject(new DOMException('Aborted', 'AbortError'))
+        return
+      }
+      providerSignal?.addEventListener('abort', () => {
+        providerStopped()
+        reject(new DOMException('Aborted', 'AbortError'))
+      }, { once: true })
+    })
+  }) as typeof fetch
+
+  try {
+    await withServer(async (port) => {
+      const req = request({
+        host: '127.0.0.1', port, method: 'POST', path: '/api/vault-chat',
+        headers: { Host: `127.0.0.1:${port}`, 'Content-Type': 'application/json' },
+      })
+      req.on('error', () => undefined)
+      req.end(JSON.stringify({ question: 'wait for the answer', context: [] }))
+      await started
+      req.destroy()
+      await Promise.race([
+        stopped,
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('upstream abort timed out')), 1500)),
+      ])
+      assert.equal(providerSignal?.aborted, true)
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = originalKey
+  }
+})
+
 test('expression exploration validates intent and related-expression requests on loopback only', async () => {
   await withServer(async (port) => {
     const host = `127.0.0.1:${port}`

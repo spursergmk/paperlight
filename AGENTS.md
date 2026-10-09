@@ -108,34 +108,24 @@ electron-builder.yml     macOS（dmg+zip，universal）/ Windows（nsis+zip）/ 
 | `npm run app:mac` | 只更新仓库根 `./Paperlight.app`，不生成安装包 |
 | `npm run dist:mac` / `dist:win` / `dist:linux`、`npm run dist` | 用户明确要求维护分发包时才运行 |
 | `npm run icons` | 图标变更后重新生成 icns/ico（仅 macOS） |
-| `npm run release -- minor "摘要"` | 发布：改版本号 + 写入 `CHANGELOG.md` + 提交 + 打 `vX.Y.Z` 标签 + 推送 GitHub（`major` / `patch` / `--no-push` 同理） |
+| V2 开发批次 | 更新预览版本、`CHANGELOG.md`、检查与本地 App；只提交并推送当前 V2 开发分支，不创建正式标签或 Release |
 
 快捷键上的约定：`⌘N` 新建空白笔记（任意空间），标签栏的 `+` 也是「新建标签页」——阅读空间是菜单（打开文档… / 新建空白笔记），笔记空间直接建空白笔记。
 
-## 四点五、版本与发布（每次改动都要遵守）
+## 四点五、V2 开发批次版本管理
 
-版本规则：**整数部分 = 大版本功能变更，小数部分 = 修复式小更新**。
+V2 批次固定版本：V2.1=`2.1.0`、V2.2=`2.2.0`、V2.3=`2.3.0`、V2.4=`2.4.0`；批次内修复可递增 patch 位。
 
-| 变化 | 版本 | 例子 |
-| --- | --- | --- |
-| 大功能：新的空间、新的知识管理形态 | 整数位 +1 | 1.0.0 → 2.0.0 |
-| 修复式小更新：逻辑 bug、界面细节、文案 | 小数位 +1 | 1.0.0 → 1.1.0 |
-| 单点热修 | 第三位 +1 | 1.1.0 → 1.1.1 |
+每批按以下流程执行：
 
-流程（不要跳步）：
+1. 核对当前分支与工作树；只改用户反馈范围。
+2. 完成定点测试与本批验收，然后运行 `npm run check`、`npm run smoke` 和 `npm run app:mac` 更新仓库根 `Paperlight.app`。
+3. 手动更新 `package.json`、`package-lock.json` 与 `CHANGELOG.md`。如使用 npm 命令改版本，只能用 `npm version <版本号> --no-git-tag-version`。
+4. 只暂存本批明确修改的文件；不得用 `git add -A`，不要暂存用户草稿、`.codex/` 或生成产物。
+5. 创建准确描述的 commit，并推送到现有 `codex/paperlight-v2` 分支。禁止 force push。
+6. V2 开发批次不维护安装包，不创建或推送 `v*` 标签，不发布 GitHub Release，不合并 `main`。`npm run release` 属于正式发布流程，本轮不得调用。
 
-1. 改完代码 → 跑 `npm run check` 与 `npm run smoke`（需要时 `npm run app` 形态验证 + 重建 `./Paperlight.app`）。
-2. 用一句话写清这次改了什么，然后：
-
-   ```bash
-   npm run release -- minor "修复记录清单的来源链接"
-   npm run release -- major "新增对话空间与 vault 知识挖掘"
-   ```
-
-   脚本会：把 `package.json` / `package-lock.json` 的版本号提升 → 在 `CHANGELOG.md` 顶部写入这一版的记录（含摘要与本次改动文件清单）→ `git add -A` + 提交 + 打 `vX.Y.Z` 注释标签 → `git push origin HEAD` 与 `git push origin vX.Y.Z`。
-3. 版本已经手写在 `CHANGELOG.md` 里时，加 `--no-changelog`；只想本地留档时加 `--no-push`；要发布 `package.json` 里已经写好的版本（首次定版）加 `--keep`（例如 `npm run release -- keep "V1.0 首个正式版" --no-changelog`）。
-4. **安全护栏**：脚本会拒绝提交 `.env*`（`.env.example` 除外）、`release/`、`dist/`、`node_modules/`、`Paperlight.app/` 以及任何超过 5 MB 的文件，并把暂存区退回。发布前不要绕过它。
-5. 远端是 `https://github.com/spursergmk/paperlight.git`（HTTPS + `gh auth git-credential` / osxkeychain）。推送后确认 `git ls-remote --heads origin` 与 `--tags` 上出现了新提交与新标签。
+正式发版另走已有发布流程；上述 V2 开发批次规约优先于历史版本脚本说明。
 
 ## 五、状态与数据
 

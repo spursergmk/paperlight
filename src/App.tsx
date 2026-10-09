@@ -1390,8 +1390,13 @@ function App() {
     })
     const term = termFromSelection(text)
     setQueryTerm(term)
-    void runSenseLookup(term, sentenceAround(pageText, index, text.length))
-  }, [activePath, activeTab?.name, runSenseLookup])
+    lastContextRef.current = sentenceAround(pageText, index, text.length)
+    senseRequestRef.current += 1
+    setSenseLoading(false)
+    setSense(null)
+    setSenseError('')
+    setAllSenses(null)
+  }, [activePath, activeTab?.name])
 
   const setLayout = useCallback((updater: (current: PersistedState['layout']) => PersistedState['layout']) => {
     setState((prev) => ({ ...prev, layout: updater(prev.layout) }))
@@ -2268,11 +2273,8 @@ function App() {
       ) : activeSpace === 'expressions' ? (
         <ExpressionSpace
           vault={vaultApi}
-          semantics={atoms}
-          notebookNotes={notebookNotes}
           model={model}
           onSwitchSpace={switchSpace}
-          onOpenSemantic={(id) => { setActiveAtomId(id); setRightTab('notebook'); switchSpace('reader') }}
           onOpenSource={openExpressionSource}
         />
       ) : (
@@ -2311,6 +2313,14 @@ function App() {
         <div className="popover-title"><span className="provider-dot openai" />上下文语义{sense.partOfSpeech ? ` · ${sense.partOfSpeech}` : ''}<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
         <p className="popover-meaning">{sense.contextualMeaning}</p>
         {selection && <button className="input-mark-inline" type="button" onMouseDown={(event) => event.preventDefault()} onClick={startMarkerFromReaderSelection}><Highlighter size={12} /> 标记输入</button>}
+        <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
+        <span className="popover-pointer" />
+      </div>}
+
+      {activeSpace === 'reader' && anchor && selection && !senseLoading && !sense && !senseError && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
+        <div className="popover-title"><span className="provider-dot mock" />已选文本<span className="popover-page">P.{selection.pageNumber}</span></div>
+        <p className="popover-meaning">文本已填入查询框；点击「查询」或按 Enter 后才会请求 AI。</p>
+        <button className="input-mark-inline" type="button" onMouseDown={(event) => event.preventDefault()} onClick={startMarkerFromReaderSelection}><Highlighter size={12} /> 标记输入</button>
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
       </div>}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check, Copy, FilePlus2, FolderPlus, History, Link2, MessageSquarePlus, Pencil, RefreshCw,
-  Send, ShieldCheck, ShieldOff, Sparkles, Trash2, X,
+  Send, ShieldCheck, ShieldOff, Sparkles, Square, Trash2, X,
 } from 'lucide-react'
 import SpaceRail from './SpaceRail'
 import Splitter from './Splitter'
@@ -10,6 +10,7 @@ import type { VaultApi } from './useVault'
 import type { AppSpace, ChatMessage, ChatThread } from '../types'
 import { chatThreadTitle, filesUnderPath, filterVaultTree, newChatMessage, noteTitleFromPath, relativeTime } from '../lib/vault'
 import { askVault } from '../lib/vaultai'
+import MarkdownPreview from './MarkdownPreview'
 
 interface ChatSpaceProps {
   vault: VaultApi
@@ -65,6 +66,8 @@ export default function ChatSpace({
   const draftRef = useRef(draft)
   draftRef.current = draft
   const flashTimer = useRef<number | null>(null)
+  const requestSequence = useRef(0)
+  const requestRef = useRef<{ id: number; controller: AbortController; threadId: string; userMessageId: string } | null>(null)
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) || null,
@@ -73,7 +76,15 @@ export default function ChatSpace({
   const tree = useMemo(() => filterVaultTree(vault.noteTree, query), [query, vault.noteTree])
   const selectedPaths = activeThread?.contextPaths || []
 
-  useEffect(() => () => { if (flashTimer.current) window.clearTimeout(flashTimer.current) }, [])
+  useEffect(() => () => {
+    if (flashTimer.current) window.clearTimeout(flashTimer.current)
+    requestRef.current?.controller.abort()
+  }, [])
+
+  useEffect(() => {
+    const request = requestRef.current
+    if (request && request.threadId !== activeThreadId) request.controller.abort()
+  }, [activeThreadId])
 
   const notify = useCallback((text: string) => {
     setFlash(text)
@@ -89,19 +100,28 @@ export default function ChatSpace({
     const thread = threadsRef.current.find((item) => item.id === activeRef.current)
     const question = (questionOverride ?? draftRef.current).trim()
     if (!thread || !question || sendingRef.current) return
+    const controller = new AbortController()
+    const requestId = ++requestSequence.current
+    const userMessage = newChatMessage('user', question)
+    requestRef.current = { id: requestId, controller, threadId: thread.id, userMessageId: userMessage.id }
     setDraft('')
     setSending(true)
+    sendingRef.current = true
     setError('')
     const history = thread.messages.slice(-8).map((message) => ({ role: message.role, content: message.content }))
     patchThread(thread.id, (current) => ({
       ...current,
       title: current.messages.length === 0 ? chatThreadTitle(question) : current.title,
       updatedAt: new Date().toISOString(),
-      messages: [...current.messages, newChatMessage('user', question)],
+      messages: [...current.messages, userMessage],
     }))
     try {
       const { context, skipped } = await vaultRef.current.groundingContext(thread.contextPaths)
-      const reply = await askVault({ question, history, context, model })
+      if (controller.signal.aborted) return
+      const reply = await askVault({ question, history, context, model }, controller.signal)
+      if (controller.signal.aborted) return
+      const currentThread = threadsRef.current.find((item) => item.id === thread.id)
+      if (!currentThread?.messages.some((message) => message.id === userMessage.id)) return
       const sources = reply.sources.length ? reply.sources : context.map((item) => item.path)
       patchThread(thread.id, (current) => ({
         ...current,
@@ -115,11 +135,24 @@ export default function ChatSpace({
         setError(`有 ${skipped.length} 份所选内容无法读取，已跳过：${skipped.slice(0, 3).join('、')}`)
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'vault 对话失败。')
+      if (controller.signal.aborted) {
+        setError('')
+        notify('已停止生成，原问题仍保留在对话中。')
+      } else {
+        setError(caught instanceof Error ? caught.message : 'vault 对话失败。')
+      }
     } finally {
-      setSending(false)
+      if (requestRef.current?.id === requestId) {
+        requestRef.current = null
+        sendingRef.current = false
+        setSending(false)
+      }
     }
-  }, [model, patchThread])
+  }, [model, notify, patchThread])
+
+  const stopGeneration = useCallback(() => {
+    requestRef.current?.controller.abort()
+  }, [])
 
   const saveAnswer = useCallback(async (message: ChatMessage) => {
     const thread = threadsRef.current.find((item) => item.id === activeRef.current)
@@ -384,7 +417,7 @@ export default function ChatSpace({
                     )}
                     <span className="message-time">{relativeTime(message.createdAt)}</span>
                   </div>
-                  <p className="message-body">{message.content}</p>
+                  <MarkdownPreview markdown={message.content} className="message-body" />
                   {message.role === 'assistant' && (message.sources?.length || 0) > 0 && (
                     <div className="message-sources">
                       <span>依据：</span>
@@ -417,7 +450,7 @@ export default function ChatSpace({
           {flash && <p className="api-config-message success" role="status">{flash}</p>}
         </div>
 
-        <div className="vault-chat-input">
+          <div className="vault-chat-input">
           <textarea
             value={draft}
             placeholder={groundedCount > 0 ? `基于所选的 ${groundedCount} 份笔记提问…` : '提问（或先在左栏勾选 vault 内容）'}
@@ -430,9 +463,9 @@ export default function ChatSpace({
               }
             }}
           />
-          <button type="button" disabled={sending || !draft.trim() || !activeThread} onClick={() => void send()}>
-            <Send size={15} />
-          </button>
+          {sending
+            ? <button type="button" className="stop-generation" aria-label="停止生成" title="停止生成" onClick={stopGeneration}><Square size={13} fill="currentColor" /></button>
+            : <button type="button" disabled={!draft.trim() || !activeThread} aria-label="发送消息" title="发送消息" onClick={() => void send()}><Send size={15} /></button>}
         </div>
         <p className="chat-hint">Enter 发送 · Shift+Enter 换行 · 回答可一键存成 vault 笔记（{vault.rootName}）</p>
       </section>

@@ -28,19 +28,20 @@ export interface VaultChatReply {
 
 export type VaultNoteTask = 'sense' | 'excerpt' | 'topic'
 
-async function postVault<T>(path: string, body: unknown): Promise<T> {
+async function postVault<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
   const payload = await response.json().catch(() => ({})) as { error?: string } & Partial<T>
   if (!response.ok) throw new Error(payload.error || 'vault 请求失败。')
   return payload as T
 }
 
-export async function askVault(input: VaultChatInput): Promise<VaultChatReply> {
-  const result = await postVault<Partial<VaultChatReply>>('/api/vault-chat', input)
+export async function askVault(input: VaultChatInput, signal?: AbortSignal): Promise<VaultChatReply> {
+  const result = await postVault<Partial<VaultChatReply>>('/api/vault-chat', input, signal)
   return {
     answer: result.answer || '未收到回答，请重试。',
     grounded: result.grounded === true,

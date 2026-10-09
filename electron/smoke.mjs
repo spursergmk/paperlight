@@ -94,13 +94,14 @@ async function ensureTextLayer(wc, label, { timeout = 60000 } = {}) {
 // canned API responses are installed through one reusable helper.
 async function installSenseStub(wc, stubSense) {
   await evaluate(wc, `(() => {
+    window.__senseLookupRequests = []
     const original = window.fetch.bind(window)
     window.fetch = (input, init) => {
       const url = typeof input === 'string' ? input : (input && input.url) || ''
       if (url.includes('/api/sense')) {
         const body = init && init.body ? JSON.parse(init.body) : {}
         const payload = body.task === 'lookup'
-          ? ${JSON.stringify(stubSense)}
+          ? (window.__senseLookupRequests.push(body), ${JSON.stringify(stubSense)})
           : { answer: 'numerous 侧重数量多，比 many 更书面；in large numbers 可表达数量很多。' }
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       }
@@ -123,11 +124,25 @@ async function installVaultStub(wc) {
       const body = init && init.body ? JSON.parse(init.body) : {}
       if (url.includes('/api/vault-chat')) {
         window.__vaultChatRequests.push(body)
+        if (body.question === 'PAPERLIGHT-SLOW-REQUEST-9F3A') {
+          return new Promise((_resolve, reject) => {
+            const signal = init && init.signal
+            if (signal && signal.aborted) {
+              window.__vaultChatAbortObserved = true
+              reject(new DOMException('Aborted', 'AbortError'))
+              return
+            }
+            signal?.addEventListener('abort', () => {
+              window.__vaultChatAbortObserved = true
+              reject(new DOMException('Aborted', 'AbortError'))
+            }, { once: true })
+          })
+        }
         const context = Array.isArray(body.context) ? body.context : []
         const grounded = context.length > 0
         const answer = grounded
-          ? '依据 [[' + context[0].path + ']]：vault 里已有的一份笔记。'
-          : '（未限定 vault 的一般回答）'
+          ? '**依据** [[' + context[0].path + ']]：vault 里已有的一份笔记。\\n\\n- 已有内容\\n- 对话范围明确'
+          : '**一般回答**\\n\\n- 未限定 vault\\n- 可继续追问'
         return Promise.resolve(new Response(JSON.stringify({ answer, grounded, sources: context.map((item) => item.path) }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       }
       if (url.includes('/api/daily-summary')) {
@@ -528,7 +543,15 @@ export async function runSmokeTest({ window, projectRoot }) {
       document.querySelector('.reader-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
       return true
     })()`, { label: 'selectable text after returning to the remaining PDF', timeout: 45000, interval: 180 })
-    record('selecting text in the page starts a contextual sense lookup', selectionMade === true)
+    const selectionPrefill = await evaluate(wc, `({
+      query: document.querySelector('#query-term')?.value || '',
+      lookups: (window.__senseLookupRequests || []).length,
+      hasResult: Boolean(document.querySelector('.sense-meaning')),
+    })`)
+    record('selecting text only fills the reader query without sending an AI request',
+      selectionMade === true && selectionPrefill.query.length > 0 && selectionPrefill.lookups === 0 && !selectionPrefill.hasResult,
+      JSON.stringify(selectionPrefill))
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'sense card' })
     await screenshot(window, artifacts, '08-sense.png')
 
@@ -728,7 +751,8 @@ export async function runSmokeTest({ window, projectRoot }) {
       return true
     })()`)
     await waitFor(wc, `document.querySelector('.query-meta')?.textContent.includes('Reading-Notes.md')`, { label: 'markdown selection handed to the assistant' })
-    record('selecting text in Markdown feeds the contextual sense lookup', true)
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
+    record('explicitly querying selected Markdown text requests the contextual sense', true)
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'markdown sense card' })
     await screenshot(window, artifacts, '13-markdown.png')
 
@@ -879,7 +903,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       return true
     })()`)
     await waitFor(wc, `document.querySelector('.query-meta')?.textContent.includes('Paperlight-Book.epub')`, { label: 'epub selection handed to the assistant' })
-    record('selecting text inside an EPUB chapter feeds the sense lookup', true)
+    record('selecting text inside an EPUB chapter pre-fills the query without auto-sending', true)
 
     // The app writes its state through a 400 ms debounce; poll instead of
     // guessing, and report the browser copy when the file disagrees.
@@ -1236,6 +1260,13 @@ export async function runSmokeTest({ window, projectRoot }) {
       return true
     })()`)
     await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'EPUB underline restored from source text' })
+    const epubFollowupSelection = await selectPhrase('.epub-body', 'The authors take a stance on language learning.')
+    await waitFor(wc, `document.querySelector('#query-term')?.value.trim().length > 0`, { label: 'EPUB follow-up query prefilled' })
+    await evaluate(wc, `window.__senseLookupRequests = []; true`)
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
+    await waitFor(wc, `(window.__senseLookupRequests || []).length >= 1`, { label: 'explicit EPUB query reaches the AI client' })
+    await waitFor(wc, `document.querySelector('.sense-meaning') !== null`, { label: 'explicit EPUB sense query before contextual follow-up' })
+    record('an EPUB follow-up conversation starts after the user explicitly queries its selected text', epubFollowupSelection)
     await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
     await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Paperlight-Book.epub'))`, { label: 'marked EPUB closed' })
     wc.send('app:open-paths', [epubPath])
@@ -1277,6 +1308,17 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.expression-detail-head h2')?.textContent.includes('The authors take a stance') && document.querySelectorAll('.expression-context').length === 2`, { label: 'two merged contexts shown in expression pool' })
     const expressionDetails = await evaluate(wc, `({ expression: document.querySelector('.expression-detail-head h2')?.textContent || '', contexts: document.querySelectorAll('.expression-context').length })`)
     record('expression pool displays both source contexts and source navigation', expressionDetails.expression.includes('The authors take a stance') && expressionDetails.contexts === 2, JSON.stringify(expressionDetails))
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('.expression-search input')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'book1.pdf')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelectorAll('.expression-list-item').length === 0`, { label: 'expression search excludes source metadata' })
+    const expressionSearchScope = await evaluate(wc, `({ list: document.querySelectorAll('.expression-list-item').length, unifiedPanel: Boolean(document.querySelector('.memory-search-results')) })`)
+    record('expression pool search filters expressions only and does not show cross-memory results', expressionSearchScope.list === 0 && !expressionSearchScope.unifiedPanel, JSON.stringify(expressionSearchScope))
+    await evaluate(wc, `(() => { const input = document.querySelector('.expression-search input'); const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; setter.call(input, ''); input.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
     await sleep(180)
     await screenshot(window, artifacts, '19-expression-pool.png')
 
@@ -1288,6 +1330,8 @@ export async function runSmokeTest({ window, projectRoot }) {
       input.dispatchEvent(new Event('input', { bubbles: true }))
       return true
     })()`)
+    const explorationInputColor = await evaluate(wc, `getComputedStyle(document.querySelector('.expression-explore-input input')).color`)
+    record('expression exploration input text has a readable foreground color', explorationInputColor === 'rgb(48, 56, 47)', explorationInputColor)
     await evaluate(wc, `Array.from(document.querySelectorAll('.expression-explore-input button')).find((button) => button.textContent.includes('获取候选')).click(); true`)
     await waitFor(wc, `document.querySelector('.expression-candidate strong')?.textContent === 'see eye to eye'`, { label: 'AI exploration candidate' })
     expressionFiles = readdirSync(expressionDir).filter((name) => name.endsWith('.md'))
@@ -1359,35 +1403,22 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.expression-workspace') !== null`, { label: 'expression pool restored after source coverage' })
 
     const setExpressionSearch = async (query) => evaluate(wc, `(() => {
-      const input = document.querySelector('input[aria-label="检索表达、语义和笔记"]')
+      const input = document.querySelector('input[aria-label="搜索表达"]')
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
       setter.call(input, ${JSON.stringify(query)})
       input.dispatchEvent(new Event('input', { bubbles: true }))
       return true
     })()`)
-    await setExpressionSearch('numerous')
-    await waitFor(wc, `(() => {
-      const labels = Array.from(document.querySelectorAll('.memory-search-results > button small')).map((node) => node.textContent)
-      return ['语义', '记录本', 'Vault 笔记'].every((label) => labels.includes(label))
-    })()`, { label: 'unified semantic, notebook and Vault search results' })
-    const numerousSearchLabels = await evaluate(wc, `Array.from(document.querySelectorAll('.memory-search-results > button small')).map((node) => node.textContent)`)
-    record('local unified search finds semantics, notebook notes and Markdown note bodies', ['语义', '记录本', 'Vault 笔记'].every((label) => numerousSearchLabels.includes(label)), numerousSearchLabels.join(', '))
-    await evaluate(wc, `Array.from(document.querySelectorAll('.memory-search-results > button')).find((button) => button.querySelector('small')?.textContent === '语义')?.click(); true`)
-    await waitFor(wc, `document.querySelector('.sense-head h3')?.textContent === 'numerous'`, { label: 'semantic search result opens its canonical record' })
-    record('a semantic search result opens its existing semantic record', true)
+    await setExpressionSearch('book1.pdf')
+    await waitFor(wc, `document.querySelectorAll('.expression-list-item').length === 0`, { label: 'expression search excludes source metadata' })
+    const expressionSearchAfterCapture = await evaluate(wc, `({ list: document.querySelectorAll('.expression-list-item').length, crossMemoryPanel: Boolean(document.querySelector('.memory-search-results')) })`)
+    record('expression pool search filters expression text only', expressionSearchAfterCapture.list === 0 && !expressionSearchAfterCapture.crossMemoryPanel, JSON.stringify(expressionSearchAfterCapture))
 
-    await evaluate(wc, `Array.from(document.querySelectorAll('.space-rail-button')).find((button) => button.textContent.includes('表达')).click(); true`)
-    await waitFor(wc, `document.querySelector('.expression-workspace') !== null`, { label: 'return to expression pool search' })
-    await setExpressionSearch('language learning')
-    await waitFor(wc, `(() => {
-      const labels = Array.from(document.querySelectorAll('.memory-search-results > button small')).map((node) => node.textContent)
-      return labels.includes('表达') && labels.includes('Vault 笔记')
-    })()`, { label: 'expression and Markdown body search results' })
-    const languageSearch = await evaluate(wc, `Array.from(document.querySelectorAll('.memory-search-results > button')).map((button) => ({ kind: button.querySelector('small')?.textContent, title: button.querySelector('strong')?.textContent }))`)
-    record('local unified search finds expression records and returns matching note sources', languageSearch.some((hit) => hit.kind === '表达') && languageSearch.some((hit) => hit.kind === 'Vault 笔记'), JSON.stringify(languageSearch))
-    await evaluate(wc, `Array.from(document.querySelectorAll('.memory-search-results > button')).find((button) => button.querySelector('small')?.textContent === 'Vault 笔记' && button.querySelector('strong')?.textContent.includes('Reading Log'))?.click(); true`)
-    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes('Reading-Log.md')`, { label: 'search result opens its source Markdown note' })
-    record('a Vault search result opens the original Markdown source', true)
+    wc.send('app:command', 'space-notes')
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'NotesSpace remains available after expression search' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.notes-tree-pane .vault-node-toggle')).find((button) => button.title === ${JSON.stringify(researchNotePath)})?.click(); true`)
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent === ${JSON.stringify(researchNotePath)}`, { label: 'open Markdown source from the existing notes tree' })
+    record('the existing NotesSpace source browser remains usable alongside expression-only search', true)
 
     await screenshot(window, artifacts, '15-notes-vault.png')
 
@@ -1489,6 +1520,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       document.querySelector('.reader-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
       return true
     })()`)
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'sense card for the material' })
     const targetHint = await evaluate(wc, `Array.from(document.querySelectorAll('.vault-hint')).map((n) => n.textContent).join(' ')`)
     record('the assistant says where this reading session writes', targetHint.includes('notes/books/book1'), targetHint.slice(0, 120))
@@ -1540,7 +1572,7 @@ export async function runSmokeTest({ window, projectRoot }) {
 
     // One full-width mode at a time, switched from the top-right of the note.
     await evaluate(wc, `(() => {
-      const target = Array.from(document.querySelectorAll('.notes-tree-pane .vault-node.file')).find((n) => n.textContent.includes(${JSON.stringify(todayKey)}))
+      const target = Array.from(document.querySelectorAll('.notes-tree-pane .vault-node.file')).find((n) => n.querySelector('.vault-node-name')?.textContent?.trim() === ${JSON.stringify(todayKey)})
       target.querySelector('.vault-node-toggle').click()
       return true
     })()`)
@@ -1729,6 +1761,11 @@ export async function runSmokeTest({ window, projectRoot }) {
       JSON.stringify({ grounded: groundedRequest.grounded, carriesNoteBody: groundedRequest.carriesNoteBody }),
     )
     record('the grounded answer cites its source note', groundedRequest.answer.includes('Reading-Log'), groundedRequest.answer.slice(0, 90))
+    const chatMarkdown = await evaluate(wc, `({
+      strong: document.querySelectorAll('.vault-chat-messages li.assistant .message-body strong').length,
+      listItems: document.querySelectorAll('.vault-chat-messages li.assistant .message-body .flow-list li').length,
+    })`)
+    record('conversation answers render Markdown structure', chatMarkdown.strong > 0 && chatMarkdown.listItems >= 2, JSON.stringify(chatMarkdown))
     await screenshot(window, artifacts, '17-vault-chat.png')
 
     // Ungrounded mode is explicit, and an answer can be saved back as a note.
@@ -1759,6 +1796,45 @@ export async function runSmokeTest({ window, projectRoot }) {
     })()`)
     await waitFor(wc, `Array.from(document.querySelectorAll('.vault-chat-messages li.user .message-body')).some((node) => node.textContent.includes('Please keep an open mind when reading.'))`, { label: 'free conversation message for expression capture' })
     await waitFor(wc, `document.querySelectorAll('.vault-chat-messages li.assistant .message-body').length >= 2`, { label: 'free conversation reply settled before text selection' })
+    const messagesBeforeAbort = await evaluate(wc, `Array.from(document.querySelectorAll('.vault-chat-messages li')).map((item) => ({
+      role: item.classList.contains('user') ? 'user' : 'assistant',
+      text: item.querySelector('.message-body')?.textContent || '',
+    }))`)
+    await evaluate(wc, `(() => {
+      const area = document.querySelector('.vault-chat-input textarea')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(area, 'PAPERLIGHT-SLOW-REQUEST-9F3A')
+      area.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.vault-chat-input button[aria-label="发送消息"]').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.vault-chat-input button[aria-label="停止生成"]') !== null`, { label: 'stop generation button' })
+    await evaluate(wc, `document.querySelector('.vault-chat-input button[aria-label="停止生成"]').click(); true`)
+    await waitFor(wc, `document.querySelector('.vault-chat-input button[aria-label="发送消息"]') !== null
+      && document.querySelector('.api-config-message.success')?.textContent.includes('已停止生成')
+      && Array.from(document.querySelectorAll('.vault-chat-messages li.user .message-body')).some((node) => node.textContent.includes('PAPERLIGHT-SLOW-REQUEST-9F3A'))`, { label: 'generation cancellation settles with the question in history' })
+    const cancelledChat = await evaluate(wc, `(() => {
+      const messages = Array.from(document.querySelectorAll('.vault-chat-messages li'))
+      const before = ${JSON.stringify(messagesBeforeAbort)}
+      const after = messages.map((item) => ({
+        role: item.classList.contains('user') ? 'user' : 'assistant',
+        text: item.querySelector('.message-body')?.textContent || '',
+      }))
+      return {
+        aborted: window.__vaultChatAbortObserved === true,
+        lastIsQuestion: messages.at(-1)?.classList.contains('user') === true && messages.at(-1)?.textContent.includes('PAPERLIGHT-SLOW-REQUEST-9F3A'),
+        previousMessagesPreserved: before.every((message, index) => after[index]?.role === message.role && after[index]?.text === message.text),
+        assistantCount: after.filter((message) => message.role === 'assistant').length,
+        messageCount: after.length,
+        inputEnabled: !document.querySelector('.vault-chat-input textarea')?.disabled,
+      }
+    })()`)
+    record('stopping generation aborts the pending request, restores input, and preserves the question and prior answers',
+      cancelledChat.aborted && cancelledChat.lastIsQuestion && cancelledChat.previousMessagesPreserved
+        && cancelledChat.messageCount === messagesBeforeAbort.length + 1
+        && cancelledChat.assistantCount === messagesBeforeAbort.filter((message) => message.role === 'assistant').length
+        && cancelledChat.inputEnabled,
+      JSON.stringify(cancelledChat))
     const chatSelection = await selectChatPhrase('keep an open mind')
     await waitFor(wc, `document.querySelector('.expression-capture-popover span')?.textContent.includes('keep an open mind')`, { timeout: 2500, label: 'capture selected wording from free conversation' }).catch(() => null)
     const chatCaptureDebug = await evaluate(wc, `({
@@ -1835,7 +1911,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
       setter.call(input, ${JSON.stringify(term)})
       input.dispatchEvent(new Event('input', { bubbles: true }))
-      document.querySelector('.query-go').click()
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
       return true
     })()`)
     const withinFirst = { sense: {
@@ -1860,6 +1936,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     await ensureTextLayer(wc, 'first semantic source')
     await installSenseStub(wc, withinFirst)
     const selectedWithinA = await selectPhrase('.textLayer', 'within')
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '在框架或范围之内'`, { label: 'first within semantic result' })
     await evaluate(wc, `document.querySelector('.sense-add').click(); true`)
     await waitFor(wc, `document.querySelector('.sense-add.added') !== null`, { label: 'first within semantic captured' })
@@ -1869,6 +1946,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     await ensureTextLayer(wc, 'second semantic source')
     await installSenseStub(wc, withinVariant)
     const selectedWithinB = await selectPhrase('.textLayer', 'within')
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
     await waitFor(wc, `document.querySelector('.sense-meta')?.textContent.includes('limited-range')`, { label: 'variant AI semantic result' })
     await evaluate(wc, `document.querySelector('.sense-add').click(); true`)
     await waitFor(wc, `document.querySelector('.semantic-merge-review') !== null`, { label: 'semantic merge confirmation' })
@@ -1895,8 +1973,9 @@ export async function runSmokeTest({ window, projectRoot }) {
 
     // The confirmed alternate ID is now deterministic and no longer prompts.
     await selectPhrase('.textLayer', 'within')
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
     await waitFor(wc, `document.querySelector('.sense-add.added') !== null && !document.querySelector('.semantic-merge-review')`, { label: 'known semantic alias' })
-    record('a confirmed alternate semantic ID resolves automatically on the next lookup', true)
+    record('a confirmed alternate semantic ID resolves on an explicit follow-up lookup', true)
 
     // Saving only an AI excerpt also uses the merge decision and links the new
     // note to the canonical semantic ID after the user confirms the merge.

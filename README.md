@@ -213,16 +213,17 @@ EPUB 的原始 CSS 会被丢弃，统一使用阅读器自己的排版；书内�
 
 ## 版本与更新记录
 
-当前正式版本 **v1.0.2**（见 [CHANGELOG.md](CHANGELOG.md)）。版本号规则：**整数部分 = 大版本功能变更，小数部分 = 修复式小更新**（1.0.0 → 1.1.0 是修复，→ 2.0.0 是大功能）。
+当前工作区为 **Paperlight 2.1.0 Preview**，在 `codex/paperlight-v2` 开发分支试用，尚未正式发布。V2 批次依次使用 2.1.0、2.2.0、2.3.0、2.4.0；开发批次 commit 推送到开发分支，不推送正式版本标签或 GitHub Release。
 
-发布一条更新：
+运行本地试用版：
 
 ```bash
-npm run check && npm run smoke          # 先验证
-npm run release -- minor "修复 XXX"      # 或 major / patch
+npm run app:mac       # 更新仓库根目录 Paperlight.app
+npm run check         # 构建、自动化测试与 Node 语法检查
+npm run smoke         # Electron 窗口端到端验证
 ```
 
-脚本会改版本号、把这次改动写进 `CHANGELOG.md`、提交、打 `vX.Y.Z` 标签并推送 GitHub（`--no-push` 只留在本地；`--keep` 发布 `package.json` 里已写好的版本；`--no-changelog` 用于已经手写好条目时）。它拒绝提交 `.env*`、`release/`、`dist/`、`node_modules/`、`Paperlight.app` 以及超过 5 MB 的文件。
+开发批次不维护分发安装包；`npm run app:mac` 只生成可本地体验的 macOS App。
 
 ## 测试与验收
 

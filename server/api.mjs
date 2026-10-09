@@ -183,6 +183,22 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
+function clientDisconnectSignal(req, res) {
+  const controller = new AbortController()
+  const abort = () => {
+    if (!res.writableEnded) controller.abort()
+  }
+  req.once('aborted', abort)
+  res.once('close', abort)
+  return {
+    signal: controller.signal,
+    dispose() {
+      req.off('aborted', abort)
+      res.off('close', abort)
+    },
+  }
+}
+
 function isAllowedLocalRequest(req) {
   const host = req.headers.host || ''
   return /^(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(host)
@@ -560,7 +576,7 @@ function normalizeSenseSummaries(value) {
   })
 }
 
-async function callModel({ root, model, systemPrompt, userPrompt }) {
+async function callModel({ root, model, systemPrompt, userPrompt, signal }) {
   const key = process.env.OPENAI_API_KEY || readLocalSetting(root, 'OPENAI_API_KEY')
   if (!key) throw new RequestError(503, '尚未配置 API 密钥。请在翻译设置中完成配置。')
   const baseUrl = effectiveBaseUrl(root)
@@ -582,6 +598,7 @@ async function callModel({ root, model, systemPrompt, userPrompt }) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(requestBody),
+    signal,
   })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -768,15 +785,19 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
       sendJson(res, 403, { error: 'vault 对话只允许从本机 Paperlight 访问。' })
       return
     }
+    let disconnect
     try {
       const request = parseVaultChatRequest(await readJsonBody(req, MAX_VAULT_CHAT_BYTES))
+      disconnect = clientDisconnectSignal(req, res)
       const model = request.model || DEFAULT_MODEL
       const answer = extractMarkdown(await callModel({
         root,
         model,
         systemPrompt: vaultChatSystemPrompt,
         userPrompt: vaultChatPrompt(request),
+        signal: disconnect.signal,
       }))
+      if (disconnect.signal.aborted || res.destroyed) return
       if (!answer) throw new RequestError(502, '模型没有返回内容，请重试。')
       sendJson(res, 200, {
         answer,
@@ -784,8 +805,11 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
         sources: request.context.map((entry) => entry.path),
       })
     } catch (error) {
+      if (disconnect?.signal.aborted || res.destroyed) return
       if (error instanceof RequestError) sendJson(res, error.status, { error: error.message })
       else sendJson(res, 500, { error: 'vault 对话失败。' })
+    } finally {
+      disconnect?.dispose()
     }
   }
 

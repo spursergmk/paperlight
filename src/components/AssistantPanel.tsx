@@ -180,7 +180,7 @@ export default function AssistantPanel({
                 查询
               </button>
             </div>
-            {selection && <span className="query-meta">来自「{selection.documentName || '当前文档'}」第 {selection.pageNumber} 页的选区 · Enter 重新查询</span>}
+            {selection && <span className="query-meta">来自「{selection.documentName || '当前文档'}」第 {selection.pageNumber} 页的选区 · 点击查询或按 Enter 开始</span>}
           </div>
 
           {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在结合上下文判断语义…</div>}
