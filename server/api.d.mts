@@ -27,6 +27,7 @@ export declare const TRANSLATE_PATH: string
 export declare const VAULT_CHAT_PATH: string
 export declare const NOTE_PATH: string
 export declare const DAILY_SUMMARY_PATH: string
+export declare const EXPRESSION_EXPLORE_PATH: string
 export declare const DEFAULT_API_BASE_URL: string
 export declare const DEFAULT_MODEL: string
 

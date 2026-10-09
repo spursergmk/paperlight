@@ -23,6 +23,7 @@ export const TRANSLATE_PATH = '/api/translate'
 export const VAULT_CHAT_PATH = '/api/vault-chat'
 export const NOTE_PATH = '/api/note'
 export const DAILY_SUMMARY_PATH = '/api/daily-summary'
+export const EXPRESSION_EXPLORE_PATH = '/api/expression-explore'
 export const DEFAULT_API_BASE_URL = 'https://api.deepseek.com'
 export const DEFAULT_MODEL = 'deepseek-flash'
 const ALLOWED_API_HOSTS = new Set(['api.deepseek.com', 'api.openai.com', 'api.zjuailab.club'])
@@ -30,6 +31,7 @@ const MAX_CONFIG_BYTES = 2_000
 const MAX_TRANSLATION_BYTES = 64_000
 const MAX_VAULT_CHAT_BYTES = 512_000
 const MAX_NOTE_BYTES = 128_000
+const MAX_EXPRESSION_EXPLORE_BYTES = 16_000
 const VAULT_CONTEXT_FILES = 8
 const VAULT_CONTEXT_PER_FILE = 6_000
 const VAULT_CONTEXT_TOTAL = 24_000
@@ -234,6 +236,32 @@ function parseSenseRequest(value) {
   }
 }
 
+function parseExpressionExploreRequest(value) {
+  const input = asRecord(value)
+  const mode = input.mode === 'related' ? 'related' : input.mode === 'intent' ? 'intent' : ''
+  if (!mode) throw new RequestError(400, '请选择表达意图探索或相关表达探索。')
+  const intent = asString(input.intent).trim().slice(0, 1_000)
+  const expression = asString(input.expression).trim().slice(0, 280)
+  if (mode === 'intent' && !intent) throw new RequestError(400, '请输入想表达的意思或语言需求。')
+  if (mode === 'related' && !expression) throw new RequestError(400, '请输入一个已有表达。')
+  return {
+    mode,
+    intent,
+    expression,
+    context: asString(input.context).trim().slice(0, 2_000),
+    model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : undefined,
+  }
+}
+
+const expressionExploreSystemPrompt = `You help a Chinese learner explore natural English expressions. Return exactly one JSON object with a candidates array and no citations. Each item has expression, meaning (Simplified Chinese), usageScenario (short), and relation (short). Never claim a candidate came from a book, article, speaker, or other real source. Do not return full invented example sentences; suggest reusable words, phrases, collocations, or sentence frames. Prefer distinct options and explain register or nuance briefly.`
+
+function expressionExplorePrompt(request) {
+  if (request.mode === 'intent') {
+    return `Suggest 3 to 8 useful English expressions for this communication intent. Return {"candidates":[{"expression":string,"meaning":string,"usageScenario":string,"relation":string}]}. User intent: ${JSON.stringify(request.intent)}. Optional context: ${JSON.stringify(request.context)}`
+  }
+  return `Explore 3 to 8 related English expressions, variants, alternatives, collocations, or contrasts around the supplied expression. Return {"candidates":[{"expression":string,"meaning":string,"usageScenario":string,"relation":string}]}. Existing expression: ${JSON.stringify(request.expression)}. Optional context: ${JSON.stringify(request.context)}`
+}
+
 const senseSystemPrompt = `You are Paperlight's English lexical sense assistant. Return exactly one JSON object and no markdown or commentary. Only mark an example sourceType as "verified" when it comes from a widely known, independently verifiable work or source, and citation includes a non-empty work title plus author/year or a URL. If uncertain, use "ai_generated" with citation null. Never invent or guess a citation. Explanations should help a Chinese learner choose accurate, natural expression.`
 
 function senseTaskPrompt(request) {
@@ -373,9 +401,9 @@ function notePrompt(request) {
 }
 
 const dailySummarySystemPrompt = `You are Paperlight's daily report writer for a local Markdown knowledge vault.
-Return Markdown only (no YAML frontmatter, no code fences): first a 2-4 sentence overview of the day, then "### 主题脉络" with 2-5 bullets that group and connect the records, then "### 待跟进" with 1-3 bullets naming what is still vague.
-Use only the supplied records and findings: never invent notes, senses, files or conclusions that are not in them. Cite a source as [[path]] whenever a bullet comes from one specific record or finding.
-"findings" are the user's own conclusions in the enlightenment folder: treat them as the user's own thinking, make sure the report reflects them, and mark where they connect to (or go beyond) the day's records. If a finding contradicts a record, say so instead of smoothing it over. Write in Simplified Chinese; keep English terms in English.`
+Return Markdown only (no YAML frontmatter, no code fences) with exactly these five sections: "## 读了多久", "## 读了什么", "## 表达", "## 语义", and "## 总结与勉励（继往开来）".
+Use only the supplied records and findings: never invent reading, expressions, senses, files or conclusions. Treat any reading duration as an estimate and do not make it more precise. Keep expression entries distinct from semantic entries. In the last section, summarize what the user actually did, connect it to prior findings only when the supplied notes support that, and offer one next step grounded in today's material; avoid generic encouragement. Cite a source as [[path]] whenever a statement comes from one specific vault record. Do not expose local file paths for reading sources when no vault path is supplied.
+"findings" are the user's own conclusions in the enlightenment folder: treat them as the user's own thinking, reflect them accurately, and mark where they connect to (or go beyond) the day's records. If a finding contradicts a record, say so instead of smoothing it over. Write in Simplified Chinese; keep English terms in English.`
 
 function dailySummaryPrompt(request) {
   return `Write the report for ${request.date}. Records (JSON): ${JSON.stringify(request.records)}. User findings (JSON): ${JSON.stringify(request.findings)}`
@@ -670,6 +698,41 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
     }
   }
 
+  async function handleExpressionExplore(req, res, next) {
+    if (req.method !== 'POST') return next()
+    if (!isAllowedLocalRequest(req)) {
+      sendJson(res, 403, { error: '表达探索只允许从本机 Paperlight 访问。' })
+      return
+    }
+    try {
+      const request = parseExpressionExploreRequest(await readJsonBody(req, MAX_EXPRESSION_EXPLORE_BYTES))
+      const modelText = await callModel({
+        root,
+        model: request.model || DEFAULT_MODEL,
+        systemPrompt: expressionExploreSystemPrompt,
+        userPrompt: expressionExplorePrompt(request),
+      })
+      const parsed = extractJsonObject(modelText)
+      if (!Array.isArray(parsed.candidates)) throw new RequestError(502, '模型返回的表达候选无法解析。')
+      const candidates = parsed.candidates.slice(0, 8).flatMap((item) => {
+        const candidate = asRecord(item)
+        const expression = asString(candidate.expression).trim().slice(0, 280)
+        if (!expression || !/[\p{L}\p{N}]/u.test(expression)) return []
+        return [{
+          expression,
+          meaning: asString(candidate.meaning).trim().slice(0, 1_000),
+          usageScenario: asString(candidate.usageScenario).trim().slice(0, 500),
+          relation: asString(candidate.relation).trim().slice(0, 500),
+          generated: true,
+        }]
+      })
+      sendJson(res, 200, { candidates })
+    } catch (error) {
+      if (error instanceof RequestError) sendJson(res, error.status, { error: error.message })
+      else sendJson(res, 500, { error: '表达探索失败。' })
+    }
+  }
+
   async function handleTranslate(req, res, next) {
     if (req.method !== 'POST') return next()
     if (!isAllowedLocalRequest(req)) {
@@ -778,6 +841,7 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
     const path = (req.url || '').split('?')[0]
     if (path === CONFIG_PATH) return void handleConfig(req, res, next)
     if (path === SENSE_PATH) return void handleSense(req, res, next)
+    if (path === EXPRESSION_EXPLORE_PATH) return void handleExpressionExplore(req, res, next)
     if (path === TRANSLATE_PATH) return void handleTranslate(req, res, next)
     if (path === VAULT_CHAT_PATH) return void handleVaultChat(req, res, next)
     if (path === NOTE_PATH) return void handleNote(req, res, next)

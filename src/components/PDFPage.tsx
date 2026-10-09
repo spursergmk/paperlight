@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import { PAGE_CAPTION } from '../lib/pagelayout'
+import InputMarkerOverlay from './InputMarkerOverlay'
+import type { InputMarker } from '../types'
 
 // One page of the document. Mounting and unmounting is driven by the caller
 // (PageStack only mounts the pages around the viewport), so this component just
@@ -26,11 +28,13 @@ interface PDFPageProps {
   onRatio: (pageNumber: number, ratio: number) => void
   /** Last-resort recovery: rebuild the whole document (fresh worker). */
   onReloadDocument: () => void
+  inputMarkers: InputMarker[]
 }
 
 export default function PDFPage({
-  pdf, pageNumber, width, reservedHeight, onRatio, onReloadDocument,
+  pdf, pageNumber, width, reservedHeight, onRatio, onReloadDocument, inputMarkers,
 }: PDFPageProps) {
+  const pageRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const textLayerRef = useRef<HTMLDivElement>(null)
   const [phase, setPhase] = useState<PagePhase>('loading')
@@ -154,7 +158,7 @@ export default function PDFPage({
 
   return (
     <article className="pdf-page-shell" data-page-number={pageNumber}>
-      <div className="pdf-page" style={{ width: `${width}px`, height: `${innerHeight}px` }}>
+      <div className="pdf-page" ref={pageRef} style={{ width: `${width}px`, height: `${innerHeight}px` }}>
         {/* A fresh element per render: pdf.js paints asynchronously and refuses a
             canvas that another render task touched, which surfaced as
             UnknownVizError when zooming or switching tabs mid-render. */}
@@ -164,6 +168,7 @@ export default function PDFPage({
           aria-label={`PDF 第 ${pageNumber} 页`}
         />
         <div className="textLayer" ref={textLayerRef} />
+        <InputMarkerOverlay containerRef={pageRef} contentRef={textLayerRef} markers={inputMarkers} />
         {phase === 'loading' && <div className="page-loading"><span className="mini-spinner" /> 正在载入第 {pageNumber} 页</div>}
         {phase === 'no-text' && (
           <div className="page-no-text" role="status">

@@ -1,4 +1,4 @@
-import type { ChatMessage, NotebookNote, SenseAtom, SensePayload, SenseRelation } from '../types'
+import type { ChatMessage, NotebookNote, SenseAtom, SensePayload, SenseRelation, SemanticContextInstance, TextSelection } from '../types'
 
 const SENSES_KEY = 'paperlight-senses-v1'
 const NOTES_KEY = 'paperlight-notebook-v2'
@@ -32,7 +32,32 @@ export function senseKeyOf(sense: SensePayload): string {
   return senseAtomId(sense)
 }
 
-export function toAtom(sense: SensePayload, model: string, notesFolder?: string): SenseAtom {
+function stableContextId(value: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `ctx-${hash.toString(16).padStart(8, '0')}`
+}
+
+export function toAtom(sense: SensePayload, model: string, notesFolder?: string, source?: TextSelection | null): SenseAtom {
+  const now = new Date().toISOString()
+  const sourcePath = source?.documentPath?.trim()
+  const quote = sense.contextSentence?.trim() || source?.text.trim() || ''
+  const extension = sourcePath?.split(/[?#]/)[0]?.split('.').pop()?.toLowerCase()
+  const contexts: SemanticContextInstance[] = sourcePath && quote ? [{
+    id: stableContextId(`${sourcePath}|${source?.locationLabel || source?.pageNumber || ''}|${quote}`),
+    sourceKind: extension === 'pdf' ? 'pdf' : extension === 'epub' ? 'epub' : 'text',
+    sourcePath,
+    ...(source?.documentName ? { sourceName: source.documentName } : {}),
+    ...(source?.locationLabel ? { locationLabel: source.locationLabel } : {}),
+    ...(source?.pageNumber ? { pageNumber: source.pageNumber } : {}),
+    ...(source?.startOffset !== undefined ? { startOffset: source.startOffset } : {}),
+    ...(source?.endOffset !== undefined ? { endOffset: source.endOffset } : {}),
+    quote,
+    createdAt: now,
+  }] : []
   return {
     id: senseKeyOf(sense),
     term: sense.term,
@@ -48,8 +73,21 @@ export function toAtom(sense: SensePayload, model: string, notesFolder?: string)
     model,
     source: 'ai',
     schemaVersion: SCHEMA_VERSION,
-    generatedAt: new Date().toISOString(),
+    generatedAt: now,
+    ...(contexts.length ? { contexts } : {}),
     ...(notesFolder ? { notesFolder } : {}),
+  }
+}
+
+/** Merge same-ID semantic records while retaining the first explanation and adding distinct contexts. */
+export function mergeSemanticAtom(existing: SenseAtom, incoming: SenseAtom): SenseAtom {
+  const contexts = new Map<string, SemanticContextInstance>()
+  for (const context of [...(existing.contexts || []), ...(incoming.contexts || [])]) contexts.set(context.id, context)
+  return {
+    ...existing,
+    contexts: [...contexts.values()].slice(-200),
+    notesFolder: existing.notesFolder || incoming.notesFolder,
+    notePath: existing.notePath || incoming.notePath,
   }
 }
 

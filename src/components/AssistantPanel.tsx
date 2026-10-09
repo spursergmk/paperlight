@@ -113,7 +113,7 @@ export default function AssistantPanel({
   vaultTarget: string
 }) {
   return (
-    <aside className="right-sidebar">
+    <aside className="right-sidebar" data-expression-source="assistant" data-expression-name="阅读助手">
       <div className="right-heading">
         <div>
           <span className="right-kicker">READING DESK</span>
@@ -138,7 +138,7 @@ export default function AssistantPanel({
       </div>
 
       <div className="right-tabs">
-        <button type="button" className={tab === 'sense' ? 'selected' : ''} onClick={() => onTab('sense')}><Languages size={14} /> 义项</button>
+        <button type="button" className={tab === 'sense' ? 'selected' : ''} onClick={() => onTab('sense')}><Languages size={14} /> 语义</button>
         <button type="button" className={tab === 'notebook' ? 'selected' : ''} onClick={() => onTab('notebook')}>
           <StickyNote size={14} /> 记录本{atoms.length > 0 && <span className="notes-count">{atoms.length}</span>}
         </button>
@@ -175,7 +175,7 @@ export default function AssistantPanel({
             {selection && <span className="query-meta">来自「{selection.documentName || '当前文档'}」第 {selection.pageNumber} 页的选区 · Enter 重新查询</span>}
           </div>
 
-          {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在结合上下文判断义项…</div>}
+          {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在结合上下文判断语义…</div>}
 
           {senseError && !senseLoading && (
             <div className="panel-error">
@@ -197,14 +197,14 @@ export default function AssistantPanel({
 
               <div className="sense-actions">
                 <button className="text-action" type="button" disabled={expanding} onClick={onExpand}>
-                  {expanding ? '正在获取…' : allSenses ? '重新获取完整义项' : '查看完整词典义项'}
+                  {expanding ? '正在获取…' : allSenses ? '重新获取全部语义' : '查看这个词的其他语义'}
                 </button>
                 <button className="text-action" type="button" onClick={() => onTab('chat')}>继续和 Agent 对话</button>
               </div>
 
               {allSenses && allSenses.length > 0 && (
                 <section className="sense-block all-senses">
-                  <h4>{sense.lemma} 的全部义项（{allSenses.length}）</h4>
+                  <h4>{sense.lemma} 的其他语义（{allSenses.length}）</h4>
                   <ul className="all-sense-list">
                     {allSenses.map((item) => (
                       <li key={item.senseId} className={item.isContextual ? 'current' : ''}>
@@ -214,7 +214,7 @@ export default function AssistantPanel({
                       </li>
                     ))}
                   </ul>
-                  <p className="sense-plain">以上义项同样由 AI 生成，不是授权词典内容，请自行核对。</p>
+                  <p className="sense-plain">以上语义同样由 AI 生成，不是授权词典内容，请自行核对。</p>
                 </section>
               )}
 
@@ -228,7 +228,7 @@ export default function AssistantPanel({
               </details>
 
               <button className="save-note-button" type="button" onClick={onSaveSense}>
-                <Bookmark size={15} /> 把这条义项存成笔记
+                <Bookmark size={15} /> 把这条语义存成笔记
               </button>
 
               <div className="vault-action-row">
@@ -236,16 +236,16 @@ export default function AssistantPanel({
                   className="vault-button"
                   type="button"
                   disabled={vaultBusy}
-                  title={vaultReady ? `把这条义项写成 Markdown 存进 ${vaultRootName}` : '先在笔记空间里选择 vault 文件夹'}
+                  title={vaultReady ? `把这条语义写成 Markdown 存进 ${vaultRootName}` : '先在笔记空间里选择 vault 文件夹'}
                   onClick={onSaveSenseToVault}
                 >
-                  <Library size={13} /> 义项存入 vault
+                  <Library size={13} /> 语义存入 vault
                 </button>
                 <button
                   className="vault-button"
                   type="button"
                   disabled={vaultBusy || !vaultReady}
-                  title="让 AI 把这条义项写成一份结构完整的学习笔记，存进 vault"
+                  title="让 AI 把这条语义写成一份结构完整的学习笔记，存进 vault"
                   onClick={onGenerateCompleteNote}
                 >
                   <Sparkles size={13} /> 生成 AI 完整笔记
@@ -254,7 +254,7 @@ export default function AssistantPanel({
               {vaultBusy && <p className="loading-copy"><span className="mini-spinner" /> 正在写入 vault…</p>}
               {vaultMessage && <p className={`api-config-message ${vaultMessage.kind}`} role="status">{vaultMessage.text}</p>}
               {!vaultReady && <p className="vault-hint">还没有选择笔记 vault：点右上角 <Library size={11} /> 进入笔记空间选择文件夹。</p>}
-              {vaultReady && <p className="vault-hint"><Library size={11} /> 这条阅读会话的义项与笔记会存到 <code>{vaultTarget}/</code></p>}
+              {vaultReady && <p className="vault-hint"><Library size={11} /> 这条阅读会话的语义与笔记会存到 <code>{vaultTarget}/</code></p>}
             </>
           )}
 
@@ -262,7 +262,7 @@ export default function AssistantPanel({
             <div className="translation-empty">
               <div><Languages size={20} /></div>
               <strong>选中一个词</strong>
-              <span>会结合上下文给出准确的义项、例句、<br />使用建议与词根词缀分析。</span>
+              <span>会结合上下文给出准确的语义、例句、<br />使用建议与词根词缀分析。</span>
             </div>
           )}
         </div>

@@ -18,18 +18,20 @@
 // mirroring, note templates, daily aggregation and tree building.
 
 import type {
-  ChatMessage, DailyEntry, NoteFrontmatter, NotebookNote, ParsedNote, SenseAtom,
+  ChatMessage, DailyEntry, ExpressionRecord, NoteFrontmatter, NotebookNote, ParsedNote, ReadingActivityDay, SenseAtom,
   VaultEntry, VaultNoteKind, VaultTreeNode,
 } from '../types'
+import { readingDurationLabel } from './readingActivity.ts'
 
 export const MATERIALS_DIR = 'materials'
 export const NOTES_DIR = 'notes'
 export const ENLIGHTENMENT_DIR = 'enlightenment'
 export const DAILY_DIR = 'Daily'
+export const EXPRESSIONS_DIR = 'expressions'
 /** Notes folder used when nothing tells us which material is being read. */
 export const INBOX_FOLDER = '_inbox'
 /** Directory names the notes tree keeps visible even while they are empty. */
-export const MANAGED_DIRS = [MATERIALS_DIR, NOTES_DIR, ENLIGHTENMENT_DIR, DAILY_DIR]
+export const MANAGED_DIRS = [MATERIALS_DIR, NOTES_DIR, ENLIGHTENMENT_DIR, DAILY_DIR, EXPRESSIONS_DIR]
 
 // Legacy locations from the first vault implementation. Paperlight no longer
 // writes there, but it still recognises (and can migrate) those files.
@@ -44,7 +46,7 @@ export const MARKDOWN_EXTENSION = /\.(?:md|markdown)$/i
 export const SOURCE_EXTENSION = /\.(?:pdf|epub|txt|text)$/i
 
 /** Bumping this makes every existing daily note regenerate once (format change). */
-export const DAILY_FORMAT_VERSION = 3
+export const DAILY_FORMAT_VERSION = 4
 
 /** Budgets for strictly grounded vault chat (mirrored by server/api.mjs). */
 export const GROUNDING_FILE_LIMIT = 8
@@ -58,7 +60,7 @@ const FRONTMATTER_FENCE = '---'
 const MAX_VAULT_DEPTH = 12
 const DEFAULT_REPORT_TIME = '20:00'
 
-const NOTE_KINDS: VaultNoteKind[] = ['daily', 'report', 'sense', 'note', 'chat', 'inbox', 'finding']
+const NOTE_KINDS: VaultNoteKind[] = ['daily', 'report', 'sense', 'semantic', 'expression', 'note', 'chat', 'inbox', 'finding']
 
 export function isVaultNoteKind(value: string): value is VaultNoteKind {
   return (NOTE_KINDS as string[]).includes(value)
@@ -409,7 +411,7 @@ function oneLine(value: string): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim()
 }
 
-/** A collected sense (义项) becomes one Markdown note. */
+/** A collected semantic record becomes one Markdown note at its stable V1 path. */
 export function senseNoteMarkdown(atom: SenseAtom): string {
   const body: string[] = [
     `# ${atom.term}（${atom.partOfSpeech || 'unknown'} · ${atom.senseId}）`,
@@ -447,17 +449,60 @@ export function senseNoteMarkdown(atom: SenseAtom): string {
     if (morphology.suffix) body.push(`- 后缀：${oneLine(morphology.suffix)}`)
     if (morphology.note) body.push('', oneLine(morphology.note))
   }
-  body.push('', '---', `由 ${atom.model || 'AI'} 生成 · 来源：阅读助手义项收藏 · ${atom.generatedAt}`, '')
+  body.push('', `<!-- paperlight:semantic-contexts:start -->`)
+  body.push(...semanticContextLines(atom))
+  body.push('<!-- paperlight:semantic-contexts:end -->', '', '---', `由 ${atom.model || 'AI'} 生成 · 来源：阅读助手语义记录 · ${atom.generatedAt}`, '')
   return stringifyNote({
     title: `${atom.term} · ${atom.senseId}`,
-    kind: 'sense',
+    kind: 'semantic',
     created: atom.generatedAt,
     updated: atom.generatedAt,
-    tags: ['paperlight', 'sense', atom.lemma || atom.term],
+    tags: ['paperlight', 'semantic', atom.lemma || atom.term],
+    semanticId: atom.id,
+    semantics: [atom.id],
     senses: [atom.id],
     source: atom.model || 'ai',
     ...(atom.notesFolder ? { folder: atom.notesFolder } : {}),
   }, body.join('\n'))
+}
+
+/** The V2 user-facing name for the V1-compatible semantic-note formatter. */
+export const semanticNoteMarkdown = senseNoteMarkdown
+
+function semanticContextLines(atom: SenseAtom): string[] {
+  const contexts = atom.contexts || []
+  if (contexts.length === 0) return []
+  const lines = ['', '## 语境实例', '']
+  for (const context of contexts) {
+    const where = [context.sourceName, context.locationLabel || (context.pageNumber ? `第 ${context.pageNumber} 页` : '')]
+      .filter((value): value is string => Boolean(value)).map(oneLine)
+    lines.push(`- ${where.length ? `${where.join(' · ')}：` : ''}> ${oneLine(context.quote)}`)
+    if (context.sourcePath) lines.push(`  - 来源：\`${oneLine(context.sourcePath)}\``)
+  }
+  return lines
+}
+
+/** Updates only Paperlight's marked context block and preserves user-edited Markdown. */
+export function mergeSemanticNoteMarkdown(existing: string, atom: SenseAtom): string {
+  const parsed = parseNote(existing)
+  const start = '<!-- paperlight:semantic-contexts:start -->'
+  const end = '<!-- paperlight:semantic-contexts:end -->'
+  const block = [start, ...semanticContextLines(atom), end].join('\n')
+  const startIndex = parsed.body.indexOf(start)
+  const endIndex = startIndex >= 0 ? parsed.body.indexOf(end, startIndex + start.length) : -1
+  const body = startIndex >= 0 && endIndex >= startIndex
+    ? `${parsed.body.slice(0, startIndex)}${block}${parsed.body.slice(endIndex + end.length)}`
+    : `${parsed.body.trimEnd()}\n\n${block}\n`
+  const senses = frontmatterList(parsed.data, 'senses')
+  const semantics = frontmatterList(parsed.data, 'semantics')
+  return stringifyNote({
+    ...parsed.data,
+    kind: 'semantic',
+    semanticId: atom.id,
+    semantics: semantics.includes(atom.id) ? semantics : [...semantics, atom.id],
+    senses: senses.includes(atom.id) ? senses : [...senses, atom.id],
+    updated: new Date().toISOString(),
+  }, body)
 }
 
 /** Wraps a model-written Markdown note with Paperlight frontmatter. */
@@ -491,7 +536,7 @@ export function notebookNoteMarkdown(note: NotebookNote, atoms: SenseAtom[]): st
     .filter((atom): atom is SenseAtom => Boolean(atom))
   const body: string[] = [`# ${note.date} 第 ${note.dailyOrdinal} 份笔记`, '', note.body.trim()]
   if (linked.length) {
-    body.push('', '## 关联义项', '')
+    body.push('', '## 关联语义', '')
     for (const atom of linked) {
       body.push(`- [[${senseNotePath(atom)}]] ${atom.term} · ${oneLine(atom.contextualMeaning)}`)
     }
@@ -572,20 +617,44 @@ export function dailyEntriesFromNotebook(
   atoms: SenseAtom[],
   notes: NotebookNote[],
   date: string,
-  options: { files?: VaultEntry[]; selfPath?: string } = {},
+  options: { files?: VaultEntry[]; selfPath?: string; expressions?: ExpressionRecord[] } = {},
 ): DailyEntry[] {
   const entries: DailyEntry[] = []
   const claimed = new Set<string>()
 
   for (const atom of atoms) {
-    if ((atom.generatedAt || '').slice(0, 10) !== date) continue
+    const dayContexts = (atom.contexts || []).filter((context) => {
+      const createdAt = new Date(context.createdAt)
+      return !Number.isNaN(createdAt.getTime()) && localDateKey(createdAt) === date
+    })
+    const generatedAt = atom.generatedAt ? new Date(atom.generatedAt) : null
+    if (dayContexts.length === 0 && (!generatedAt || Number.isNaN(generatedAt.getTime()) || localDateKey(generatedAt) !== date)) continue
     const path = senseNotePath(atom)
     claimed.add(path)
     entries.push({
       id: atom.id,
       kind: 'sense',
       label: `${atom.term}（${atom.partOfSpeech || 'unknown'} · ${atom.senseId}）`,
-      body: [atom.contextualMeaning, atom.definition].filter(Boolean).join(' · '),
+      body: [atom.contextualMeaning, atom.definition, ...dayContexts.map((context) => context.quote)].filter(Boolean).join(' · '),
+      path,
+    })
+  }
+
+  for (const record of options.expressions || []) {
+    const dayContexts = record.contexts.filter((context) => {
+      const createdAt = new Date(context.createdAt)
+      return !Number.isNaN(createdAt.getTime()) && localDateKey(createdAt) === date
+    })
+    const createdAt = new Date(record.createdAt)
+    if (dayContexts.length === 0 && (Number.isNaN(createdAt.getTime()) || localDateKey(createdAt) !== date)) continue
+    if (!/^[a-z0-9-]{1,96}$/i.test(record.id)) continue
+    const path = `expressions/${record.id}.md`
+    claimed.add(path)
+    entries.push({
+      id: record.id,
+      kind: 'expression',
+      label: record.expression,
+      body: [...dayContexts.map((context) => context.quote).filter(Boolean), record.meaning].filter(Boolean).join(' · '),
       path,
     })
   }
@@ -650,36 +719,67 @@ export function dailySourceHash(entries: DailyEntry[], extra: string[] = []): st
 }
 
 /** Always-available aggregation, used as the report body until (or without) AI. */
-export function localDailySummary(date: string, entries: DailyEntry[]): string {
-  if (entries.length === 0) return `${date} 还没有新的笔记内容。`
-  const senses = entries.filter((entry) => entry.kind === 'sense')
+export function localDailySummary(date: string, entries: DailyEntry[], activity?: ReadingActivityDay): string {
+  const senses = entries.filter((entry) => entry.kind === 'sense' || entry.kind === 'semantic')
+  const expressions = entries.filter((entry) => entry.kind === 'expression')
   const notes = entries.filter((entry) => entry.kind === 'note')
   const files = entries.filter((entry) => entry.kind === 'file')
-  const lines: string[] = [
-    `本日共收录 ${entries.length} 条记录：义项 ${senses.length} 条、记录本笔记 ${notes.length} 条、vault 文件 ${files.length} 个。`,
-  ]
-  if (senses.length) {
-    lines.push('', '### 本日义项')
-    for (const entry of senses) lines.push(`- **${entry.label}**${entry.body ? `：${oneLine(entry.body)}` : ''}`)
-  }
-  if (notes.length) {
-    lines.push('', '### 本日笔记')
-    for (const entry of notes) lines.push(`- **${entry.label}**${entry.body ? `：${oneLine(entry.body)}` : ''}`)
-  }
-  if (files.length) {
-    lines.push('', '### 本日新建或修改的 vault 文件')
-    for (const entry of files) lines.push(`- [[${entry.path || entry.label}]]`)
-  }
-  return lines.join('\n')
+  const sources = [...(activity?.sources || [])].sort((a, b) => b.seconds - a.seconds)
+  const timeText = readingDurationLabel(activity?.seconds || 0)
+  const section = (heading: string, lines: string[]) => `## ${heading}\n\n${lines.length ? lines.join('\n') : '- 今天暂无记录。'}`
+  const readWhat = sources.map((source) => `- ${oneLine(source.sourceName)}（约 ${Math.max(1, Math.round(source.seconds / 60))} 分钟）`)
+  const expressionLines = expressions.map(entryLine)
+  const semanticLines = senses.map(entryLine)
+  const review = entries.length || (activity?.seconds || 0) > 0
+    ? `今天${timeText}，阅读记录涉及 ${sources.length} 份材料，收录 ${expressions.length} 条表达和 ${senses.length} 条语义。下次阅读时，可以回看这些积累，并观察它们在新语境中的用法。`
+    : `${date} 还没有记录到阅读活动或新的积累。下次开始阅读后，可以留意一个具体表达或语义，把新观察接到已有积累上。`
+  const additional = [...notes.map(entryLine), ...files.map(entryLine)]
+  return [
+    section('读了多久', [`- ${timeText}`]),
+    section('读了什么', readWhat),
+    section('表达', expressionLines),
+    section('语义', semanticLines),
+    section('总结与勉励（继往开来）', [review, ...(additional.length ? ['', '### 笔记与其他记录', ...additional] : [])]),
+  ].join('\n\n')
 }
 
-export const DAILY_NOTES_HEADING = '## 我的补充'
+export const DAILY_NOTES_HEADING = '### 我的补充'
 
 /** User-written additions to a daily note survive Paperlight's rewrites. */
 export function dailyUserNotes(body: string): string {
-  const index = String(body ?? '').indexOf(DAILY_NOTES_HEADING)
-  if (index < 0) return ''
-  return String(body).slice(index + DAILY_NOTES_HEADING.length).trim()
+  const text = String(body ?? '')
+  const index = text.indexOf(DAILY_NOTES_HEADING)
+  const heading = index >= 0 ? DAILY_NOTES_HEADING : '## 我的补充'
+  const actualIndex = index >= 0 ? index : text.indexOf(heading)
+  if (actualIndex < 0) return ''
+  return text.slice(actualIndex + heading.length).trim()
+}
+
+/** Generated Daily content ends before either version of the user's section. */
+export function dailyManagedBody(body: string): string {
+  const text = String(body ?? '')
+  const heading = /^#{2,3}\s+我的补充\s*$/m.exec(text)
+  return (heading ? text.slice(0, heading.index) : text).trim()
+}
+
+export function dailyManagedBodyHash(body: string): string {
+  return hashString(dailyManagedBody(body))
+}
+
+/** Preserve edits made outside the designated user section before rebuilding. */
+export function preserveDailyManagedEdits(body: string, storedHash: string, userNotes = ''): string {
+  const managed = dailyManagedBody(body)
+  if (!managed || (storedHash && dailyManagedBodyHash(body) === storedHash)) return userNotes
+  const snapshot = [
+    userNotes.trim(),
+    '#### Paperlight 自动保留的旧记录清单',
+    '> 检测到生成区域曾被手动修改；以下是重建前的原文副本，可在确认无用后自行删除。',
+    '',
+    '```markdown',
+    managed,
+    '```',
+  ].filter(Boolean).join('\n\n')
+  return snapshot
 }
 
 /**
@@ -726,8 +826,18 @@ export function dailyNoteMarkdown(options: {
   reportPath?: string | null
   reportTime?: string
   userNotes?: string
+  readingActivity?: ReadingActivityDay
 }): string {
-  const { date, entries, hash, updated, reportPath, reportTime = DEFAULT_REPORT_TIME, userNotes = '' } = options
+  const { date, entries, hash, updated, reportPath, reportTime = DEFAULT_REPORT_TIME, userNotes = '', readingActivity } = options
+  const duration = readingActivity?.seconds || 0
+  const sources = [...(readingActivity?.sources || [])].sort((a, b) => b.seconds - a.seconds)
+  const expressions = entries.filter((entry) => entry.kind === 'expression')
+  const semantics = entries.filter((entry) => entry.kind === 'sense' || entry.kind === 'semantic')
+  const otherNotes = entries.filter((entry) => entry.kind === 'note' || entry.kind === 'file')
+  const readingText = duration > 0 ? readingDurationLabel(duration) : '尚无可确认的阅读时长'
+  const summary = entries.length || duration > 0
+    ? `今天${readingText}，阅读记录涉及 ${sources.length} 份材料，收录 ${expressions.length} 条表达和 ${semantics.length} 条语义。下次阅读时，可以回看这些积累，并观察它们在新语境中的用法。`
+    : '今天还没有记录到阅读活动或新的积累。下次开始阅读后，可以留意一个具体表达或语义，把新观察接到已有积累上。'
   const body: string[] = [
     `# ${date}`,
     '',
@@ -735,30 +845,51 @@ export function dailyNoteMarkdown(options: {
       ? `> 日报：[[${reportPath}]] · 每天 ${reportTime} 自动生成，也可以手动重新生成`
       : `> 日报：每天 ${reportTime} 自动生成（也可以在右侧手动生成）`,
     '',
-    `## 当日收录（${entries.length}）`,
+    '## 读了多久',
+    '',
+    `- ${readingText}`,
+    '',
+    '## 读了什么',
     '',
   ]
-  if (entries.length === 0) {
-    body.push('- 暂无记录。')
+  if (sources.length === 0) {
+    body.push('- 今天尚无可确认的材料阅读记录。')
   } else {
-    for (const entry of entries) body.push(entryLine(entry))
+    for (const source of sources) {
+      body.push(`- ${oneLine(source.sourceName)}（约 ${Math.max(1, Math.round(source.seconds / 60))} 分钟）`)
+    }
+  }
+  body.push('', '## 表达', '')
+  if (expressions.length === 0) body.push('- 今天没有新增表达。')
+  else for (const entry of expressions) body.push(entryLine(entry))
+  body.push('', '## 语义', '')
+  if (semantics.length === 0) body.push('- 今天没有新增语义。')
+  else for (const entry of semantics) body.push(entryLine(entry))
+  body.push('', '## 总结与勉励（继往开来）', '', summary)
+  if (reportPath) body.push('', `当天的回顾与后续建议：[[${reportPath}]]`)
+  if (otherNotes.length) {
+    body.push('', '### 笔记与其他记录')
+    for (const entry of otherNotes) body.push(entryLine(entry))
   }
   body.push('', DAILY_NOTES_HEADING, '')
   if (userNotes.trim()) body.push(userNotes.trim())
   body.push('')
+  const bodyText = body.join('\n')
   return stringifyNote({
     title: date,
     kind: 'daily',
     date,
     updated: updated || new Date().toISOString(),
     hash,
+    managedHash: dailyManagedBodyHash(bodyText),
     format: String(DAILY_FORMAT_VERSION),
     ...(reportPath ? { report: reportPath } : {}),
     tags: ['paperlight', 'daily'],
     // The day's senses stay linkable from the note itself, so the info panel
     // (and any backlink view) can resolve them without parsing the body.
-    senses: entries.filter((entry) => entry.kind === 'sense').map((entry) => entry.id),
-  }, body.join('\n'))
+    senses: entries.filter((entry) => entry.kind === 'sense' || entry.kind === 'semantic').map((entry) => entry.id),
+    expressions: entries.filter((entry) => entry.kind === 'expression').map((entry) => entry.id),
+  }, bodyText)
 }
 
 /** The report itself: one file per day, overwritten on every generation. */

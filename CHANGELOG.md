@@ -8,7 +8,32 @@ Paperlight 的版本号规则：**整数部分 = 大版本功能变更，小数�
 | 修复与小改进（界面细节、逻辑 bug、文案） | 1.0.0 → **1.1.0** |
 | 单点热修 | 1.1.0 → **1.1.1** |
 
-每次更新：先写清楚改动，然后 `npm run release -- minor "一句话摘要"`（或 `major` / `patch`）——脚本会改版本号、把这次改动写进本文件、提交、打 `vX.Y.Z` 标签并推送 GitHub。
+每次更新：先写清楚改动，然后由用户明确批准后才运行 `npm run release -- minor "一句话摘要"`（或 `major` / `patch`）——脚本会改版本号、提交并推送标签。没有明确批准时，只更新本地工作树，不创建正式标签或 Release。
+
+## Unreleased · V2.0 worktree（未发布、尚未完成）
+
+正式版本号仍为 **1.0.2**。以下内容位于隔离分支 `codex/paperlight-v2`，不能据此宣称 Paperlight V2.0 已完成。
+
+### 已实现并验证的增量
+
+- 表达池以 Markdown 保存表达本体、Recognition/Exploration 来源、多个材料语境和表达联系；PDF/EPUB 重复摘录会合并到同一表达，AI 探索候选必须由用户确认后才写入。
+- 阅读 PDF/EPUB/TXT/Markdown 与阅读助手回答可直接收录表达；对话消息支持直接摘录。表达池提供本地搜索、编辑、删除、关系和来源回跳。
+- PDF、EPUB、文本材料支持进度/形式/内容输入标记；视觉高亮、下划线不修改原始材料。定位使用原文摘录和上下文校验，无法可靠恢复时明确标出。
+- 语义记录累积带来源的语境；归档到原 V1 文件路径时保留用户编辑的 Markdown，只更新 Paperlight 标记的语境块。继续读取旧 ID、文件路径、`senses` frontmatter 与 `/api/sense`。
+- 新增本地表达/语义/笔记检索；Daily 改为五段，并只把前台阅读器中近期有交互的时长计为估算阅读时间，跨午夜分日。Daily 管理区有内容指纹，检测到手改内容时先保留原文快照再重建。
+- `PAPERLIGHT_USER_DATA_DIR` 为开发版提供隔离应用状态目录，避免试用 V2 与正式 V1 共用状态文件。
+
+### 尚未完成
+
+- P0/P1 全量验收尚未结束：仍需完成完整语义增量整合交互、更多格式与来源的标记回溯复核、阅读助手单词至全文尺度、Enlightenment 专项研究关联和网页正文导入等。
+- 三平台本地打包已完成并验证 macOS App 可启动；当前没有签名/公证凭据，未做正式签名、公证或发布验收。包版本未升级，未创建或推送 Git 标签，也未发布 GitHub Release。
+- 构建仍有主 JS chunk 大于 500 KB 的 Vite 警告。
+
+### 当前验证
+
+- `npm run check`：89 个测试通过，含构建、单元测试和 Node 语法检查；Daily 手动编辑保护有单测。
+- `npm run smoke`：Electron 桌面 smoke 通过；覆盖 V1 阅读/笔记/对话回归、PDF/EPUB 表达、AI 候选确认、PDF 标记重开、EPUB 标记跳回章节、五段 Daily、阅读时间估算和旧 Daily 迁移。
+- `npm run dist`：macOS universal（App/DMG/ZIP）、Windows x64（安装包/ZIP）、Linux x64（AppImage）均生成；隔离配置启动 macOS App 后保持运行并正常退出。产物仅留在 worktree 的 `release/` 与 `Paperlight.app`，未发布。
 
 ## [1.0.2] - 2026-10-08
 

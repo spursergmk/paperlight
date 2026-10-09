@@ -136,7 +136,7 @@ export default function SenseCard({
         </section>
       )}
 
-      {!compact && <footer className="sense-foot">义项、例句与建议由 {model} 生成 · AI 输出，请自行核对</footer>}
+      {!compact && <footer className="sense-foot">语义、例句与建议由 {model} 生成 · AI 输出，请自行核对</footer>}
     </article>
   )
 }

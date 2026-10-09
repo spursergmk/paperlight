@@ -28,6 +28,7 @@ const projectRoot = resolve(here, '..')
 const distDir = join(projectRoot, 'dist')
 const devServerUrl = process.env.PAPERLIGHT_DEV_SERVER_URL || ''
 const isSmoke = process.env.PAPERLIGHT_SMOKE === '1'
+const isolatedUserDataDir = process.env.PAPERLIGHT_USER_DATA_DIR?.trim()
 const DEFAULT_PORT = Number(process.env.PAPERLIGHT_PORT || 4178)
 const MAX_DIRECTORY_ENTRIES = 4_000
 
@@ -36,6 +37,10 @@ if (isSmoke) {
   const smokeUserData = join(tmpdir(), 'paperlight-smoke-userdata')
   rmSync(smokeUserData, { recursive: true, force: true })
   app.setPath('userData', smokeUserData)
+} else if (isolatedUserDataDir) {
+  const resolvedUserData = resolve(isolatedUserDataDir)
+  mkdirSync(resolvedUserData, { recursive: true })
+  app.setPath('userData', resolvedUserData)
 }
 
 // The renderer only ever loads local code and talks to its own origin, so the

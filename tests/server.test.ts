@@ -151,6 +151,25 @@ test('the vault knowledge endpoints validate input and stay loopback-only', asyn
   })
 })
 
+test('expression exploration validates intent and related-expression requests on loopback only', async () => {
+  await withServer(async (port) => {
+    const host = `127.0.0.1:${port}`
+    const requestExplore = (body: unknown, requestHost = host) => rawRequest(port, {
+      method: 'POST',
+      path: '/api/expression-explore',
+      headers: { Host: requestHost, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    assert.equal((await requestExplore({ mode: 'intent', intent: 'I want to express agreement' }, 'attacker.example:80')).status, 403)
+    const noIntent = await requestExplore({ mode: 'intent', intent: '   ' })
+    assert.equal(noIntent.status, 400)
+    assert.match(noIntent.body, /请输入想表达/)
+    const noExpression = await requestExplore({ mode: 'related', expression: '' })
+    assert.equal(noExpression.status, 400)
+    assert.match(noExpression.body, /请输入一个已有表达/)
+  })
+})
+
 test('the API only answers loopback requests and needs origin + nonce to write', async () => {
   await withServer(async (port) => {
     const loopbackHost = `127.0.0.1:${port}`

@@ -3,6 +3,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 import PDFPage from './PDFPage'
 import { buildLayout, currentPageFromScroll, renderWindow, scrollTopForPage } from '../lib/pagelayout'
 import { learnedRatios, rememberRatio } from '../lib/documents'
+import type { InputMarker } from '../types'
 
 export interface PageStackApi {
   scrollToPage: (page: number) => void
@@ -25,6 +26,7 @@ interface PageStackProps {
   onUserScroll: () => void
   /** Rebuilds the document when a page's text layer cannot be recovered. */
   onReloadDocument: () => void
+  inputMarkers: InputMarker[]
   apiRef: React.RefObject<PageStackApi | null>
   children?: React.ReactNode
 }
@@ -45,6 +47,7 @@ export default function PageStack({
   onSelectionKeyUp,
   onUserScroll,
   onReloadDocument,
+  inputMarkers,
   apiRef,
   children,
 }: PageStackProps) {
@@ -200,6 +203,7 @@ export default function PageStack({
           reservedHeight={box.height}
           onRatio={handleRatio}
           onReloadDocument={onReloadDocument}
+          inputMarkers={inputMarkers.filter((marker) => marker.pageNumber === index + 1 && Boolean(marker.visualStyle))}
         />
       </div>,
     )

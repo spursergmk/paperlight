@@ -95,7 +95,7 @@ export default function NotebookPanel({
     <div className="notebook-panel">
       <section className="sense-block">
         <h4>词语-含义（{atoms.length}）</h4>
-        {atoms.length === 0 && <p className="sense-plain">还没有记录。查询义项后点击“加入记录本”。</p>}
+        {atoms.length === 0 && <p className="sense-plain">还没有记录。查询语义后点击“加入记录本”。</p>}
         <ul className="atom-list">
           {atoms.map((atom) => (
             <li key={atom.id}>
@@ -114,7 +114,7 @@ export default function NotebookPanel({
           <Link2 size={11} /> 笔记（{notes.length}）
           <button type="button" className="note-open-space" onClick={onOpenNotesSpace} title={`在笔记空间里管理 ${vaultRootName}`}>笔记空间</button>
         </h4>
-        {notes.length === 0 && <p className="sense-plain">对话或义项卡中都能把内容存成笔记。</p>}
+        {notes.length === 0 && <p className="sense-plain">对话或语义卡中都能把内容存成笔记。</p>}
         <ul className="note-all-list">
           {notes.map((note) => (
             <li key={note.id}>
@@ -135,7 +135,7 @@ export default function NotebookPanel({
                         → {atom.term} · {atom.contextualMeaning}
                       </button>
                     ) : (
-                      <span key={senseId} className="note-link-missing">→ 未入记录本的义项</span>
+                      <span key={senseId} className="note-link-missing">→ 未入记录本的语义</span>
                     )
                   })}
                 </div>

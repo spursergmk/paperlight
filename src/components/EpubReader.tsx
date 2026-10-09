@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import DOMPurify from 'dompurify'
 import type { EpubBook } from '../lib/epub'
 import { useFlowReader, type FlowReaderApi, type FlowScrollState } from './useFlowReader'
+import InputMarkerOverlay from './InputMarkerOverlay'
+import type { InputMarker } from '../types'
 
 // Renders one EPUB chapter. The XHTML is sanitized with DOMPurify and appended
 // as DOM nodes (never as an HTML string), then its images are pointed at blob
@@ -29,6 +31,7 @@ export default function EpubReader({
   onUserScroll,
   apiRef,
   onNextChapter,
+  inputMarkers,
 }: {
   book: EpubBook
   chapterIndex: number
@@ -41,8 +44,10 @@ export default function EpubReader({
   onUserScroll: () => void
   apiRef: React.RefObject<FlowReaderApi | null>
   onNextChapter: () => void
+  inputMarkers: InputMarker[]
 }) {
   const chapter = book.chapters[chapterIndex]
+  const pageRef = useRef<HTMLElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState('')
@@ -135,10 +140,11 @@ export default function EpubReader({
       onMouseUp={onSelectionPointerUp}
       onKeyUp={onSelectionKeyUp}
     >
-      <article className="flow-page epub-page" data-page-number={chapterIndex + 1} style={{ fontSize: `${16 * zoom}px` }}>
+      <article className="flow-page epub-page" ref={pageRef} data-page-number={chapterIndex + 1} style={{ fontSize: `${16 * zoom}px` }}>
         {status === 'loading' && <div className="flow-loading"><span className="mini-spinner" /> 正在排版本章…</div>}
         {status === 'error' && <div className="flow-error">{error}</div>}
         <div ref={bodyRef} className="epub-body" />
+        <InputMarkerOverlay containerRef={pageRef} contentRef={bodyRef} markers={inputMarkers} />
         {status === 'ready' && (
           <div className="epub-chapter-end">
             {chapterIndex + 1 < book.chapters.length

@@ -5,13 +5,14 @@
 
 ## 一、项目是什么
 
-Paperlight 是一个**桌面 app**：本地英文文档阅读器，左侧像 IDE 一样浏览文件夹、多标签同时阅读，右侧「阅读助手」负责查询义项、追问和记笔记。支持 **PDF / EPUB / TXT / Markdown**。
+Paperlight 是一个**本地优先的英语阅读与语言积累桌面 app**：阅读真实材料，咀嚼语言和内容，并把值得复用的表达、语义与笔记沉淀进用户控制的本地 Vault。当前正式版本是 **1.0.2**；V2.0 仍在开发分支实现，不能把未完成的功能记成已交付。
 
-三个并列空间（入口：最左侧竖排 rail，⌘⌥1/2/3；阅读助手右上角也有进入笔记空间的按钮。**不要再在阅读空间的左侧栏里重复一排空间按钮**，那是与 rail 重复的冗余入口）：
+四个并列空间（阅读、笔记、表达、对话；入口在最左侧 rail。阅读助手右上角也有进入笔记空间的按钮。**不要再在阅读空间的左侧栏里重复一排空间按钮**，那是与 rail 重复的冗余入口）：
 
-- **阅读空间**：文件夹浏览 + 多标签阅读 + 阅读助手（义项 / 记录本 / 对话）。
-- **笔记空间**：Obsidian 式 vault 文件夹树 + 笔记标签 + 单栏（编辑/浏览切换）+ 信息面板；所有笔记都是 vault 里的 `.md`。vault 结构：`materials/`（原始资料）→ `notes/`（镜像归档义项与笔记）、`enlightenment/`（用户的专项发现）、`Daily/`（记录清单 + 独立成文件的日报）。
+- **阅读空间**：文件夹浏览 + 多标签阅读 + 阅读助手（语义 / 记录本 / 对话）。
+- **笔记空间**：Obsidian 式 vault 文件夹树 + 笔记标签 + 单栏（编辑/浏览切换）+ 信息面板；所有笔记都是 vault 里的 `.md`。vault 结构：`materials/`（原始资料）→ `notes/`（镜像归档语义与笔记）、`enlightenment/`（用户的专项发现）、`Daily/`（记录清单 + 独立成文件的日报）。
 - **对话空间**：左栏两列（对话记录 + vault 内容选择），勾选内容后对话严格 grounded，回答可存回 vault。
+- **表达池**：可从既有语言材料中识别表达，也可从表达意图出发探索；收录保留独立来源语境，AI 候选要经用户确认。
 
 - 技术栈：Electron 44 + Vite 7 + React 19 + pdf.js 6（TypeScript）。
 - 目标形态：`npm run app` 或打包出的 `Paperlight.app`。**浏览器里的 `npm run dev` 只是调试手段，不是交付物。**
@@ -28,7 +29,8 @@ Paperlight 是一个**桌面 app**：本地英文文档阅读器，左侧像 IDE
 7. **改完必须验证。**
    - `npm run check`：类型检查 + 生产构建 + 单元测试 + `node --check` 语法检查。`electron/*.mjs`、`server/*.mjs`、`scripts/*.mjs` 是纯 JS，**不要在里面写 TypeScript 语法**（`as const`、类型注解等会让 app 直接起不来）。
    - `npm run smoke`：Electron 端到端冒烟，截图写到 `tests/artifacts/`，结果写到 `tests/artifacts/smoke-report.json`，失败时退出码非 0。
-   - 改动涉及打包/主进程时，跑 `npm run dist` 并确认 `./Paperlight.app` 能启动、`release/` 三个平台产物都在。
+   - 试用迭代需要更新 macOS app 时，运行 `npm run app:mac`；该命令只替换仓库根 `./Paperlight.app`，不生成安装包、不改动 `release/`。使用独立 `PAPERLIGHT_USER_DATA_DIR` 和空测试 Vault 验证。
+   - 只有用户明确要求维护分发包时才运行 `npm run dist*`；日常试用迭代不维护安装包。
 
 ## 三、架构地图
 
@@ -37,7 +39,7 @@ electron/main.mjs        Electron 主进程：窗口、菜单、内置 HTTP 服�
                          IPC（文件夹选择、目录列表、读取 PDF、应用状态文件、vault 读写）
 electron/preload.cjs     contextBridge：window.paperlight（唯一的能力入口）
 electron/smoke.mjs       端到端冒烟测试（真实窗口 + 真实 IPC + 截图）
-server/api.mjs           本地 AI 代理（配置/义项/翻译/vault 对话/笔记/日记汇总）——Vite dev 与 app 共用这一份实现
+server/api.mjs           本地 AI 代理（配置/语义/翻译/vault 对话/笔记/日记汇总）——Vite dev 与 app 共用这一份实现
 server/api.d.mts         上面这个模块的类型声明
 src/App.tsx              编排：空间切换、会话、标签页、分栏、选区、笔记/对话、vault 接线
 src/components/          Splitter / TabStrip / FileExplorer / PageStack / PDFPage /
@@ -48,8 +50,10 @@ src/components/EpubReader.tsx    EPUB 章节阅读器（DOMPurify 清洗后插�
 src/components/useFlowReader.ts  重排阅读器共用的滚动/位置恢复
 src/components/NotesSpace.tsx    笔记空间：vault 树 + 笔记标签 + 单栏编辑/浏览 + 信息面板
 src/components/ChatSpace.tsx     对话空间：对话记录栏 + vault 内容选择栏 + grounded 对话
-src/components/useVault.ts       vault 的唯一状态机：列目录、读写、义项/笔记/回答落盘、每日汇总
-src/components/SpaceRail.tsx     三个空间的切换入口（每个空间左侧都有）
+src/components/ExpressionSpace.tsx 表达池：Markdown 记录、来源语境、关联与本地搜索
+src/components/InputMarkerOverlay.tsx PDF/EPUB/TXT/Markdown 的非破坏性视觉标记层
+src/components/useVault.ts       vault 的唯一状态机：列目录、读写、语义/笔记/回答落盘、每日汇总
+src/components/SpaceRail.tsx     四个空间的切换入口（每个空间左侧都有）
 src/lib/vault.ts         vault 纯逻辑：路径限制、materials→notes 镜像、frontmatter 子集、笔记/日报模板、日报时间槽、文件树（纯函数，有单测）
 src/lib/vaultfs.ts       vault 文件端口：Electron bridge / 浏览器调试用的虚拟 vault
 src/lib/vaultai.ts       /api/vault-chat、/api/note、/api/daily-summary 的客户端 + 摘录预算
@@ -59,6 +63,7 @@ src/lib/epub.ts          EPUB 解析：container/OPF/spine/nav/NCX（纯函数�
 src/lib/xml.ts           宽松 XML 扫描器（不依赖 DOMParser，可在 Node 里测）
 src/lib/pagelayout.ts    PDF 分页几何（纯函数，有单测）
 src/lib/persist.ts       应用状态（空间、标签页、分栏宽度、笔记、vault、两份空间布局）读写与遗留数据迁移
+src/lib/readingActivity.ts 前台活跃阅读时长估算与本地日期切分
 src/lib/fsaccess.ts      FileSystemPort：app 桥接 / 浏览器 File System Access / 兜底
 src/lib/documents.ts     按 key 缓存 + 引用计数的 PDF 文档
 scripts/app-dev.mjs      `npm run app:dev`：Vite + Electron 同时启动
@@ -74,10 +79,14 @@ electron-builder.yml     macOS（dmg+zip，universal）/ Windows（nsis+zip）/ 
 - 渲染进程没有 Node 权限；所有系统能力从 `electron/preload.cjs` 暴露，并通过 `src/lib/bridge.ts` 的类型使用。
 - 纯逻辑（分页几何、选区解析、笔记序数、vault 路径/模板/日记汇总）放 `src/lib/`，并在 `tests/*.test.ts` 里覆盖。
 - **vault 的每一次磁盘访问都走 `vault:*` IPC**：路径必须是 vault 相对路径、不能有 `..`、解析后必须落在所选文件夹内（额外做符号链接检查），写入用「临时文件 + rename」，只允许 `.md`/`.markdown`。渲染进程不要自己拼绝对路径去读盘。
-- **笔记只能是 Markdown，位置由材料决定**：义项与笔记写到 `notes/<materials 镜像>/`（`notes/_inbox/` 表示没有材料上下文），专项发现写 `enlightenment/`，记录清单写 `Daily/<日期>.md`，日报写 `Daily/<日期>-report.md`。frontmatter 只用 `src/lib/vault.ts` 的安全子集。
-- **写入时记录真实路径**：原子/笔记上的 `notesFolder` 是「应该在哪」，`notePath` 是「实际写到哪」。`senseNotePath` / `notebookNotePath` 必须优先用 `notePath`，否则先收藏、后写 vault 的义项会在记录清单里链到错误的 `_inbox` 路径（冒烟里有对应检查）。
-- **记录清单可以随时重写，日报不能**：`Daily/<日期>.md` 是本地即时整理（无模型调用，哈希含条目路径，见 `dailySourceHash`）；`Daily/<日期>-report.md` 只在设置的日报时间（默认 20:00，`settings.dailyReportTime`/`dailyReportAuto`）或用户手动触发时生成，**覆盖上一版、不留历史**。日报必须读 `enlightenment/` 里当天的发现并写进正文，不许动态地每次改动都重新生成。
-- 记录清单由 Paperlight 重写，但必须保留用户的 `## 我的补充` 一节；旧的 `Paperlight/Daily/*.md` 首次打开时迁移到 `Daily/`（汇总进日报文件）。
+- **笔记只能是 Markdown，位置由材料决定**：语义与笔记写到 `notes/<materials 镜像>/`（`notes/_inbox/` 表示没有材料上下文），专项发现写 `enlightenment/`，记录清单写 `Daily/<日期>.md`，日报写 `Daily/<日期>-report.md`。frontmatter 只用 `src/lib/vault.ts` 的安全子集。
+- **V1 语义兼容优先**：V1 的 `SenseAtom` 身份、旧文件路径、`senses` frontmatter、`/api/sense` 与历史链接必须继续可读。V2 新建笔记可写 `kind: semantic` 与 `semantics`，不做批量重命名或破坏性迁移。AI 重复查询只能追加语境，不得覆盖用户改过的 Markdown 正文；Paperlight 只替换自己标记的语境块。
+- **表达记录保持来源**：Vault 的 `expressions/*.md` 是表达本体、语境和联系的权威数据；确定性规范化只合并大小写/空白/标点差异，不因语义相近自动合并不同表达。AI 候选只有用户确认后才写盘，并保留生成来源。
+- **写入时记录真实路径**：原子/笔记上的 `notesFolder` 是「应该在哪」，`notePath` 是「实际写到哪」。`senseNotePath` / `notebookNotePath` 必须优先用 `notePath`，否则先收藏、后写 vault 的语义会在记录清单里链到错误的 `_inbox` 路径（冒烟里有对应检查）。
+- **Daily 固定五段**：读了多久、读了什么、表达、语义、总结与勉励（继往开来）。阅读活动只有在阅读空间、窗口前台、文档加载完成且近 60 秒有交互时按 15 秒节拍估算；跨午夜分日，UI 使用约分钟显示。活动源不等同于应用运行时长。
+- `Daily/<日期>.md` 是本地即时整理（无模型调用，源哈希含收录与活动，`managedHash` 标记生成区内容）；`Daily/<日期>-report.md` 只在设置的日报时间或用户手动触发时生成，覆盖上一版。AI 日报只用当日材料、表达、语义与 `enlightenment/` 发现，不补造学习活动。重写清单时兼容并保留旧版 `## 我的补充`；若旧数据没有指纹，或检测到生成区被手动修改，先将旧生成区快照保留在用户补充部分，再重建。
+- 旧的 `Paperlight/Daily/*.md` 首次打开时迁移到 `Daily/`（汇总进日报文件）；不要删除旧源文件，除非独立证明迁移完整且用户明确授权清理。
+- **安全试用工作分支**：开发版如需人工体验，设置 `PAPERLIGHT_USER_DATA_DIR` 指向独立目录，并先选择空的测试 Vault；不要让 V1 与 V2 共用状态文件，也不要用测试流程写入用户真实 Vault。
 - 每个空间的状态分开持久化（`state.notesSpace` / `state.chatSpace` / `state.vault`），改状态前先看 `src/lib/persist.ts` 的 `mergeState`：新字段要带默认值并在那里做清洗，坏数据必须降级而不是崩。
 - **空间组件不要在 effect 依赖里放整只 vault API 对象**（它每次渲染都会重建）：用 ref 读它，否则会出现「每次按键都重新加载笔记、覆盖草稿」这类 bug。
 - pdf.js 每个文档一个自己的 worker（不共用 `workerPort`，见 `src/lib/documents.ts`），但 `pdf.cleanup()`/`loadingTask.destroy()` 会动到 worker 级与静态缓存（字体度量、TextLayer 的离屏画布），且 `cleanup()` 可能因为「页面正在渲染」而拒绝。因此关闭标签页时只释放引用，缓存清空时才整体销毁。
@@ -96,8 +105,8 @@ electron-builder.yml     macOS（dmg+zip，universal）/ Windows（nsis+zip）/ 
 | `npm run check` | 构建 + 单元测试 |
 | `npm test` | 只跑单元测试（node --test） |
 | `npm run smoke` | Electron 端到端冒烟 + 截图 |
-| `npm run dist:mac` / `dist:win` / `dist:linux` | 打包单个平台（mac 会把 app 放到仓库根的 `./Paperlight.app`） |
-| `npm run dist` | 一次出三平台产物到 `release/` |
+| `npm run app:mac` | 只更新仓库根 `./Paperlight.app`，不生成安装包 |
+| `npm run dist:mac` / `dist:win` / `dist:linux`、`npm run dist` | 用户明确要求维护分发包时才运行 |
 | `npm run icons` | 图标变更后重新生成 icns/ico（仅 macOS） |
 | `npm run release -- minor "摘要"` | 发布：改版本号 + 写入 `CHANGELOG.md` + 提交 + 打 `vX.Y.Z` 标签 + 推送 GitHub（`major` / `patch` / `--no-push` 同理） |
 
@@ -132,11 +141,11 @@ electron-builder.yml     macOS（dmg+zip，universal）/ Windows（nsis+zip）/ 
 
 - 应用状态文件：`<userData>/paperlight-state.json`
   - 打包后 userData 通常为 `~/Library/Application Support/Paperlight/`；开发模式为 `app.getPath('userData')` 同名目录。
-  - 内容：当前空间（`activeSpace`）、打开的标签页与阅读位置、当前文件夹、最近文件/文件夹、分栏宽度、模型设置、义项/笔记/对话数据，以及 `vault`（root / recentRoots / collapsed）、`notesSpace`（打开的笔记、当前笔记、编辑视图、面板宽度）、`chatSpace`（多段对话、每段对话的 `contextPaths`、栏宽）。
+  - 内容：当前空间（`activeSpace`）、打开的标签页与阅读位置、当前文件夹、最近文件/文件夹、分栏宽度、模型设置、语义/笔记/对话数据，以及 `vault`（root / recentRoots / collapsed）、`notesSpace`（打开的笔记、当前笔记、编辑视图、面板宽度）、`chatSpace`（多段对话、每段对话的 `contextPaths`、栏宽）。
   - 旧的 localStorage 数据（`paperlight-senses-v1`、`paperlight-notebook-v2`、`paperlight-chat-v1`）首次启动时自动迁移。
   - 打包版首次启动时，若 `Paperlight.app` 位于项目目录内且项目根有 `.env.local`，会把密钥配置复制到 userData（权限 0600）；移动到别处则不会复制。
-- **笔记在 vault 里，不在状态文件里**：`<vault>/materials/` 是用户自己的原始资料；`notes/<镜像>/` 放义项（`<词>--<义项>.md`）、记录本笔记（`<日期>-note-<序号>.md`）、AI 完整笔记与对话存回的笔记；`enlightenment/` 放专项发现；`Daily/` 放记录清单与日报。所有落盘动作都从 `src/components/useVault.ts` 走，不要在组件里另写一套。
-- **记录清单的刷新**：进入笔记空间、笔记空间内 1.5 秒防抖（义项/记录本变化）、App 里 2.5 秒防抖、以及每次写入非 Daily 笔记后的 2 秒防抖（`useVault.writeNote`）；去重靠清单 frontmatter 的 `hash`（含条目路径）。
+- **笔记在 vault 里，不在状态文件里**：`<vault>/materials/` 是用户自己的原始资料；`notes/<镜像>/` 放语义（`<词>--<语义>.md`）、记录本笔记（`<日期>-note-<序号>.md`）、AI 完整笔记与对话存回的笔记；`enlightenment/` 放专项发现；`Daily/` 放记录清单与日报。所有落盘动作都从 `src/components/useVault.ts` 走，不要在组件里另写一套。
+- **记录清单的刷新**：进入笔记空间、笔记空间内 1.5 秒防抖（语义/记录本变化）、App 里 2.5 秒防抖、以及每次写入非 Daily 笔记后的 2 秒防抖（`useVault.writeNote`）；去重靠清单 frontmatter 的 `hash`（含条目路径）。
 - **日报的生成**：`useVault.maybeGenerateReport` 每分钟看一次时间槽（`reportSlotDate`），每天每槽最多尝试一次（`scheduledAttempts`），成功后靠文件存在跳过；也可以由界面手动触发（`force`）。AI 失败回退 `localDailySummary`。
 - 内置 HTTP 服务只监听 `127.0.0.1`，默认端口 `4178`（被占用时自动换端口）。
 - `/api/*` 只接受 loopback 请求；写配置还要求同源 Origin + CSRF nonce。除 `translation-config` / `sense` / `translate` 外，新增 `vault-chat`（严格 grounded 对话）、`note`（AI 完整笔记）、`daily-summary`（日报：`records` + `findings`），三者同样只接受 loopback 请求并校验输入长度；vault 摘录预算 8 份 × 6000 字、合计 24000 字，专项发现预算 6 份 × 2500 字、合计 12000 字（`src/lib/vault.ts` 与 `server/api.mjs` 两侧常量要一致）。

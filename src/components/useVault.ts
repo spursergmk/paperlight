@@ -1,22 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
-  ChatThread, DailyEntry, NotebookNote, SenseAtom, SensePayload, VaultEntry, VaultTreeNode,
+  ChatThread, DailyEntry, ExpressionContext, ExpressionCognitivePath, ExpressionRecord, ExpressionRelationKind,
+  NotebookNote, ReadingActivityDay, SenseAtom, SensePayload, VaultEntry, VaultTreeNode,
 } from '../types'
 import { getApiConfigStatus } from '../lib/translation'
 import {
   DAILY_DIR, DAILY_NOTES_HEADING, FINDING_CHARS_PER_FILE, FINDING_FILE_LIMIT, INBOX_FOLDER,
   LEGACY_DAILY_DIR, MANAGED_DIRS, MATERIALS_DIR, NOTES_DIR, aiNoteMarkdown, aiNotePath,
   buildVaultTree, chatAnswerMarkdown, dailyEntriesFromNotebook, dailyNoteMarkdown, dailyNotePath,
-  dailyReportMarkdown, dailyReportPath, dailySourceHash, dailyUserNotes, excerptForGrounding,
+  dailyReportMarkdown, dailyReportPath, dailySourceHash, dailyUserNotes, excerptForGrounding, preserveDailyManagedEdits,
   findingNoteMarkdown, findingNotePath, findingEntries, localDailySummary, localDateKey,
   markdownSection, markdownSectionAtLevel, materialMirrorFolders, notebookNoteMarkdown,
-  notebookNotePath, parseNote, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath,
+  mergeSemanticNoteMarkdown, notebookNotePath, parseNote, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath,
   slugify, stringifyNote, titleFromMarkdown, uniquePath, vaultDirname, vaultJoin,
 } from '../lib/vault'
 import {
   buildGroundingContext, generateVaultNote, generateVaultReport, type VaultContextFile,
 } from '../lib/vaultai'
 import { isVirtualVault, vaultDisplayName, vaultErrorText, vaultFileSystem } from '../lib/vaultfs'
+import {
+  createExpressionRecord, expressionRecordMarkdown, expressionRecordPath, mergeExpressionRecord,
+  normalizeExpression, parseExpressionRecord,
+} from '../lib/memory'
 
 export interface DailyInfo {
   date: string
@@ -53,6 +58,8 @@ export interface VaultApi {
   /** Markdown only: used by the vault-grounded chat picker. */
   noteTree: VaultTreeNode[]
   materialFolders: string[]
+  expressions: ExpressionRecord[]
+  expressionsLoading: boolean
   daily: DailyInfo | null
   report: ReportInfo | null
   organizingDaily: boolean
@@ -71,6 +78,17 @@ export interface VaultApi {
   renameNote(path: string, name: string): Promise<string>
   removeEntry(path: string): Promise<void>
   revealEntry(path: string): Promise<void>
+  refreshExpressions(): Promise<ExpressionRecord[]>
+  captureExpression(input: {
+    expression: string
+    meaning?: string
+    note?: string
+    cognitivePath: ExpressionCognitivePath
+    context?: Partial<ExpressionContext>
+  }): Promise<ExpressionRecord>
+  updateExpression(id: string, update: { expression: string; meaning: string; note: string }): Promise<ExpressionRecord>
+  relateExpressions(sourceId: string, targetId: string, kind: ExpressionRelationKind, note?: string): Promise<void>
+  deleteExpression(id: string): Promise<void>
   saveSenseNote(atom: SenseAtom): Promise<string>
   saveNotebookNote(note: NotebookNote, atoms: SenseAtom[]): Promise<string>
   generateSenseNote(sense: SensePayload, context: string, senseIds?: string[], notesFolder?: string): Promise<string>
@@ -96,12 +114,13 @@ export function useVault(options: {
   root: string | null
   atoms: SenseAtom[]
   notes: NotebookNote[]
+  readingActivity: Record<string, ReadingActivityDay>
   model: string
   reportTime: string
   reportAuto: boolean
   onRootChange: (root: string) => void
 }): VaultApi {
-  const { root, atoms, notes, model, reportTime, reportAuto, onRootChange } = options
+  const { root, atoms, notes, readingActivity, model, reportTime, reportAuto, onRootChange } = options
   const [entries, setEntries] = useState<VaultEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -112,6 +131,8 @@ export function useVault(options: {
   const [report, setReport] = useState<ReportInfo | null>(null)
   const [organizingDaily, setOrganizingDaily] = useState(false)
   const [generatingReport, setGeneratingReport] = useState(false)
+  const [expressions, setExpressions] = useState<ExpressionRecord[]>([])
+  const [expressionsLoading, setExpressionsLoading] = useState(false)
 
   const entriesRef = useRef(entries)
   entriesRef.current = entries
@@ -129,6 +150,10 @@ export function useVault(options: {
   reportTimeRef.current = reportTime
   const reportAutoRef = useRef(reportAuto)
   reportAutoRef.current = reportAuto
+  const expressionsRef = useRef(expressions)
+  expressionsRef.current = expressions
+  const readingActivityRef = useRef(readingActivity)
+  readingActivityRef.current = readingActivity
 
   const scaffolding = useRef(new Set<string>())
   const legacyChecked = useRef(new Set<string>())
@@ -138,6 +163,33 @@ export function useVault(options: {
   const refreshDailyRef = useRef<((date?: string, options?: { force?: boolean; silent?: boolean }) => Promise<DailyInfo | null>) | null>(null)
 
   const port = vaultFileSystem()
+
+  const refreshExpressions = useCallback(async () => {
+    const current = rootRef.current
+    if (!current) {
+      expressionsRef.current = []
+      setExpressions([])
+      return []
+    }
+    setExpressionsLoading(true)
+    try {
+      const listing = await port.tree(current)
+      const records = await Promise.all(listing
+        .filter((entry) => !entry.directory && /^expressions\/[^/]+\.(?:md|markdown)$/i.test(entry.path))
+        .map(async (entry) => {
+          try { return parseExpressionRecord(await port.read(current, entry.path)) } catch { return null }
+        }))
+      const next = records.filter((record): record is ExpressionRecord => Boolean(record))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      if (rootRef.current === current) {
+        expressionsRef.current = next
+        setExpressions(next)
+      }
+      return next
+    } finally {
+      setExpressionsLoading(false)
+    }
+  }, [port])
 
   const flashNotice = useCallback((text: string) => {
     setNotice(text)
@@ -201,6 +253,8 @@ export function useVault(options: {
     const current = rootRef.current
     if (!current) {
       setEntries([])
+      expressionsRef.current = []
+      setExpressions([])
       setDaily(null)
       setReport(null)
       return
@@ -212,12 +266,13 @@ export function useVault(options: {
       const afterScaffold = await ensureScaffold(listing)
       if (afterScaffold) listing = afterScaffold
       setEntries(listing)
+      await refreshExpressions()
     } catch (caught) {
       setError(vaultErrorText(caught, '无法读取这个 vault。'))
     } finally {
       setLoading(false)
     }
-  }, [ensureScaffold, port])
+  }, [ensureScaffold, port, refreshExpressions])
 
   useEffect(() => { void refresh() }, [refresh, root])
 
@@ -277,8 +332,9 @@ export function useVault(options: {
     if (!current) throw new Error('尚未选择笔记 vault。')
     await port.write(current, path, content)
     patchEntries(path, content)
+    if (/^expressions\/[^/]+\.(?:md|markdown)$/i.test(path)) await refreshExpressions()
     afterWrite(path)
-  }, [afterWrite, patchEntries, port])
+  }, [afterWrite, patchEntries, port, refreshExpressions])
 
   const takenPaths = useMemo(() => new Set(entries.map((entry) => entry.path)), [entries])
 
@@ -356,13 +412,89 @@ export function useVault(options: {
     await port.reveal(current, path).catch(() => false)
   }, [port])
 
+  const captureExpression = useCallback(async (input: {
+    expression: string
+    meaning?: string
+    note?: string
+    cognitivePath: ExpressionCognitivePath
+    context?: Partial<ExpressionContext>
+  }) => {
+    const current = rootRef.current
+    if (!current) throw new Error('请先选择一个 Vault，表达将以 Markdown 保存在其中。')
+    const incoming = createExpressionRecord(input)
+    let known = expressionsRef.current
+    if (!known.some((record) => record.normalizedExpression === incoming.normalizedExpression)) {
+      known = await refreshExpressions()
+    }
+    const existing = known.find((record) => record.normalizedExpression === incoming.normalizedExpression)
+    const record = existing ? mergeExpressionRecord(existing, incoming) : incoming
+    await writeNote(expressionRecordPath(record), expressionRecordMarkdown(record))
+    expressionsRef.current = [record, ...expressionsRef.current.filter((item) => item.id !== record.id)]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    setExpressions(expressionsRef.current)
+    return record
+  }, [refreshExpressions, writeNote])
+
+  const updateExpression = useCallback(async (id: string, update: { expression: string; meaning: string; note: string }) => {
+    const record = expressionsRef.current.find((item) => item.id === id)
+    if (!record) throw new Error('找不到这条表达记录。')
+    const normalizedExpression = normalizeExpression(update.expression)
+    if (!normalizedExpression) throw new Error('表达本体不能为空。')
+    if (expressionsRef.current.some((item) => item.id !== id && item.normalizedExpression === normalizedExpression)) {
+      throw new Error('这个表达与另一条记录相同；请先检查来源语境，再手动整合。')
+    }
+    const next: ExpressionRecord = {
+      ...record,
+      expression: update.expression.trim().slice(0, 280),
+      normalizedExpression,
+      meaning: update.meaning.trim().slice(0, 2_000),
+      note: update.note.trim().slice(0, 8_000),
+      updatedAt: new Date().toISOString(),
+    }
+    await writeNote(expressionRecordPath(next), expressionRecordMarkdown(next))
+    expressionsRef.current = [next, ...expressionsRef.current.filter((item) => item.id !== id)]
+    setExpressions(expressionsRef.current)
+    return next
+  }, [writeNote])
+
+  const relateExpressions = useCallback(async (sourceId: string, targetId: string, kind: ExpressionRelationKind, note = '') => {
+    if (sourceId === targetId) throw new Error('表达不能关联到自身。')
+    const source = expressionsRef.current.find((item) => item.id === sourceId)
+    const target = expressionsRef.current.find((item) => item.id === targetId)
+    if (!source || !target) throw new Error('找不到要关联的表达。')
+    const createdAt = new Date().toISOString()
+    const relation = (targetId: string) => ({ id: `${kind}-${targetId}`, targetId, kind, note: note.trim().slice(0, 500), source: 'user' as const, createdAt })
+    const nextSource = { ...source, relations: [...source.relations.filter((item) => item.targetId !== targetId), relation(targetId)], updatedAt: createdAt }
+    const nextTarget = { ...target, relations: [...target.relations.filter((item) => item.targetId !== sourceId), relation(sourceId)], updatedAt: createdAt }
+    await writeNote(expressionRecordPath(nextSource), expressionRecordMarkdown(nextSource))
+    try {
+      await writeNote(expressionRecordPath(nextTarget), expressionRecordMarkdown(nextTarget))
+    } catch (error) {
+      await writeNote(expressionRecordPath(source), expressionRecordMarkdown(source)).catch(() => undefined)
+      throw error
+    }
+    expressionsRef.current = expressionsRef.current.map((item) => item.id === sourceId ? nextSource : item.id === targetId ? nextTarget : item)
+    setExpressions(expressionsRef.current)
+  }, [writeNote])
+
+  const deleteExpression = useCallback(async (id: string) => {
+    const record = expressionsRef.current.find((item) => item.id === id)
+    if (!record) return
+    await removeEntry(expressionRecordPath(record))
+    expressionsRef.current = expressionsRef.current.filter((item) => item.id !== id)
+    setExpressions(expressionsRef.current)
+  }, [removeEntry])
+
   // -------------------------------------------------- notes from the reader
 
   const saveSenseNote = useCallback(async (atom: SenseAtom) => {
     const path = senseNotePath(atom)
-    await writeNote(path, senseNoteMarkdown(atom))
+    const existing = entriesRef.current.some((entry) => entry.path === path && !entry.directory)
+      ? await readNote(path)
+      : null
+    await writeNote(path, existing ? mergeSemanticNoteMarkdown(existing, atom) : senseNoteMarkdown(atom))
     return path
-  }, [writeNote])
+  }, [readNote, writeNote])
 
   const saveNotebookNote = useCallback(async (note: NotebookNote, knownAtoms: SenseAtom[]) => {
     const path = notebookNotePath(note)
@@ -454,13 +586,22 @@ export function useVault(options: {
     entries: DailyEntry[]
     hash: string
     files: VaultEntry[]
+    readingActivity: ReadingActivityDay
   }> => {
+    const activity = readingActivityRef.current[date] || { seconds: 0, sources: [] }
     const entriesForDay = dailyEntriesFromNotebook(atomsRef.current, notesRef.current, date, {
       files: listing,
       selfPath: dailyNotePath(date),
+      expressions: expressionsRef.current,
     })
     const findings = findingEntries(listing, date)
-    return { entries: entriesForDay, hash: dailySourceHash(entriesForDay, findings.map((entry) => entry.path)), files: findings }
+    const activityHash = [`reading:${activity.seconds}`, ...activity.sources.map((source) => `${source.sourcePath}:${source.seconds}`)]
+    return {
+      entries: entriesForDay,
+      hash: dailySourceHash(entriesForDay, [...findings.map((entry) => entry.path), ...activityHash]),
+      files: findings,
+      readingActivity: activity,
+    }
   }, [])
 
   const refreshDaily = useCallback(async (date = localDateKey(), runOptions: { force?: boolean; silent?: boolean } = {}) => {
@@ -501,6 +642,11 @@ export function useVault(options: {
         userNotes = markdownSection(existing, DAILY_NOTES_HEADING) || existing.trim()
       }
 
+      if (parsed && (!settled || runOptions.force)) {
+        const managedHash = typeof parsed.data.managedHash === 'string' ? parsed.data.managedHash : ''
+        userNotes = preserveDailyManagedEdits(parsed.body, managedHash, userNotes)
+      }
+
       if (!runOptions.force && settled) {
         const info: DailyInfo = {
           date,
@@ -517,6 +663,7 @@ export function useVault(options: {
       await writeNote(path, dailyNoteMarkdown({
         date,
         entries: list,
+        readingActivity: readingActivityRef.current[date],
         reportPath: reportKnown ? reportPath : null,
         reportTime: reportTimeRef.current,
         userNotes,
@@ -579,7 +726,7 @@ export function useVault(options: {
       } catch {
         listing = entriesRef.current
       }
-      const { entries: list, hash, files: findingFiles } = await readDayState(date, listing)
+      const { entries: list, hash, files: findingFiles, readingActivity } = await readDayState(date, listing)
 
       // The user's own findings are read in full: the report must reflect them.
       const findings: Array<{ path: string; content: string }> = []
@@ -589,19 +736,23 @@ export function useVault(options: {
         } catch { /* an unreadable finding is simply skipped */ }
       }
 
-      if (list.length === 0 && findings.length === 0) {
+      if (list.length === 0 && findings.length === 0 && readingActivity.seconds === 0) {
         setReport(null)
         if (!runOptions.silent) flashNotice(`${date} 还没有可汇总的记录。`)
         return null
       }
 
-      let summary = localDailySummary(date, list)
+      let summary = localDailySummary(date, list, readingActivity)
       let source: 'local' | 'ai' = 'local'
       if (apiConfiguredRef.current) {
         try {
           const generated = await generateVaultReport({
             date,
-            records: list.map((entry) => ({ kind: entry.kind, label: entry.label, body: entry.body, path: entry.path })),
+            records: [
+              { kind: 'reading_time', label: '读了多久', body: readingActivity.seconds ? `约 ${Math.max(1, Math.round(readingActivity.seconds / 60))} 分钟（估算）` : '今天尚无可确认的阅读时长。' },
+              ...readingActivity.sources.map((source) => ({ kind: 'reading_source', label: source.sourceName, body: `约 ${Math.max(1, Math.round(source.seconds / 60))} 分钟（估算）` })),
+              ...list.map((entry) => ({ kind: entry.kind, label: entry.label, body: entry.body, path: entry.path })),
+            ],
             findings,
             model: modelRef.current,
           })
@@ -655,8 +806,8 @@ export function useVault(options: {
     if (scheduledAttempts.current.has(slot)) return
     const reportPath = dailyReportPath(slot)
     if (entriesRef.current.some((entry) => entry.path === reportPath)) return
-    const { entries: list, files } = await readDayState(slot, entriesRef.current)
-    if (list.length === 0 && files.length === 0) return
+    const { entries: list, files, readingActivity } = await readDayState(slot, entriesRef.current)
+    if (list.length === 0 && files.length === 0 && readingActivity.seconds === 0) return
     scheduledAttempts.current.add(slot)
     const info = await generateReport(slot, { silent: true })
     if (info) flashNotice(`${slot} 的日报已自动生成。`)
@@ -692,6 +843,7 @@ export function useVault(options: {
           const { entries: list, hash } = await readDayState(date, entries)
           await writeNote(target, dailyNoteMarkdown({
             date, entries: list, reportTime: reportTimeRef.current, userNotes, hash,
+            readingActivity: readingActivityRef.current[date],
             reportPath: summary ? dailyReportPath(date) : null,
           }))
           if (summary) {
@@ -741,6 +893,8 @@ export function useVault(options: {
     apiConfigured,
     entries,
     files,
+    expressions,
+    expressionsLoading,
     tree,
     noteTree,
     materialFolders,
@@ -762,6 +916,11 @@ export function useVault(options: {
     renameNote,
     removeEntry,
     revealEntry,
+    refreshExpressions,
+    captureExpression,
+    updateExpression,
+    relateExpressions,
+    deleteExpression,
     saveSenseNote,
     saveNotebookNote,
     generateSenseNote,

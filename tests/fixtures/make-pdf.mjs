@@ -35,7 +35,8 @@ export function createTestPdf({ pages = 12, title = 'Paperlight Smoke', landscap
       `BT /F1 11 Tf 72 ${top - 74} Td (Foucault and liberal political economy: contexts of the book.) Tj ET`,
       `BT /F1 11 Tf 72 ${top - 98} Td (These classifications operate within a broader framework of knowledge.) Tj ET`,
       `BT /F1 11 Tf 72 ${top - 122} Td (Select any English word of this page to try the contextual sense lookup.) Tj ET`,
-      `0.85 w 72 ${top - 144} m ${landscape.has(index + 1) ? 720 : 540} ${top - 144} l S`,
+      `BT /F1 11 Tf 72 ${top - 146} Td (The authors take a stance on language learning.) Tj ET`,
+      `0.85 w 72 ${top - 166} m ${landscape.has(index + 1) ? 720 : 540} ${top - 166} l S`,
     ].join('\n')
     objects[contentNumber] = `<< /Length ${body.length} >>\nstream\n${body}\nendstream`
   }

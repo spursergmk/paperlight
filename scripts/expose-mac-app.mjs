@@ -11,16 +11,18 @@ import { fileURLToPath } from 'node:url'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const releaseDir = join(projectRoot, 'release')
+const outputArgument = process.argv[2]
+const outputDir = outputArgument ? resolve(projectRoot, outputArgument) : releaseDir
 const target = join(projectRoot, 'Paperlight.app')
 
-if (!existsSync(releaseDir)) {
-  console.error('release/ not found — run electron-builder first')
+if (!existsSync(outputDir)) {
+  console.error(`${outputArgument || 'release/'} not found — build the macOS app first`)
   process.exit(1)
 }
 
-const candidates = readdirSync(releaseDir)
+const candidates = readdirSync(outputDir)
   .filter((name) => name.startsWith('mac'))
-  .map((name) => join(releaseDir, name, 'Paperlight.app'))
+  .map((name) => join(outputDir, name, 'Paperlight.app'))
   .filter((path) => existsSync(path))
 
 if (candidates.length === 0) {
@@ -30,9 +32,18 @@ if (candidates.length === 0) {
 
 // Prefer the universal build when both it and a single-arch build exist.
 const source = candidates.find((path) => path.includes('universal')) || candidates[0]
-rmSync(target, { recursive: true, force: true })
-renameSync(source, target)
+const backup = `${target}.previous-${Date.now()}`
+const hadTarget = existsSync(target)
+if (hadTarget) renameSync(target, backup)
+try {
+  renameSync(source, target)
+} catch (error) {
+  if (hadTarget && existsSync(backup) && !existsSync(target)) renameSync(backup, target)
+  throw error
+}
+if (hadTarget) rmSync(backup, { recursive: true, force: true })
+if (outputArgument) rmSync(outputDir, { recursive: true, force: true })
 
-const artifacts = readdirSync(releaseDir).filter((name) => /\.(dmg|zip|exe|AppImage|deb)$/i.test(name))
+const artifacts = outputArgument ? [] : readdirSync(releaseDir).filter((name) => /\.(dmg|zip|exe|AppImage|deb)$/i.test(name))
 console.log(`Paperlight.app → ${target}`)
 if (artifacts.length > 0) console.log(`installers    → ${artifacts.join(', ')} (in release/)`)

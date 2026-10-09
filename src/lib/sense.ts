@@ -7,13 +7,13 @@ async function postSense<T>(body: unknown): Promise<T> {
     body: JSON.stringify(body),
   })
   const payload = await response.json().catch(() => ({})) as { error?: string } & Partial<T>
-  if (!response.ok) throw new Error(payload.error || '义项查询失败。')
+  if (!response.ok) throw new Error(payload.error || '语义查询失败。')
   return payload as T
 }
 
 export async function lookupSense(term: string, context: string, model: string): Promise<SensePayload> {
   const result = await postSense<{ sense: SensePayload }>({ task: 'lookup', term, context, model })
-  if (!result.sense) throw new Error('未收到义项结果，请重试。')
+  if (!result.sense) throw new Error('未收到语义结果，请重试。')
   return result.sense
 }
 

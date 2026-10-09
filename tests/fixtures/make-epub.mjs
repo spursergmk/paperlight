@@ -65,6 +65,7 @@ ${links}
     <h1>${name}</h1>
     <p>These classifications operate within a broader framework of knowledge.</p>
     <p>Paperlight smoke chapter ${index + 1} of ${chapters.length} for sense lookup.</p>
+    <p>The authors take a stance on language learning.</p>
     ${index === 0 ? '<p><img src="images/cover.png" alt="cover"/></p><p><a href="https://example.com">external link</a></p>' : ''}
     <script>window.evil = true</script>
   </body>

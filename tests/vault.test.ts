@@ -3,15 +3,15 @@ import assert from 'node:assert/strict'
 import {
   DAILY_DIR, ENLIGHTENMENT_DIR, INBOX_FOLDER, LEGACY_DAILY_DIR, MATERIALS_DIR, NOTES_DIR,
   absoluteVaultPath, aiNoteMarkdown, aiNotePath, buildVaultTree, chatAnswerMarkdown, chatNotePath,
-  collectFiles, countWords, dailyEntriesFromNotebook, dailyNoteMarkdown, dailyNotePath,
-  dailyReportMarkdown, dailyReportPath, dailySourceHash, dailyUserNotes, excerptForGrounding,
+  collectFiles, countWords, dailyEntriesFromNotebook, dailyManagedBodyHash, dailyNoteMarkdown, dailyNotePath,
+  dailyReportMarkdown, dailyReportPath, dailySourceHash, dailyUserNotes, excerptForGrounding, preserveDailyManagedEdits,
   filesUnderPath, filterVaultTree, findTreeNode, findingEntries, findingNoteMarkdown,
   findingNotePath, flattenTree, frontmatterList, frontmatterString, isSafeVaultPath,
   isValidTimeOfDay, localDailySummary, localDateKey, markdownSection, markdownSectionAtLevel,
   materialMirrorFolders,
   mirrorFolderForMaterial, noteFolderForDocument, noteFolderPath, noteKindFor, noteTitleFromPath,
   notebookNoteMarkdown, notebookNotePath, notesFolderFromPath, parseNote, parseTimeOfDay,
-  remapLegacyNotePath, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath, slugify,
+  mergeSemanticNoteMarkdown, remapLegacyNotePath, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath, slugify,
   stringifyNote, titleFromMarkdown, uniquePath, vaultBasename, vaultDirname, vaultJoin, wikiLinks,
 } from '../src/lib/vault.ts'
 import type { NotebookNote, SenseAtom, VaultEntry } from '../src/types.ts'
@@ -178,7 +178,7 @@ test('noteKindFor prefers frontmatter and understands the vault layout', () => {
 test('a collected sense becomes one Markdown note inside its material folder', () => {
   const source = senseNoteMarkdown(makeAtom({ notesFolder: 'books/book1' }))
   const { data, body } = parseNote(source)
-  assert.equal(frontmatterString(data, 'kind'), 'sense')
+  assert.equal(frontmatterString(data, 'kind'), 'semantic')
   assert.deepEqual(frontmatterList(data, 'senses'), ['numerous|adjective|many'])
   assert.equal(frontmatterString(data, 'folder'), 'books/book1')
   assert.match(body, /# numerous（adjective · many）/)
@@ -192,6 +192,21 @@ test('a collected sense becomes one Markdown note inside its material folder', (
     'notes/books/book1/numerous--many.md',
   )
   assert.equal(senseNotePath(makeAtom({ notePath: '../escape.md' })), `notes/${INBOX_FOLDER}/numerous--many.md`)
+})
+
+test('semantic note updates append contexts while preserving user-edited Markdown', () => {
+  const first = makeAtom({ contexts: [{ id: 'ctx-one', createdAt: '2026-02-14T08:00:00.000Z', sourceKind: 'pdf', sourcePath: 'materials/one.pdf', sourceName: 'one.pdf', quote: 'A user-verified sentence.' }] })
+  const second = makeAtom({ contexts: [
+    ...(first.contexts || []),
+    { id: 'ctx-two', createdAt: '2026-02-15T08:00:00.000Z', sourceKind: 'epub', sourcePath: 'materials/two.epub', sourceName: 'two.epub', quote: 'A different source sentence.' },
+  ] })
+  const edited = senseNoteMarkdown(first).replace('**英文释义**：existing in large numbers', '**英文释义**：我手动改过的释义') + '\n### 我的补充\n\n保留这段笔记。\n'
+  const merged = parseNote(mergeSemanticNoteMarkdown(edited, second))
+  assert.match(merged.body, /我手动改过的释义/)
+  assert.match(merged.body, /保留这段笔记/)
+  assert.match(merged.body, /A different source sentence/)
+  assert.deepEqual(frontmatterList(merged.data, 'semantics'), [first.id])
+  assert.equal(frontmatterString(merged.data, 'kind'), 'semantic')
 })
 
 test('notebook notes, AI notes and chat answers land where they belong', () => {
@@ -261,6 +276,15 @@ test('a day rolls senses, notebook notes and vault files into one record list', 
   assert.deepEqual(findings.map((entry) => entry.path), ['enlightenment/2026-02-14-观察.md'])
 })
 
+test('a sense saved near local midnight is grouped by its local date, not its UTC date prefix', () => {
+  const localLate = new Date(2026, 1, 14, 23, 30, 0)
+  const atom = makeAtom({ generatedAt: localLate.toISOString(), notePath: 'notes/books/book1/numerous--many.md' })
+  const list = dailyEntriesFromNotebook([atom], [], '2026-02-14')
+  assert.equal(list.length, 1)
+  assert.equal(list[0]?.kind, 'sense')
+  assert.equal(list[0]?.path, 'notes/books/book1/numerous--many.md')
+})
+
 test('the record list links every entry and keeps the user\'s own section', () => {
   const day = '2026-02-14'
   const list = dailyEntriesFromNotebook(
@@ -274,7 +298,7 @@ test('the record list links every entry and keeps the user\'s own section', () =
   assert.notEqual(hash, dailySourceHash([]), 'a changed day changes the hash')
 
   const summary = localDailySummary(day, list)
-  assert.match(summary, /本日义项/)
+  assert.match(summary, /## 语义/)
   assert.match(summary, /\[\[enlightenment\/2026-02-14-观察\.md\]\]/)
 
   const content = dailyNoteMarkdown({
@@ -295,6 +319,68 @@ test('the record list links every entry and keeps the user\'s own section', () =
   assert.match(parsed.body, /\[\[Daily\/2026-02-14-report\.md\]\]/)
   assert.match(parsed.body, /\[\[notes\/books\/book1\/numerous--many\.md\|numerous（adjective · many）\]\]/)
   assert.equal(dailyUserNotes(parsed.body), '自己补的一条：读第三章。')
+})
+
+test('daily format has five evidence-backed sections and preserves legacy additions', () => {
+  const content = dailyNoteMarkdown({
+    date: '2026-02-14',
+    entries: [
+      { id: 'phrase-1', kind: 'expression', label: 'take a stance', body: 'takes a stance', path: 'expressions/take-a-stance.md' },
+      { id: 'numerous|adjective|many', kind: 'sense', label: 'numerous · many', body: '大量的', path: 'notes/numerous.md' },
+    ],
+    hash: '12345678',
+    readingActivity: {
+      seconds: 360,
+      sources: [{ sourcePath: 'materials/book1.pdf', sourceName: 'book1.pdf', seconds: 360, lastReadAt: '2026-02-14T10:06:00.000Z' }],
+    },
+    userNotes: '自己写的补充。',
+  })
+  const body = parseNote(content).body
+  for (const heading of ['## 读了多久', '## 读了什么', '## 表达', '## 语义', '## 总结与勉励（继往开来）']) {
+    assert.ok(body.includes(heading), `missing ${heading}`)
+  }
+  assert.match(body, /约 6 分钟（估算）/)
+  assert.match(body, /\[\[expressions\/take-a-stance\.md\|take a stance\]\]/)
+  assert.equal(dailyUserNotes(body), '自己写的补充。')
+  assert.equal(dailyUserNotes('## 我的补充\n\n旧版用户文本'), '旧版用户文本')
+})
+
+test('daily rewrites preserve edits outside the designated user section', () => {
+  const generated = dailyNoteMarkdown({ date: '2026-02-14', entries: [], hash: '12345678' })
+  const parsed = parseNote(generated)
+  const managedHash = frontmatterString(parsed.data, 'managedHash')
+  assert.equal(dailyManagedBodyHash(parsed.body), managedHash)
+
+  const supplementOnly = parsed.body.replace('### 我的补充\n\n', '### 我的补充\n\n我自己的补充。\n')
+  assert.equal(preserveDailyManagedEdits(supplementOnly, managedHash, '我自己的补充。'), '我自己的补充。')
+
+  const editedGeneratedSection = parsed.body.replace('- 今天没有新增表达。', '- 我手动写入的表达记录。')
+  assert.notEqual(dailyManagedBodyHash(editedGeneratedSection), managedHash)
+  const preserved = preserveDailyManagedEdits(editedGeneratedSection, managedHash)
+  assert.match(preserved, /检测到生成区域曾被手动修改/)
+  assert.match(preserved, /我手动写入的表达记录/)
+
+  const regenerated = parseNote(dailyNoteMarkdown({ date: '2026-02-14', entries: [], hash: '87654321', userNotes: preserved }))
+  assert.match(regenerated.body, /### Paperlight 自动保留的旧记录清单/)
+  assert.match(regenerated.body, /我手动写入的表达记录/)
+  assert.equal(dailyManagedBodyHash(regenerated.body), frontmatterString(regenerated.data, 'managedHash'))
+})
+
+test('new expression and semantic contexts appear in that day\'s Daily', () => {
+  const date = '2026-02-14'
+  const expression = {
+    id: 'take-a-stance-12345678', expression: 'take a stance', normalizedExpression: 'take a stance', meaning: '表明立场', note: '',
+    cognitivePaths: ['recognition' as const], relations: [], createdAt: '2026-02-13T12:00:00.000Z', updatedAt: '2026-02-14T12:00:00.000Z',
+    contexts: [{ id: 'ctx-1', createdAt: '2026-02-14T12:00:00.000Z', sourceKind: 'pdf' as const, sourcePath: 'materials/book1.pdf', quote: 'The authors take a stance.' }],
+  }
+  const repeated = makeAtom({
+    generatedAt: '2026-02-13T12:00:00.000Z',
+    contexts: [{ id: 'ctx-sense', createdAt: '2026-02-14T13:00:00.000Z', sourcePath: 'materials/book2.epub', quote: 'numerous examples' }],
+  })
+  const list = dailyEntriesFromNotebook([repeated], [], date, { expressions: [expression] })
+  assert.equal(list.length, 2)
+  assert.match(list.find((entry) => entry.kind === 'expression')?.body || '', /The authors take a stance/)
+  assert.match(list.find((entry) => entry.kind === 'sense')?.body || '', /numerous examples/)
 })
 
 test('the report is its own file, overwritten with every generation', () => {

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { parseInline } from '../lib/textdoc'
 import type { InlineToken, MarkdownBlock, TextOutlineItem } from '../lib/textdoc'
 import { useFlowReader, type FlowReaderApi, type FlowScrollState } from './useFlowReader'
+import InputMarkerOverlay from './InputMarkerOverlay'
+import type { InputMarker } from '../types'
 
 const INITIAL_BLOCKS = 220
 const BLOCK_STEP = 220
@@ -59,6 +61,7 @@ export default function TextReader({
   onSelectionKeyUp,
   onUserScroll,
   apiRef,
+  inputMarkers,
 }: {
   documentKey: string
   blocks: MarkdownBlock[]
@@ -72,7 +75,9 @@ export default function TextReader({
   onSelectionKeyUp: (event: React.KeyboardEvent<HTMLDivElement>) => void
   onUserScroll: () => void
   apiRef: React.RefObject<FlowReaderApi | null>
+  inputMarkers: InputMarker[]
 }) {
+  const pageRef = useRef<HTMLElement>(null)
   const [visible, setVisible] = useState(() => Math.min(blocks.length, INITIAL_BLOCKS))
   const sentinelRef = useRef<HTMLDivElement>(null)
   const outlineRef = useRef(outline)
@@ -129,9 +134,10 @@ export default function TextReader({
       onMouseUp={onSelectionPointerUp}
       onKeyUp={onSelectionKeyUp}
     >
-      <article className="flow-page" data-page-number="1" style={{ fontSize: `${16 * zoom}px` }}>
+      <article className="flow-page" ref={pageRef} data-page-number="1" style={{ fontSize: `${16 * zoom}px` }}>
         {rendered.map((block, index) => <Block key={index} block={block} index={index} />)}
         {visible < blocks.length && <div ref={sentinelRef} className="flow-sentinel" aria-hidden="true" />}
+        <InputMarkerOverlay containerRef={pageRef} contentRef={pageRef} markers={inputMarkers} />
       </article>
     </div>
   )

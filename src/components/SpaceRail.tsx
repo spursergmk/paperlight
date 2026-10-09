@@ -1,9 +1,10 @@
-import { BookOpen, MessagesSquare, NotebookPen, type LucideIcon } from 'lucide-react'
+import { BookOpen, MessagesSquare, NotebookPen, TextQuote, type LucideIcon } from 'lucide-react'
 import type { AppSpace } from '../types'
 
 const SPACES: Array<{ id: AppSpace; label: string; hint: string; icon: LucideIcon }> = [
-  { id: 'reader', label: '阅读', hint: '阅读空间：文档、义项与记录本', icon: BookOpen },
+  { id: 'reader', label: '阅读', hint: '阅读空间：文档、语义与记录本', icon: BookOpen },
   { id: 'notes', label: '笔记', hint: '笔记空间：vault、Markdown 笔记与每日汇总', icon: NotebookPen },
+  { id: 'expressions', label: '表达', hint: '表达池：识别、探索、语境与关系', icon: TextQuote },
   { id: 'chat', label: '对话', hint: '对话空间：基于 vault 内容的知识挖掘', icon: MessagesSquare },
 ]
 
@@ -29,7 +30,7 @@ export default function SpaceRail({
           key={id}
           type="button"
           className={`space-rail-button${active === id ? ' active' : ''}`}
-          title={`${hint}（⌘⌥${id === 'reader' ? 1 : id === 'notes' ? 2 : 3}）`}
+          title={id === 'reader' ? `${hint}（⌘⌥1）` : id === 'notes' ? `${hint}（⌘⌥2）` : hint}
           aria-current={active === id ? 'page' : undefined}
           onClick={() => onSelect(id)}
         >

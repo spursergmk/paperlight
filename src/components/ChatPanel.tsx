@@ -38,11 +38,11 @@ export default function ChatPanel({
     <div className="chat-panel">
       {sense ? (
         <>
-          <div className="chat-fixed-label"><Sparkles size={11} /> 本次义项 · 对话的固定首条输出</div>
+          <div className="chat-fixed-label"><Sparkles size={11} /> 本次语义 · 对话的固定首条输出</div>
           <SenseCard sense={sense} model={model} compact />
         </>
       ) : (
-        <p className="sense-plain">先在正文里选中一个词，得到上下文义项后即可开始对话。</p>
+        <p className="sense-plain">先在正文里选中一个词，得到上下文语义后即可开始对话。</p>
       )}
 
       {messages.length > 0 && (
@@ -89,7 +89,7 @@ export default function ChatPanel({
       <div className="chat-input">
         <textarea
           value={draft}
-          placeholder={sense ? '围绕这条义项继续提问…' : '先选中一个词'}
+          placeholder={sense ? '围绕这条语义继续提问…' : '先选中一个词'}
           disabled={!sense || sending}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {

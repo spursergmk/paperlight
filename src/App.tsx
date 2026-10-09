@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  BookOpen, ChevronDown, ChevronLeft, ChevronRight, Files, FilePlus2, FileText, FolderOpen,
-  KeyRound, Layers, List, Minus, PanelLeftClose, PanelLeftOpen, PanelRightClose,
+  BookOpen, BookmarkPlus, ChevronDown, ChevronLeft, ChevronRight, Files, FilePlus2, FileText, FolderOpen,
+  Highlighter, KeyRound, Layers, List, Minus, PanelLeftClose, PanelLeftOpen, PanelRightClose,
   PanelRightOpen, Plus, RotateCcw, Settings2, Trash2, X,
 } from 'lucide-react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
@@ -10,6 +10,7 @@ import ChatSpace from './components/ChatSpace'
 import EpubReader from './components/EpubReader'
 import FileExplorer from './components/FileExplorer'
 import NotesSpace from './components/NotesSpace'
+import ExpressionSpace from './components/ExpressionSpace'
 import PageStack, { type PageStackApi } from './components/PageStack'
 import PDFThumbnail from './components/PDFThumbnail'
 import SpaceRail from './components/SpaceRail'
@@ -42,8 +43,9 @@ import {
 } from './lib/persist'
 import { askSense, expandSenses, lookupSense, sentenceAround, termFromSelection } from './lib/sense'
 import {
-  createNote, relateSense, senseKeyOf, toAtom,
+  createNote, mergeSemanticAtom, relateSense, senseKeyOf, toAtom,
 } from './lib/notebook'
+import { recordReadingInterval } from './lib/readingActivity'
 import {
   absoluteVaultPath, isValidTimeOfDay, mirrorFolderForMaterial, noteFolderPath, remapLegacyNotePath,
 } from './lib/vault'
@@ -53,12 +55,13 @@ import {
 import type { ApiConfigStatus } from './lib/translation'
 import type {
   AppSpace, ChatMessage, ChatThread, NoteViewMode, NotebookNote, SensePayload, SenseSummary,
-  TextSelection, TranslateMode,
+  ExpressionContext, InputMarker, InputMarkerPurpose, InputMarkerVisualStyle, TextSelection, TranslateMode,
 } from './types'
 
 type LeftTab = 'files' | 'pages' | 'outline'
 
 type FlowOutlineItem = TextOutlineItem | EpubOutlineItem
+type InputMarkerDraft = Omit<InputMarker, 'id' | 'createdAt'> & { x: number; y: number }
 
 interface LoadedDocument {
   kind: DocumentKind
@@ -167,6 +170,18 @@ function App() {
   const [allSenses, setAllSenses] = useState<SenseSummary[] | null>(null)
   const [expanding, setExpanding] = useState(false)
   const [selection, setSelection] = useState<TextSelection | null>(null)
+  const [pendingSourceJump, setPendingSourceJump] = useState<{ path: string; position: number } | null>(null)
+  const [expressionCapture, setExpressionCapture] = useState<{
+    text: string
+    context: Partial<ExpressionContext>
+    x: number
+    y: number
+    reader: boolean
+  } | null>(null)
+  const [expressionCaptureNotice, setExpressionCaptureNotice] = useState('')
+  const [inputMarkerDraft, setInputMarkerDraft] = useState<InputMarkerDraft | null>(null)
+  const [inputMarkerNotice, setInputMarkerNotice] = useState('')
+  const [inputMarkerMenuOpen, setInputMarkerMenuOpen] = useState(false)
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null)
   const [activeAtomId, setActiveAtomId] = useState<string | null>(null)
   const [chatSending, setChatSending] = useState(false)
@@ -199,6 +214,8 @@ function App() {
   const translationRequestRef = useRef(0)
   const senseRequestRef = useRef(0)
   const lastContextRef = useRef('')
+  const lastReadingInteractionRef = useRef(0)
+  const lastReadingTickRef = useRef(0)
 
   const session = state.session
   const layout = state.layout
@@ -213,6 +230,7 @@ function App() {
   const model = state.settings.model
   const atoms = notebook.atoms
   const notebookNotes = notebook.notes
+  const activeInputMarkers = activePath ? state.inputMarkers.filter((marker) => marker.sourcePath === activePath) : []
   const chat = notebook.chat
   const senseId = sense ? senseKeyOf(sense) : null
   const senseInNotebook = Boolean(senseId && atoms.some((atom) => atom.id === senseId))
@@ -240,6 +258,42 @@ function App() {
   const vaultState = state.vault
   const notesSpace = state.notesSpace
   const chatSpace = state.chatSpace
+
+  // Estimate active reading only while a loaded document is in the foreground
+  // reader. Recent interaction and focus checks exclude idle/background time.
+  useEffect(() => {
+    if (!hydrated || activeSpace !== 'reader' || !activePath || activeDoc?.status !== 'ready') return
+    lastReadingInteractionRef.current = 0
+    lastReadingTickRef.current = Date.now()
+    const markInteraction = () => { lastReadingInteractionRef.current = Date.now() }
+    const interval = window.setInterval(() => {
+      const now = Date.now()
+      const previous = lastReadingTickRef.current || now
+      lastReadingTickRef.current = now
+      const elapsed = Math.min(20_000, Math.max(0, now - previous))
+      const recentlyActive = lastReadingInteractionRef.current > 0 && now - lastReadingInteractionRef.current <= 60_000
+      if (!document.hidden && document.hasFocus() && recentlyActive && elapsed >= 1_000) {
+        const name = activeTab?.name || activePath.split(/[\\/]/).pop() || '阅读材料'
+        setState((current) => ({
+          ...current,
+          readingActivity: recordReadingInterval(current.readingActivity, now - elapsed, now, activePath, name),
+        }))
+      }
+    }, 15_000)
+    window.addEventListener('pointerdown', markInteraction, true)
+    window.addEventListener('keydown', markInteraction, true)
+    window.addEventListener('wheel', markInteraction, { capture: true, passive: true })
+    window.addEventListener('scroll', markInteraction, true)
+    window.addEventListener('touchstart', markInteraction, { capture: true, passive: true })
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('pointerdown', markInteraction, true)
+      window.removeEventListener('keydown', markInteraction, true)
+      window.removeEventListener('wheel', markInteraction, true)
+      window.removeEventListener('scroll', markInteraction, true)
+      window.removeEventListener('touchstart', markInteraction, true)
+    }
+  }, [activeDoc?.status, activePath, activeSpace, activeTab?.name, hydrated])
 
   const setVaultState = useCallback((updater: (current: PersistedState['vault']) => PersistedState['vault']) => {
     setState((prev) => ({ ...prev, vault: updater(prev.vault) }))
@@ -269,6 +323,7 @@ function App() {
     root: vaultState.root,
     atoms: notebook.atoms,
     notes: notebook.notes,
+    readingActivity: state.readingActivity,
     model,
     reportTime: state.settings.dailyReportTime,
     reportAuto: state.settings.dailyReportAuto,
@@ -433,7 +488,7 @@ function App() {
       void vaultRef.current.refreshDaily(undefined, { silent: true })
     }, 2500)
     return () => window.clearTimeout(timer)
-  }, [hydrated, notebook.atoms, notebook.notes, vaultState.root])
+  }, [hydrated, notebook.atoms, notebook.notes, state.readingActivity, vaultState.root])
 
   // Report scheduler: one check per minute, one attempt per day slot.
   useEffect(() => {
@@ -481,17 +536,19 @@ function App() {
 
   const saveSenseToVault = useCallback(() => {
     if (!sense) return
-    const atom = toAtom(sense, model, readerNotesFolder)
+    const atom = toAtom(sense, model, readerNotesFolder, selection?.documentPath === activePath ? selection : null)
     void runVaultAction(
       async () => {
-        const path = await vaultRef.current.saveSenseNote(atom)
+        const existingAtStart = stateRef.current.notebook.atoms.find((item) => item.id === atom.id)
+        const merged = existingAtStart ? mergeSemanticAtom(existingAtStart, atom) : atom
+        const path = await vaultRef.current.saveSenseNote(merged)
         setNotebook((current) => {
           const existing = current.atoms.find((item) => item.id === atom.id)
           // An atom collected before the material context existed keeps its
           // history but learns where its note now lives.
           const stored = existing
-            ? { ...existing, notesFolder: atom.notesFolder, notePath: path }
-            : { ...atom, notePath: path }
+            ? { ...mergeSemanticAtom(existing, merged), notesFolder: existing.notesFolder || merged.notesFolder, notePath: path }
+            : { ...merged, notePath: path }
           return {
             ...current,
             atoms: existing
@@ -502,9 +559,9 @@ function App() {
         setActiveAtomId(atom.id)
         return path
       },
-      (path) => `义项已写入 vault：${path}`,
+      (path) => `语义已写入 vault：${path}`,
     )
-  }, [model, readerNotesFolder, runVaultAction, sense, setNotebook])
+  }, [activePath, model, readerNotesFolder, runVaultAction, sense, selection, setNotebook])
 
   const generateCompleteNote = useCallback(() => {
     if (!sense) return
@@ -540,7 +597,7 @@ function App() {
         }))
         return written[written.length - 1].path
       },
-      (path) => `${pendingSenseAtoms.length} 条义项已写入 vault（最后一份：${path}）`,
+      (path) => `${pendingSenseAtoms.length} 条语义已写入 vault（最后一份：${path}）`,
     )
   }, [pendingSenseAtoms, runVaultAction, setNotebook])
 
@@ -738,6 +795,26 @@ function App() {
     openDocument(absoluteVaultPath(root, relativePath))
   }, [openDocument, switchSpace])
 
+  const openExpressionSource = useCallback((context: ExpressionContext) => {
+    const sourcePath = context.sourcePath || ''
+    if (!sourcePath) return
+    if (context.sourceKind === 'chat' && sourcePath.startsWith('chat:')) {
+      const threadId = sourcePath.slice('chat:'.length)
+      if (threadId) activateThread(threadId)
+      switchSpace('chat')
+      return
+    }
+    if (sourcePath.startsWith('notes/') || sourcePath.startsWith('enlightenment/') || sourcePath.startsWith('Daily/')) {
+      openNoteInNotesSpace(sourcePath)
+      return
+    }
+    const root = stateRef.current.vault.root
+    const path = sourcePath.startsWith('materials/') && root ? absoluteVaultPath(root, sourcePath) : sourcePath
+    if (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path) && !path.startsWith('\\\\')) return
+    setPendingSourceJump({ path, position: Math.max(1, context.pageNumber || 1) })
+    switchSpace('reader')
+    openDocument(path)
+  }, [activateThread, openDocument, openNoteInNotesSpace, switchSpace])
 
   const commitScroll = useCallback(() => {
     if (!scrollDirty.current) return
@@ -951,12 +1028,245 @@ function App() {
       setRightTab('sense')
     } catch (error) {
       if (requestId === senseRequestRef.current) {
-        setSenseError(error instanceof Error ? error.message : '义项查询失败。')
+        setSenseError(error instanceof Error ? error.message : '语义查询失败。')
       }
     } finally {
       if (requestId === senseRequestRef.current) setSenseLoading(false)
     }
   }, [model])
+
+  const captureSelectedExpression = useCallback((event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) => {
+    const target = event.target instanceof HTMLElement ? event.target : null
+    if (target?.closest('.expression-capture-popover, .expression-inline-add, .input-mark-inline, .input-marker-composer, .input-marker-menu, .reader-toolbar')) return
+    let text = ''
+    let context: Partial<ExpressionContext> = {}
+    let rect: DOMRect | null = null
+    let isReader = false
+
+    if (target instanceof HTMLTextAreaElement && target.classList.contains('note-textarea')) {
+      const start = target.selectionStart
+      const end = target.selectionEnd
+      if (end <= start) { setExpressionCapture(null); return }
+      text = target.value.slice(start, end).trim()
+      const scope = target.closest<HTMLElement>('[data-expression-source]')
+      const sourceKind = scope?.dataset.expressionSource === 'enlightenment' ? 'enlightenment' : 'note'
+      context = {
+        sourceKind,
+        sourcePath: scope?.dataset.expressionPath || notesSpace.activePath || undefined,
+        sourceName: scope?.dataset.expressionName || 'Vault 笔记',
+        startOffset: start,
+        endOffset: end,
+        before: target.value.slice(Math.max(0, start - 350), start),
+        after: target.value.slice(end, end + 350),
+      }
+      rect = target.getBoundingClientRect()
+    } else {
+      const browserSelection = window.getSelection()
+      const range = browserSelection && browserSelection.rangeCount ? browserSelection.getRangeAt(0) : null
+      const raw = browserSelection?.toString() || ''
+      text = tidyText(raw)
+      if (!range || !text) { setExpressionCapture(null); return }
+      const startNode = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
+      const pageElement = startNode?.closest<HTMLElement>('[data-page-number]')
+      const scope = pageElement || startNode?.closest<HTMLElement>('[data-expression-source]')
+      if (!scope) { setExpressionCapture(null); return }
+      rect = range.getBoundingClientRect()
+      if (pageElement) {
+        isReader = true
+        const pageLayer = pageElement.querySelector('.textLayer') || pageElement
+        const sourceText = tidyText(pageLayer.textContent || '')
+        const index = sourceText.indexOf(text)
+        context = {
+          sourceKind: activeDoc?.kind === 'pdf' ? 'pdf' : activeDoc?.kind === 'epub' ? 'epub' : 'text',
+          sourcePath: activePath || undefined,
+          sourceName: activeTab?.name || '当前材料',
+          locationLabel: pageElement.dataset.location || undefined,
+          pageNumber: Number(pageElement.dataset.pageNumber || 1),
+          startOffset: index >= 0 ? index : undefined,
+          endOffset: index >= 0 ? index + text.length : undefined,
+          quote: text,
+          before: index >= 0 ? sourceText.slice(Math.max(0, index - 350), index) : '',
+          after: index >= 0 ? sourceText.slice(index + text.length, index + text.length + 350) : '',
+        }
+      } else {
+        const sourceKind = scope.dataset.expressionSource
+        if (sourceKind !== 'assistant' && sourceKind !== 'chat' && sourceKind !== 'note' && sourceKind !== 'enlightenment') {
+          setExpressionCapture(null)
+          return
+        }
+        const sourceText = tidyText(scope.textContent || '')
+        const index = sourceText.indexOf(text)
+        context = {
+          sourceKind,
+          sourcePath: scope.dataset.expressionPath || (sourceKind === 'assistant' ? activePath || undefined : undefined),
+          sourceName: scope.dataset.expressionName || (sourceKind === 'chat' ? '自由对话' : sourceKind === 'assistant' ? '阅读助手' : 'Vault 笔记'),
+          startOffset: index >= 0 ? index : undefined,
+          endOffset: index >= 0 ? index + text.length : undefined,
+          quote: text,
+          before: index >= 0 ? sourceText.slice(Math.max(0, index - 350), index) : '',
+          after: index >= 0 ? sourceText.slice(index + text.length, index + text.length + 350) : '',
+        }
+      }
+    }
+
+    if (text.length < 2 || text.length > 280 || !rect) { setExpressionCapture(null); return }
+    setExpressionCapture({
+      text,
+      context,
+      x: Math.max(180, Math.min(window.innerWidth - 180, rect.left + rect.width / 2)),
+      y: Math.max(56, Math.min(window.innerHeight - 70, rect.bottom + 8)),
+      reader: isReader,
+    })
+  }, [activeDoc?.kind, activePath, activeTab?.name, notesSpace.activePath])
+
+  const saveSelectedExpression = useCallback(async () => {
+    if (!expressionCapture) return
+    if (!vaultApi.ready) {
+      setExpressionCaptureNotice('请先选择 Vault，收录内容会保存为其中的 Markdown 文件。')
+      return
+    }
+    try {
+      const record = await vaultApi.captureExpression({
+        expression: expressionCapture.text,
+        cognitivePath: 'recognition',
+        context: { ...expressionCapture.context, quote: expressionCapture.text },
+      })
+      setExpressionCapture(null)
+      window.getSelection()?.removeAllRanges()
+      setExpressionCaptureNotice(`已收录「${record.expression}」，来源语境已保留。`)
+      window.setTimeout(() => setExpressionCaptureNotice(''), 4000)
+    } catch (error) {
+      setExpressionCaptureNotice(error instanceof Error ? error.message : '表达收录失败。')
+    }
+  }, [expressionCapture, vaultApi.captureExpression, vaultApi.ready])
+
+  const startInputMarker = (context: Partial<ExpressionContext>, x = window.innerWidth / 2, y = window.innerHeight / 2) => {
+    const sourceKind = context.sourceKind || (activeDoc?.kind === 'pdf' ? 'pdf' : activeDoc?.kind === 'epub' ? 'epub' : activeDoc?.kind === 'text' ? 'text' : 'manual')
+    const sourcePath = context.sourcePath || (sourceKind === 'assistant' ? activePath || undefined : undefined)
+    if (!sourcePath) {
+      setInputMarkerNotice('当前选区没有可回溯的来源，暂时无法创建输入标记。')
+      window.setTimeout(() => setInputMarkerNotice(''), 4000)
+      return
+    }
+    setInputMarkerDraft({
+      sourcePath,
+      sourceKind,
+      purpose: 'form',
+      quote: context.quote,
+      before: context.before,
+      after: context.after,
+      pageNumber: context.pageNumber,
+      locationLabel: context.locationLabel,
+      startOffset: context.startOffset,
+      endOffset: context.endOffset,
+      comment: '',
+      x: Math.max(190, Math.min(window.innerWidth - 190, x)),
+      y: Math.max(60, Math.min(window.innerHeight - 320, y)),
+    })
+    setExpressionCapture(null)
+  }
+
+  const startMarkerFromReaderSelection = () => {
+    if (!selection) return
+    startInputMarker({
+      sourceKind: activeDoc?.kind === 'pdf' ? 'pdf' : activeDoc?.kind === 'epub' ? 'epub' : 'text',
+      sourcePath: selection.documentPath || activePath || undefined,
+      sourceName: selection.documentName,
+      quote: selection.text,
+      before: selection.before,
+      after: selection.after,
+      pageNumber: selection.pageNumber,
+      locationLabel: selection.locationLabel,
+      startOffset: selection.startOffset,
+      endOffset: selection.endOffset,
+    }, anchor?.x, anchor ? anchor.y + 12 : undefined)
+  }
+
+  const saveInputMarker = () => {
+    if (!inputMarkerDraft) return
+    const { x: _x, y: _y, ...marker } = inputMarkerDraft
+    const saved: InputMarker = {
+      ...marker,
+      id: `marker-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      createdAt: new Date().toISOString(),
+    }
+    setState((current) => ({ ...current, inputMarkers: [...current.inputMarkers, saved] }))
+    setInputMarkerDraft(null)
+    setInputMarkerNotice('输入标记已保存；关闭材料后仍可从标记菜单返回。')
+    window.setTimeout(() => setInputMarkerNotice(''), 4000)
+  }
+
+  const addProgressBookmark = () => {
+    if (!activePath || !activeDoc || !activeTab) return
+    const duplicate = activeInputMarkers.find((marker) => marker.purpose === 'progress' && marker.pageNumber === activeTab.pageNumber)
+    if (duplicate) {
+      setInputMarkerNotice('当前位置已有书签。')
+      window.setTimeout(() => setInputMarkerNotice(''), 2500)
+      setInputMarkerMenuOpen(true)
+      return
+    }
+    const sourceKind: InputMarker['sourceKind'] = activeDoc.kind === 'pdf' ? 'pdf' : activeDoc.kind === 'epub' ? 'epub' : 'text'
+    const saved: InputMarker = {
+      id: `marker-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      sourcePath: activePath,
+      sourceKind,
+      purpose: 'progress',
+      pageNumber: activeTab.pageNumber || 1,
+      locationLabel: flowLocation || undefined,
+      scrollRatio: activeTab.scrollRatio,
+      comment: '阅读进度',
+      createdAt: new Date().toISOString(),
+    }
+    setState((current) => ({ ...current, inputMarkers: [...current.inputMarkers, saved] }))
+    setInputMarkerMenuOpen(true)
+    setInputMarkerNotice('阅读进度已加书签。')
+    window.setTimeout(() => setInputMarkerNotice(''), 3000)
+  }
+
+  const removeInputMarker = (id: string) => {
+    setState((current) => ({ ...current, inputMarkers: current.inputMarkers.filter((marker) => marker.id !== id) }))
+  }
+
+  const jumpToInputMarker = (marker: InputMarker) => {
+    setInputMarkerMenuOpen(false)
+    if (marker.sourceKind === 'chat' && marker.sourcePath.startsWith('chat:')) {
+      activateThread(marker.sourcePath.slice('chat:'.length))
+      switchSpace('chat')
+      return
+    }
+    if (marker.sourceKind === 'note' || marker.sourceKind === 'enlightenment') {
+      if (marker.sourcePath.startsWith('notes/') || marker.sourcePath.startsWith('enlightenment/')) {
+        openNoteInNotesSpace(marker.sourcePath)
+        return
+      }
+    }
+    if (marker.sourcePath !== activePath) {
+      if (marker.sourcePath.startsWith('materials/') && stateRef.current.vault.root) {
+        const path = absoluteVaultPath(stateRef.current.vault.root, marker.sourcePath)
+        setPendingSourceJump({ path, position: marker.pageNumber || 1 })
+        switchSpace('reader')
+        openDocument(path)
+      } else if (marker.sourcePath.startsWith('/')) {
+        setPendingSourceJump({ path: marker.sourcePath, position: marker.pageNumber || 1 })
+        switchSpace('reader')
+        openDocument(marker.sourcePath)
+      }
+      return
+    }
+    if (activeDoc?.kind === 'pdf') pageApiRef.current?.scrollToPage(marker.pageNumber || 1)
+    else if (activeDoc?.kind === 'epub') handleChapterChange((marker.pageNumber || 1) - 1)
+    else if (activeDoc?.kind === 'text') {
+      const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+      if (scroller && marker.scrollRatio !== undefined) {
+        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight) * marker.scrollRatio
+      } else flowApiRef.current?.scrollToTop()
+    }
+    window.setTimeout(() => {
+      const visual = document.querySelector<HTMLElement>(`.input-marker-visual[data-marker-id="${CSS.escape(marker.id)}"]`)
+      const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+      if (visual && scroller) scroller.scrollTop += visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 110
+    }, 120)
+  }
 
   const selectText = useCallback(() => {
     const browserSelection = window.getSelection()
@@ -978,6 +1288,8 @@ function App() {
       before: index >= 0 ? pageText.slice(Math.max(0, index - 500), index) : '',
       after: index >= 0 ? pageText.slice(index + text.length, index + text.length + 500) : '',
       pageNumber: Number(pageElement.dataset.pageNumber || 1),
+      startOffset: index >= 0 ? index : undefined,
+      endOffset: index >= 0 ? index + text.length : undefined,
       locationLabel: pageElement.dataset.location || undefined,
       documentName: activeTab?.name,
       documentPath: activePath || undefined,
@@ -1002,10 +1314,12 @@ function App() {
 
   function addCurrentSense() {
     if (!sense) return
-    const atom = toAtom(sense, model, readerNotesFolder)
+    const atom = toAtom(sense, model, readerNotesFolder, selection?.documentPath === activePath ? selection : null)
     setNotebook((current) => ({
       ...current,
-      atoms: current.atoms.some((item) => item.id === atom.id) ? current.atoms : [atom, ...current.atoms],
+      atoms: current.atoms.some((item) => item.id === atom.id)
+        ? current.atoms.map((item) => item.id === atom.id ? mergeSemanticAtom(item, atom) : item)
+        : [atom, ...current.atoms],
     }))
     setActiveAtomId(atom.id)
   }
@@ -1018,7 +1332,7 @@ function App() {
     try {
       setAllSenses(await expandSenses(term, model))
     } catch (error) {
-      setSenseError(error instanceof Error ? error.message : '无法获取完整义项。')
+      setSenseError(error instanceof Error ? error.message : '无法获取其他语义。')
     } finally {
       setExpanding(false)
     }
@@ -1054,11 +1368,13 @@ function App() {
   // Saving any excerpt also stores the term ↔ sense atom so the link resolves.
   function saveExcerpt(body: string, sourceMessageId?: string) {
     if (!sense || (sourceMessageId && savedMessageIds.has(sourceMessageId))) return
-    const atom = toAtom(sense, model, readerNotesFolder)
+    const atom = toAtom(sense, model, readerNotesFolder, selection?.documentPath === activePath ? selection : null)
     const note = createNote(body, [atom.id], new Date(), sourceMessageId, readerNotesFolder)
     setNotebook((current) => ({
       ...current,
-      atoms: current.atoms.some((item) => item.id === atom.id) ? current.atoms : [atom, ...current.atoms],
+      atoms: current.atoms.some((item) => item.id === atom.id)
+        ? current.atoms.map((item) => item.id === atom.id ? mergeSemanticAtom(item, atom) : item)
+        : [atom, ...current.atoms],
       notes: [note, ...current.notes],
     }))
   }
@@ -1247,6 +1563,14 @@ function App() {
     updateActiveTab({ chapterIndex, pageNumber: chapterIndex + 1, scrollTop: 0, scrollRatio: 0 })
   }, [activePath, updateActiveTab])
 
+  useEffect(() => {
+    if (!pendingSourceJump || pendingSourceJump.path !== activePath || activeDoc?.status !== 'ready') return
+    if (activeDoc.kind === 'pdf') pageApiRef.current?.scrollToPage(pendingSourceJump.position)
+    else if (activeDoc.kind === 'epub') handleChapterChange(pendingSourceJump.position - 1)
+    else if (pendingSourceJump.position > 1) flowApiRef.current?.scrollBy((pendingSourceJump.position - 1) * 480)
+    setPendingSourceJump(null)
+  }, [activeDoc, activePath, handleChapterChange, pendingSourceJump])
+
   // PDF reports a pixel offset; the reflowing readers report a ratio as well so
   // the position survives window/splitter resizes that change the text height.
   const handleScrollPosition = useCallback((position: number | FlowScrollState) => {
@@ -1345,6 +1669,8 @@ function App() {
   return (
     <main
       className={`app-shell${isMacApp ? ' is-app mac' : ''}`}
+      onMouseUp={captureSelectedExpression}
+      onKeyUp={captureSelectedExpression}
       onDragOver={(event) => { event.preventDefault(); setDragActive(true) }}
       onDragLeave={(event) => { if (event.target === event.currentTarget) setDragActive(false) }}
       onDrop={handleDrop}
@@ -1449,7 +1775,7 @@ function App() {
           <p className="settings-hint">{apiConfig?.source === 'environment' ? <>密钥由启动环境管理，页面不会读取、显示或覆盖它。</> : <>密钥仅写入本机配置文件，不会保存在浏览器、显示在页面或打包进应用。</>}</p>
           <label className="field-label model-label" htmlFor="model-name">模型名称</label>
           <input id="model-name" className="text-field" value={model} onChange={(event) => setState((prev) => ({ ...prev, settings: { ...prev.settings, model: event.target.value } }))} />
-        </> : <p className="settings-hint">模拟模式只影响整句翻译；义项查询、例句与对话始终使用已配置的 API。</p>}
+        </> : <p className="settings-hint">模拟模式只影响整句翻译；语义查询、例句与对话始终使用已配置的 API。</p>}
 
         <div className="settings-section">
           <label className="field-label" htmlFor="report-time">日报生成时间</label>
@@ -1610,6 +1936,8 @@ function App() {
             </div>
             <div className="reader-toolbar-title" title={activePath || ''}>{flowLocation || activeTab.name}</div>
             <div className="zoom-controls">
+              <button className="toolbar-button input-marker-menu-toggle" title="书签与输入标记" onClick={() => setInputMarkerMenuOpen((open) => !open)}><BookmarkPlus size={14} /><span>{activeInputMarkers.length || '标记'}</span></button>
+              <span className="toolbar-separator" />
               <button className="toolbar-button" title="缩小（⌘/Ctrl + -）" onClick={() => activePath && updateTab(activePath, { zoom: clamp(Number(((activeTab?.zoom ?? 1) - 0.1).toFixed(2)), 0.5, 3) })}><Minus size={15} /></button>
               <span className="zoom-label">{Math.round((activeTab?.zoom ?? 1) * 100)}%</span>
               <button className="toolbar-button" title="放大（⌘/Ctrl + +）" onClick={() => activePath && updateTab(activePath, { zoom: clamp(Number(((activeTab?.zoom ?? 1) + 0.1).toFixed(2)), 0.5, 3) })}><Plus size={15} /></button>
@@ -1617,6 +1945,23 @@ function App() {
               <button className="toolbar-button fit-button" title={activeDoc?.kind === 'pdf' ? '适合页面宽度（⌘0）' : '恢复默认字号（⌘0）'} onClick={() => activePath && updateTab(activePath, { zoom: 1 })}><RotateCcw size={14} /><span>{activeDoc?.kind === 'pdf' ? '适宽' : '默认'}</span></button>
             </div>
           </div>}
+
+          {activeTab && inputMarkerMenuOpen && <section className="input-marker-menu" aria-label="书签与输入标记">
+            <header><strong>输入标记</strong><button type="button" className="tiny-icon" aria-label="关闭标记菜单" onClick={() => setInputMarkerMenuOpen(false)}><X size={13} /></button></header>
+            <button type="button" className="primary-button input-marker-progress" onClick={addProgressBookmark}><BookmarkPlus size={13} /> 保存当前位置</button>
+            <div className="input-marker-list">
+              {activeInputMarkers.length === 0 && <p>当前材料还没有书签或输入标记。</p>}
+              {[...activeInputMarkers].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((marker) => <div className="input-marker-list-item" key={marker.id}>
+                <button type="button" onClick={() => jumpToInputMarker(marker)}>
+                  <small>{marker.purpose === 'progress' ? '进度' : marker.purpose === 'form' ? '形式' : '内容'}{marker.visualStyle ? ` · ${marker.visualStyle === 'highlight' ? '高亮' : '下划线'}` : ''}</small>
+                  <strong>{marker.quote || marker.comment || '阅读进度'}</strong>
+                  <span>{[marker.locationLabel, marker.pageNumber ? `第 ${marker.pageNumber} 页/章` : ''].filter(Boolean).join(' · ')}</span>
+                  {marker.comment && marker.comment !== marker.quote && marker.comment !== '阅读进度' && <em>{marker.comment}</em>}
+                </button>
+                <button type="button" className="tiny-icon" aria-label="删除输入标记" onClick={() => removeInputMarker(marker.id)}><Trash2 size={12} /></button>
+              </div>)}
+            </div>
+          </section>}
 
           {!activeTab ? (
             <WelcomeScreen
@@ -1641,6 +1986,7 @@ function App() {
               onSelectionKeyUp={(event) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') selectText() }}
               onUserScroll={() => setAnchor(null)}
               onReloadDocument={reloadActiveDocument}
+              inputMarkers={activeInputMarkers}
               apiRef={pageApiRef}
             />
           ) : activeDoc?.status === 'ready' && activeDoc.kind === 'text' ? (
@@ -1658,6 +2004,7 @@ function App() {
               onSelectionKeyUp={(event) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') selectText() }}
               onUserScroll={() => setAnchor(null)}
               apiRef={flowApiRef}
+              inputMarkers={activeInputMarkers.filter((marker) => marker.pageNumber === 1 && Boolean(marker.visualStyle))}
             />
           ) : activeDoc?.status === 'ready' && activeDoc.kind === 'epub' && activeDoc.epub ? (
             <EpubReader
@@ -1673,6 +2020,7 @@ function App() {
               onUserScroll={() => setAnchor(null)}
               apiRef={flowApiRef}
               onNextChapter={() => handleChapterChange((activeTab.chapterIndex ?? 0) + 1)}
+              inputMarkers={activeInputMarkers.filter((marker) => marker.pageNumber === (activeTab.chapterIndex ?? 0) + 1 && Boolean(marker.visualStyle))}
             />
           ) : activeDoc?.status === 'error' ? (
             <div className="reader-status">
@@ -1797,6 +2145,16 @@ function App() {
           onSavePendingSenses={savePendingSenses}
           onCreateBlankNote={() => void createBlankNote()}
         />
+      ) : activeSpace === 'expressions' ? (
+        <ExpressionSpace
+          vault={vaultApi}
+          semantics={atoms}
+          notebookNotes={notebookNotes}
+          model={model}
+          onSwitchSpace={switchSpace}
+          onOpenSemantic={(id) => { setActiveAtomId(id); setRightTab('notebook'); switchSpace('reader') }}
+          onOpenSource={openExpressionSource}
+        />
       ) : (
         <ChatSpace
           vault={vaultApi}
@@ -1822,25 +2180,58 @@ function App() {
       )}
 
       {activeSpace === 'reader' && anchor && senseLoading && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
-        <div className="popover-title"><span className="provider-dot openai" />上下文义项<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
-        <div className="popover-loading"><span className="mini-spinner" /> 正在判断义项…</div>
+        <div className="popover-title"><span className="provider-dot openai" />上下文语义<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
+        <div className="popover-loading"><span className="mini-spinner" /> 正在判断语义…</div>
+        {expressionCapture?.reader && <button className="expression-inline-add" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void saveSelectedExpression()}><Plus size={12} /> 收录表达</button>}
+        {selection && <button className="input-mark-inline" type="button" onMouseDown={(event) => event.preventDefault()} onClick={startMarkerFromReaderSelection}><Highlighter size={12} /> 标记输入</button>}
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
       </div>}
 
       {activeSpace === 'reader' && anchor && !senseLoading && sense && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
-        <div className="popover-title"><span className="provider-dot openai" />上下文义项{sense.partOfSpeech ? ` · ${sense.partOfSpeech}` : ''}<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
+        <div className="popover-title"><span className="provider-dot openai" />上下文语义{sense.partOfSpeech ? ` · ${sense.partOfSpeech}` : ''}<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
         <p className="popover-meaning">{sense.contextualMeaning}</p>
+        {expressionCapture?.reader && <button className="expression-inline-add" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void saveSelectedExpression()}><Plus size={12} /> 收录表达</button>}
+        {selection && <button className="input-mark-inline" type="button" onMouseDown={(event) => event.preventDefault()} onClick={startMarkerFromReaderSelection}><Highlighter size={12} /> 标记输入</button>}
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
       </div>}
 
       {activeSpace === 'reader' && anchor && !senseLoading && !sense && senseError && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
-        <div className="popover-title"><span className="provider-dot mock" />义项查询失败</div>
+        <div className="popover-title"><span className="provider-dot mock" />语义查询失败</div>
         <p className="popover-meaning">{senseError}</p>
+        {expressionCapture?.reader && <button className="expression-inline-add" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void saveSelectedExpression()}><Plus size={12} /> 收录表达</button>}
+        {selection && <button className="input-mark-inline" type="button" onMouseDown={(event) => event.preventDefault()} onClick={startMarkerFromReaderSelection}><Highlighter size={12} /> 标记输入</button>}
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
       </div>}
+      {expressionCapture && !expressionCapture.reader && <div
+        className="expression-capture-popover"
+        style={{ left: `${expressionCapture.x}px`, top: `${expressionCapture.y}px` }}
+        onMouseDown={(event) => event.preventDefault()}
+      >
+        <span>收录「{expressionCapture.text}」</span>
+        <button type="button" className="primary-button" onClick={() => void saveSelectedExpression()}><Plus size={12} /> 收录表达</button>
+        <button type="button" className="secondary-button" onClick={() => startInputMarker({ ...expressionCapture.context, quote: expressionCapture.text }, expressionCapture.x, expressionCapture.y + 24)}><Highlighter size={12} /> 标记输入</button>
+        <button type="button" className="tiny-icon" aria-label="关闭收录工具" onClick={() => setExpressionCapture(null)}><X size={13} /></button>
+      </div>}
+      {inputMarkerDraft && <section
+        className="input-marker-composer"
+        style={{ left: `${inputMarkerDraft.x}px`, top: `${inputMarkerDraft.y}px` }}
+        onMouseDown={(event) => event.preventDefault()}
+        aria-label="创建输入标记"
+      >
+        <header><div><span className="eyebrow">INPUT MARK</span><h2>标记这段输入</h2></div><button type="button" className="tiny-icon" aria-label="关闭" onClick={() => setInputMarkerDraft(null)}><X size={13} /></button></header>
+        <div className="input-marker-purpose" role="group" aria-label="标记目的">
+          {(['form', 'content'] as InputMarkerPurpose[]).map((purpose) => <button key={purpose} type="button" className={inputMarkerDraft.purpose === purpose ? 'active' : ''} onClick={() => setInputMarkerDraft({ ...inputMarkerDraft, purpose })}>{purpose === 'form' ? '形式' : '内容'}</button>)}
+        </div>
+        {inputMarkerDraft.quote && <blockquote>{inputMarkerDraft.quote}</blockquote>}
+        <label className="input-marker-visual-choice">视觉提醒<select aria-label="视觉提醒" value={inputMarkerDraft.visualStyle || ''} onChange={(event) => setInputMarkerDraft({ ...inputMarkerDraft, visualStyle: event.target.value ? event.target.value as InputMarkerVisualStyle : undefined })}><option value="">不加视觉标记</option><option value="highlight">高亮</option><option value="underline">下划线</option></select></label>
+        <label className="input-marker-comment">评论或提醒（可选）<textarea value={inputMarkerDraft.comment} onChange={(event) => setInputMarkerDraft({ ...inputMarkerDraft, comment: event.target.value })} rows={2} placeholder="写下为什么标记这段内容" /></label>
+        <footer><button type="button" className="subtle-button" onClick={() => setInputMarkerDraft(null)}>取消</button><button type="button" className="primary-button" onClick={saveInputMarker}>保存标记</button></footer>
+      </section>}
+      {inputMarkerNotice && <div className="input-marker-notice" role="status">{inputMarkerNotice}</div>}
+      {expressionCaptureNotice && <div className="expression-capture-notice" role="status">{expressionCaptureNotice}</div>}
     </main>
   )
 }

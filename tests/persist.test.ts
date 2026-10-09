@@ -121,6 +121,35 @@ test('corrupted collections degrade to empty instead of crashing the first rende
   assert.equal(state.layout.leftWidth, 264, 'layout falls back to defaults')
 })
 
+test('legacy state loads without marks and new input markers survive safe state migration', async () => {
+  install(stateWith({ savedAt: 10, notebook: { atoms: [], notes: [], chat: {} } }))
+  const legacy = await loadState()
+  assert.deepEqual(legacy.inputMarkers, [])
+  assert.deepEqual(legacy.readingActivity, {})
+
+  const marker = {
+    id: 'mark-1', sourcePath: '/books/sample.pdf', sourceKind: 'pdf', purpose: 'content',
+    visualStyle: 'highlight', quote: 'worth considering', before: 'This is ', after: ' again.',
+    pageNumber: 4, startOffset: 28, endOffset: 45, comment: 'check the claim', createdAt: '2026-10-08T12:00:00.000Z',
+  }
+  install(stateWith({ savedAt: 20, inputMarkers: [marker, { ...marker, id: '', purpose: 'unknown' }] }))
+  const migrated = await loadState()
+  assert.equal(migrated.inputMarkers.length, 1)
+  assert.equal(migrated.inputMarkers[0]?.quote, 'worth considering')
+  assert.equal(migrated.inputMarkers[0]?.sourcePath, '/books/sample.pdf')
+
+  install(stateWith({ savedAt: 21, readingActivity: {
+    '2026-10-09': {
+      seconds: 900,
+      sources: [{ sourcePath: 'materials/book1.pdf', sourceName: 'book1.pdf', seconds: 900, lastReadAt: '2026-10-09T10:00:00.000Z' }],
+    },
+    invalid: { seconds: 999_999, sources: [] },
+  } }))
+  const activity = await loadState()
+  assert.equal(activity.readingActivity['2026-10-09']?.seconds, 900)
+  assert.equal(activity.readingActivity.invalid, undefined)
+})
+
 test('the notes and chat desks survive a round trip and reject unsafe paths', async () => {
   const disk = stateWith({
     savedAt: 3_000,

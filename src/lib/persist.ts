@@ -1,5 +1,6 @@
 import type {
-  AppSpace, ChatMessage, ChatThread, NoteViewMode, NotebookNote, SenseAtom, TranslateMode,
+  AppSpace, ChatMessage, ChatThread, InputMarker, InputMarkerPurpose, InputMarkerVisualStyle, ReadingActivityDay,
+  NoteViewMode, NotebookNote, SenseAtom, TranslateMode,
 } from '../types'
 // Explicit extension: `node --test` runs this module through Node's own ESM
 // resolver (the app bundle resolves extensionless imports, Node does not).
@@ -59,6 +60,10 @@ export interface PersistedState {
     notes: NotebookNote[]
     chat: Record<string, ChatMessage[]>
   }
+  /** User-created bookmarks, language/content markers and visual cues. */
+  inputMarkers: InputMarker[]
+  /** Estimated focused-reading activity by local calendar day. */
+  readingActivity: Record<string, ReadingActivityDay>
   /** The selected notes vault (a plain folder of Markdown files). */
   vault: {
     root: string | null
@@ -124,6 +129,8 @@ export function defaultState(): PersistedState {
     },
     settings: { mode: 'mock', model: 'deepseek-flash', dailyReportTime: DEFAULT_REPORT_TIME, dailyReportAuto: true },
     notebook: { atoms: [], notes: [], chat: {} },
+    inputMarkers: [],
+    readingActivity: {},
     vault: { root: null, recentRoots: [], collapsed: [] },
     notesSpace: {
       openPaths: [],
@@ -259,6 +266,73 @@ function sanitizeThreads(value: unknown): ChatThread[] {
   return threads
 }
 
+function sanitizeInputMarkers(value: unknown): InputMarker[] {
+  if (!Array.isArray(value)) return []
+  const sourceKinds = ['pdf', 'epub', 'text', 'assistant', 'chat', 'note', 'enlightenment', 'ai_exploration', 'manual']
+  const purposes: InputMarkerPurpose[] = ['progress', 'form', 'content']
+  const visualStyles: InputMarkerVisualStyle[] = ['highlight', 'underline']
+  return value.slice(-5_000).flatMap((item): InputMarker[] => {
+    if (!item || typeof item !== 'object') return []
+    const marker = item as Partial<InputMarker>
+    if (typeof marker.id !== 'string' || !marker.id || typeof marker.sourcePath !== 'string' || !marker.sourcePath.trim()) return []
+    if (!purposes.includes(marker.purpose as InputMarkerPurpose)) return []
+    const sourceKind = sourceKinds.includes(String(marker.sourceKind))
+      ? marker.sourceKind as InputMarker['sourceKind'] : 'manual'
+    const pageNumber = typeof marker.pageNumber === 'number' && Number.isFinite(marker.pageNumber) && marker.pageNumber > 0
+      ? Math.floor(marker.pageNumber) : undefined
+    const startOffset = typeof marker.startOffset === 'number' && Number.isSafeInteger(marker.startOffset) && marker.startOffset >= 0
+      ? marker.startOffset : undefined
+    const endOffset = typeof marker.endOffset === 'number' && Number.isSafeInteger(marker.endOffset) && marker.endOffset >= 0
+      ? marker.endOffset : undefined
+    const scrollRatio = typeof marker.scrollRatio === 'number' && Number.isFinite(marker.scrollRatio)
+      ? Math.max(0, Math.min(1, marker.scrollRatio)) : undefined
+    return [{
+      id: marker.id.slice(0, 160),
+      sourcePath: marker.sourcePath.trim().slice(0, 4_096),
+      sourceKind,
+      purpose: marker.purpose as InputMarkerPurpose,
+      ...(visualStyles.includes(marker.visualStyle as InputMarkerVisualStyle)
+        ? { visualStyle: marker.visualStyle as InputMarkerVisualStyle } : {}),
+      ...(typeof marker.quote === 'string' && marker.quote ? { quote: marker.quote.slice(0, 1_200) } : {}),
+      ...(typeof marker.before === 'string' && marker.before ? { before: marker.before.slice(-500) } : {}),
+      ...(typeof marker.after === 'string' && marker.after ? { after: marker.after.slice(0, 500) } : {}),
+      ...(pageNumber ? { pageNumber } : {}),
+      ...(typeof marker.locationLabel === 'string' && marker.locationLabel ? { locationLabel: marker.locationLabel.slice(0, 300) } : {}),
+      ...(startOffset !== undefined ? { startOffset } : {}),
+      ...(endOffset !== undefined ? { endOffset } : {}),
+      ...(scrollRatio !== undefined ? { scrollRatio } : {}),
+      comment: typeof marker.comment === 'string' ? marker.comment.slice(0, 2_000) : '',
+      createdAt: typeof marker.createdAt === 'string' ? marker.createdAt.slice(0, 60) : new Date().toISOString(),
+    }]
+  })
+}
+
+function sanitizeReadingActivity(value: unknown): Record<string, ReadingActivityDay> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([date, day]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && day && typeof day === 'object' && !Array.isArray(day))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-90)
+  return Object.fromEntries(entries.map(([date, raw]) => {
+    const day = raw as Partial<ReadingActivityDay>
+    const seconds = typeof day.seconds === 'number' && Number.isFinite(day.seconds)
+      ? Math.max(0, Math.min(86_400, Math.floor(day.seconds))) : 0
+    const sources = Array.isArray(day.sources) ? day.sources.slice(0, 100).flatMap((item) => {
+      if (!item || typeof item !== 'object') return []
+      const source = item as Partial<ReadingActivityDay['sources'][number]>
+      if (typeof source.sourcePath !== 'string' || !source.sourcePath.trim()) return []
+      return [{
+        sourcePath: source.sourcePath.slice(0, 4_096),
+        sourceName: typeof source.sourceName === 'string' ? source.sourceName.slice(0, 300) : '阅读材料',
+        seconds: typeof source.seconds === 'number' && Number.isFinite(source.seconds)
+          ? Math.max(0, Math.min(86_400, Math.floor(source.seconds))) : 0,
+        lastReadAt: typeof source.lastReadAt === 'string' ? source.lastReadAt.slice(0, 60) : '',
+      }]
+    }) : []
+    return [date, { seconds, sources }]
+  }))
+}
+
 // Anything read from disk is untrusted: a truncated or hand-edited state file
 // must degrade to defaults instead of crashing the first render.
 function mergeState(value: unknown): PersistedState | null {
@@ -280,7 +354,9 @@ function mergeState(value: unknown): PersistedState | null {
     : DEFAULT_REPORT_TIME
   const threads = sanitizeThreads(chatSpace.threads)
   const activeThreadId = optionalString(chatSpace.activeThreadId)
-  const activeSpace: AppSpace = input.activeSpace === 'notes' || input.activeSpace === 'chat' ? input.activeSpace : 'reader'
+  const activeSpace: AppSpace = input.activeSpace === 'notes' || input.activeSpace === 'expressions' || input.activeSpace === 'chat'
+    ? input.activeSpace
+    : 'reader'
   return {
     version: 1,
     savedAt: typeof input.savedAt === 'number' && Number.isFinite(input.savedAt) ? input.savedAt : 0,
@@ -307,6 +383,8 @@ function mergeState(value: unknown): PersistedState | null {
       notes: Array.isArray(notebook.notes) ? notebook.notes : [],
       chat,
     },
+    inputMarkers: sanitizeInputMarkers(input.inputMarkers),
+    readingActivity: sanitizeReadingActivity(input.readingActivity),
     vault: {
       root: optionalString(vault.root),
       recentRoots: stringList(vault.recentRoots, 12),

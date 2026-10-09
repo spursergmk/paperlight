@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  createNote, loadNotes, noteLabel, relateSense, saveNotes, senseAtomId, toAtom,
+  createNote, loadNotes, mergeSemanticAtom, noteLabel, relateSense, saveNotes, senseAtomId, toAtom,
 } from '../src/lib/notebook.ts'
 import type { SenseAtom, SensePayload } from '../src/types.ts'
 
@@ -81,6 +81,22 @@ test('toAtom freezes one term-sense pair and keeps provenance', () => {
   assert.equal(atom.source, 'ai')
   assert.equal(atom.schemaVersion, 1)
   assert.equal(atom.examples.length, 1)
+})
+
+test('same semantic accumulates distinct source contexts without replacing its explanation', () => {
+  const selected = (documentPath: string, pageNumber: number) => ({
+    text: 'within a framework', before: 'operate ', after: '', pageNumber,
+    documentName: documentPath.split('/').pop(), documentPath,
+  })
+  const first = toAtom(makeSense({ definition: 'inside a system of rules' }), 'model-a', undefined, selected('/books/a.pdf', 4))
+  const repeated = toAtom(makeSense({ definition: 'inside specified limits' }), 'model-b', undefined, selected('/books/b.epub', 2))
+  const merged = mergeSemanticAtom(first, repeated)
+
+  assert.equal(merged.id, first.id)
+  assert.equal(merged.definition, 'inside a system of rules')
+  assert.equal(merged.contexts?.length, 2)
+  assert.deepEqual(merged.contexts?.map((context) => context.sourcePath).sort(), ['/books/a.pdf', '/books/b.epub'])
+  assert.deepEqual(mergeSemanticAtom(merged, repeated).contexts?.length, 2, 'same source occurrence is deduplicated')
 })
 
 function atomFor(overrides: Partial<SenseAtom> = {}): SenseAtom {

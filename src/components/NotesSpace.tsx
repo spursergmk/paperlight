@@ -18,7 +18,9 @@ import {
 const KIND_LABELS: Record<VaultNoteKind, string> = {
   daily: '日记',
   report: '日报',
-  sense: '义项',
+  sense: '语义',
+  semantic: '语义',
+  expression: '表达',
   note: '笔记',
   chat: 'vault 对话',
   inbox: '记录本',
@@ -206,6 +208,7 @@ export default function NotesSpace({
   const parsed = useMemo(() => parseNote(draft), [draft])
   const kind: VaultNoteKind = useMemo(() => {
     const declared = frontmatterString(parsed.data, 'kind')
+    if (declared === 'sense') return 'semantic'
     return isVaultNoteKind(declared) ? declared : 'note'
   }, [parsed.data])
 
@@ -375,7 +378,12 @@ export default function NotesSpace({
   const staleReport = Boolean(report && report.date === localDateKey() && report.stale)
 
   return (
-    <div className="notes-space">
+    <div
+      className="notes-space"
+      data-expression-source={activePath?.startsWith('enlightenment/') ? 'enlightenment' : 'note'}
+      data-expression-path={activePath || ''}
+      data-expression-name={activePath ? noteTitleFromPath(activePath) : 'Vault 笔记'}
+    >
       <SpaceRail active="notes" onSelect={onSwitchSpace} onChooseVault={() => void vault.chooseVault()} />
 
       <aside className="notes-tree-pane" style={{ width: `${treeWidth}px` }}>
@@ -588,7 +596,7 @@ export default function NotesSpace({
           <div className="notes-empty-state">
             <ScanText size={26} />
             <strong>{vaultReady ? '打开或新建一份笔记' : '先选择一个 vault 文件夹'}</strong>
-            <span>所有笔记都是 vault 里的 Markdown 文件；在阅读助手里收藏的义项会按资料夹自动归档到 notes/。</span>
+            <span>所有笔记都是 vault 里的 Markdown 文件；在阅读助手里收录的语义会按资料夹自动归档到 notes/。</span>
             <div className="notes-empty-actions">
               {vaultReady && <button className="primary-button" type="button" onClick={() => void refreshDay(false)}><CalendarDays size={14} /> 打开今日记录</button>}
               {vaultReady && <button className="secondary-button" type="button" onClick={() => startCreate('note')}><FileText size={14} /> 新建笔记</button>}
@@ -663,16 +671,16 @@ export default function NotesSpace({
               <h4><Link2 size={12} /> 阅读上下文</h4>
               <p className="sense-plain">
                 正在读 <strong>{readingContext.document}</strong><br />
-                义项与笔记会存到 <code>{readingContext.notesFolder}/</code>
+                语义与笔记会存到 <code>{readingContext.notesFolder}/</code>
               </p>
             </section>
           )}
 
           {vaultReady && pendingSenseCount > 0 && (
             <section className="notes-side-block">
-              <h4>待归档义项（{pendingSenseCount}）</h4>
+              <h4>待归档语义（{pendingSenseCount}）</h4>
               <p className="sense-plain">
-                记录本里还有 {pendingSenseCount} 条义项没有对应的 vault 笔记，所以当天记录清单里的链接暂时点不开。
+                记录本里还有 {pendingSenseCount} 条语义没有对应的 vault 笔记，所以当天记录清单里的链接暂时点不开。
               </p>
               <div className="notes-side-actions">
                 <button type="button" className="subtle-button" disabled={vault.busy} onClick={onSavePendingSenses}>
@@ -723,8 +731,8 @@ export default function NotesSpace({
                   {frontmatterList(parsed.data, 'tags').map((tag) => <span key={tag} className="note-tag">{tag}</span>)}
                 </div>
               )}
-              <h4>关联义项（{linkedAtoms.length}）</h4>
-              {linkedAtoms.length === 0 && <p className="sense-plain">这份笔记没有记录本里的义项（义项卡里点「义项存入 vault」会自动带上）。</p>}
+              <h4>关联语义（{linkedAtoms.length}）</h4>
+              {linkedAtoms.length === 0 && <p className="sense-plain">这份笔记没有记录本里的语义（语义卡里点「语义存入 vault」会自动带上）。</p>}
               <ul className="note-sense-list">
                 {linkedAtoms.map((atom) => (
                   <li key={atom.id}>

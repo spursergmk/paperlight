@@ -186,7 +186,12 @@ export default function ChatSpace({
   const groundedCount = selectedPaths.length
 
   return (
-    <div className="chat-space">
+    <div
+      className="chat-space"
+      data-expression-source="chat"
+      data-expression-path={activeThread?.id ? `chat:${activeThread.id}` : undefined}
+      data-expression-name={activeThread?.title || '自由对话'}
+    >
       <SpaceRail active="chat" onSelect={onSwitchSpace} onChooseVault={() => void vault.chooseVault()} />
 
       {historyOpen && (
