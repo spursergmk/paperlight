@@ -846,6 +846,30 @@ export async function runSmokeTest({ window, projectRoot }) {
     writeFileSync(join(vaultDir, 'materials', 'books', 'book1', 'book1.pdf'), createTestPdf({ pages: 4, title: 'Book One' }))
     mkdirSync(join(vaultDir, 'notes', '_inbox'), { recursive: true })
     writeFileSync(join(vaultDir, 'notes', '_inbox', 'Reading-Log.md'), '---\ntitle: Reading Log\nkind: note\n---\n\nvault 里已有的一份笔记：knowledge and power。This note includes numerous language learning terms for the local search test.\n')
+    const legacySemanticPath = join(vaultDir, 'notes', 'books', 'book1', 'within--inside-framework.md')
+    mkdirSync(join(vaultDir, 'notes', 'books', 'book1'), { recursive: true })
+    writeFileSync(legacySemanticPath, [
+      '---',
+      'title: within · inside-framework',
+      'kind: sense',
+      'created: "2026-02-14T08:00:00.000Z"',
+      'updated: "2026-02-14T08:00:00.000Z"',
+      'tags: [paperlight, sense, within]',
+      'senses: [within|preposition|inside-framework]',
+      'source: deepseek-flash',
+      'folder: books/book1',
+      '---',
+      '# within（preposition · inside-framework）',
+      '',
+      '**语境含义**：用户手动维护的 V1 语义说明。',
+      '',
+      '**英文释义**：用户修改过的旧解释，不应由新 AI 覆盖。',
+      '',
+      '## 我的补充',
+      '',
+      '这段 V1 Markdown 必须原样保留。',
+      '',
+    ].join('\n'))
     mkdirSync(join(vaultDir, 'enlightenment'), { recursive: true })
     // A note from the previous layout: migrating it must keep the whole summary
     // (sub-sections included) and the user's own additions.
@@ -1168,6 +1192,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       return true
     })()`)
     await waitFor(wc, `document.querySelector('.notes-space') !== null && document.querySelector('.note-textarea') !== null`, { label: 'blank note created' })
+    await waitFor(wc, `document.querySelector('.note-textarea')?.value.includes('未命名')`, { label: 'blank Markdown body loaded' })
     const blankNote = await evaluate(wc, `({
       path: document.querySelector('.note-toolbar-path-text')?.textContent || '',
       body: document.querySelector('.note-textarea')?.value || '',
@@ -1614,6 +1639,17 @@ export async function runSmokeTest({ window, projectRoot }) {
         && withinNote.includes('within|preposition|inside-framework-note')
         && withinNote.includes('Foucault-liberal-political-economy.pdf') && withinNote.includes('book1.pdf'),
       withinNote.split('\n').slice(0, 12).join(' | '))
+    record('a V1 sense Markdown file upgrades in place without overwriting the user body',
+      existsSync(legacySemanticPath)
+        && withinNote.includes('kind: semantic')
+        && withinNote.includes('semanticId: within|preposition|inside-framework')
+        && withinNote.includes('semantics: [within|preposition|inside-framework]')
+        && withinNote.includes('senses: [within|preposition|inside-framework]')
+        && withinNote.includes('用户手动维护的 V1 语义说明。')
+        && withinNote.includes('用户修改过的旧解释，不应由新 AI 覆盖。')
+        && withinNote.includes('这段 V1 Markdown 必须原样保留。')
+        && (readdirSync(join(vaultDir, 'notes', 'books', 'book1')).filter((name) => name === 'within--inside-framework.md').length === 1),
+      legacySemanticPath)
   } catch (error) {
     let diagnostic = null
     try {

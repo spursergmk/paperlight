@@ -25,16 +25,16 @@ Paperlight 的版本号规则：**整数部分 = 大版本功能变更，小数�
 
 ### 尚未完成
 
-- P0/P1 全量验收尚未结束：语义确认合并已覆盖 Electron 试用闭环，但旧 Vault 的真实迁移演练、更多 ID/格式差异仍需检查；还需完成更多来源的标记回溯复核、阅读助手单词至全文尺度、Enlightenment 专项研究关联和网页正文导入等。
+- P0/P1 全量验收尚未结束：临时 Vault 已演练代表性的 V1 `kind: sense` 文件原路径升级与用户正文保留；完整旧 Vault 的迁移演练、更多 ID/格式差异仍需检查。还需完成更多来源的标记回溯复核、阅读助手单词至全文尺度、Enlightenment 专项研究关联和网页正文导入等。
 - P0/P1 未完成前不维护分发安装包。当前只更新了 macOS universal `Paperlight.app` 供本地试用；采用 ad-hoc 签名，无公证。包版本未升级，未创建或推送 Git 标签，也未发布 GitHub Release。
 - 构建仍有主 JS chunk 大于 500 KB 的 Vite 警告。
 
 ### 当前验证
 
 - `npm run check`：93 个测试通过，含构建、单元测试和 Node 语法检查；覆盖语义候选判定、确认后别名、原文来源、Vault frontmatter 与用户正文保留。
-- `npm run smoke`：95 项 Electron 桌面检查通过；覆盖 V1 阅读/笔记/对话回归、表达/语义/记录本/Vault Markdown 统一检索与来源回跳、PDF/EPUB 表达、AI 候选确认、PDF/EPUB/TXT/Markdown 标记关闭重开、EPUB/TXT 标记返回来源位置、五段 Daily、阅读时间估算、旧 Daily 迁移、语义跨文档合并/分开及语义摘录链接。
+- `npm run smoke`：96 项 Electron 桌面检查通过；覆盖 V1 阅读/笔记/对话回归、表达/语义/记录本/Vault Markdown 统一检索与来源回跳、PDF/EPUB 表达、AI 候选确认、PDF/EPUB/TXT/Markdown 标记关闭重开、EPUB/TXT 标记返回来源位置、五段 Daily、阅读时间估算、旧 Daily 迁移、V1 语义文件原位兼容、语义跨文档合并/分开及语义摘录链接。
 - `npm run app:mac`：只生成并替换仓库根目录 `Paperlight.app`；universal 架构检查和 `codesign --verify --deep --strict` 通过，原有 `release/` 文件未改动。
-- 打包 App 通过 loopback 调试检查，renderer 已挂载且 `window.paperlight` 安全桥接可用；试用状态目录独立，未复制项目 API Key。
+- 打包 App 在隔离用户目录与空 API Key 环境下启动；其 renderer 静态入口通过 `127.0.0.1` 返回 HTTP 200。未改动 `release/` 分发文件。
 
 ## [1.0.2] - 2026-10-08
 
