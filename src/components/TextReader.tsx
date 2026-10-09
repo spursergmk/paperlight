@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { parseInline } from '../lib/textdoc'
 import type { InlineToken, MarkdownBlock, TextOutlineItem } from '../lib/textdoc'
 import { useFlowReader, type FlowReaderApi, type FlowScrollState } from './useFlowReader'
@@ -35,16 +35,16 @@ function Block({ block, index }: { block: MarkdownBlock; index: number }) {
     }
     case 'list':
       return block.ordered
-        ? <ol className="flow-list">{block.items.map((item, itemIndex) => <li key={itemIndex}><Inline tokens={parseInline(item)} /></li>)}</ol>
-        : <ul className="flow-list">{block.items.map((item, itemIndex) => <li key={itemIndex}><Inline tokens={parseInline(item)} /></li>)}</ul>
+        ? <ol id={`flow-block-${index}`} className="flow-list">{block.items.map((item, itemIndex) => <li key={itemIndex}><Inline tokens={parseInline(item)} /></li>)}</ol>
+        : <ul id={`flow-block-${index}`} className="flow-list">{block.items.map((item, itemIndex) => <li key={itemIndex}><Inline tokens={parseInline(item)} /></li>)}</ul>
     case 'quote':
-      return <blockquote className="flow-quote"><Inline tokens={parseInline(block.text)} /></blockquote>
+      return <blockquote id={`flow-block-${index}`} className="flow-quote"><Inline tokens={parseInline(block.text)} /></blockquote>
     case 'code':
-      return <pre className="flow-code" data-language={block.language || undefined}><code>{block.code}</code></pre>
+      return <pre id={`flow-block-${index}`} className="flow-code" data-language={block.language || undefined}><code>{block.code}</code></pre>
     case 'rule':
-      return <hr className="flow-rule" />
+      return <hr id={`flow-block-${index}`} className="flow-rule" />
     default:
-      return <p className="flow-paragraph"><Inline tokens={parseInline(block.text)} /></p>
+      return <p id={`flow-block-${index}`} className="flow-paragraph"><Inline tokens={parseInline(block.text)} /></p>
   }
 }
 
@@ -125,6 +125,25 @@ export default function TextReader({
   useEffect(() => { apiRef.current = api }, [api, apiRef])
 
   const rendered = blocks.slice(0, visible)
+
+  const scrollToBlock = useCallback((blockIndex: number) => {
+    const index = Math.max(0, Math.min(blocks.length - 1, Math.floor(blockIndex)))
+    setVisible((current) => Math.max(current, index + 1))
+    let attempt = 0
+    const jump = () => {
+      const element = scrollRef.current?.querySelector<HTMLElement>(`#flow-block-${index}`)
+      if (element && scrollRef.current) {
+        scrollRef.current.scrollTop = Math.max(0, element.offsetTop - 16)
+        return
+      }
+      if (attempt++ < 20) window.setTimeout(jump, 40)
+    }
+    window.setTimeout(jump, 0)
+  }, [blocks.length, scrollRef])
+
+  useEffect(() => {
+    apiRef.current = { ...api, scrollToBlock }
+  }, [api, apiRef, scrollToBlock])
 
   return (
     <div

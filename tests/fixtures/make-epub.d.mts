@@ -4,4 +4,5 @@ export declare function createTestEpub(options?: {
   title?: string
   author?: string
   chapters?: string[]
+  includeToc?: boolean
 }): Promise<Uint8Array>

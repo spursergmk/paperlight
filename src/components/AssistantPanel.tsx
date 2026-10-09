@@ -1,5 +1,5 @@
 import {
-  Bookmark, BookOpen, ChevronDown, Languages, Library, Maximize2, Minimize2, Sparkles,
+  Bookmark, BookOpen, Check, ChevronDown, FilePlus2, Languages, Library, Maximize2, Minimize2, Sparkles,
   StickyNote, X,
 } from 'lucide-react'
 import SenseCard from './SenseCard'
@@ -54,6 +54,10 @@ export default function AssistantPanel({
   chatError,
   onSend,
   onSaveExcerpt,
+  onSaveReaderMessage,
+  onOpenSavedReaderAnswer,
+  readerAnswerSavedPath,
+  onSaveReaderAnswer,
   onSaveSense,
   onRetrySense,
   vaultReady,
@@ -107,6 +111,10 @@ export default function AssistantPanel({
   chatError: string
   onSend: (question: string) => void
   onSaveExcerpt: (message: ChatMessage) => void
+  onSaveReaderMessage: (message: ChatMessage) => void
+  onOpenSavedReaderAnswer: (path: string) => void
+  readerAnswerSavedPath: string | null
+  onSaveReaderAnswer: () => void
   onSaveSense: () => void
   onRetrySense: () => void
   vaultReady: boolean
@@ -266,6 +274,16 @@ export default function AssistantPanel({
                 <button
                   className="vault-button"
                   type="button"
+                  disabled={vaultBusy || (!readerAnswerSavedPath && !vaultReady)}
+                  title={readerAnswerSavedPath ? `打开已保存的完整回答：${readerAnswerSavedPath}` : '把当前阅读助手的完整初次回答保存到 notes/inbox'}
+                  onClick={() => readerAnswerSavedPath ? onOpenSavedReaderAnswer(readerAnswerSavedPath) : onSaveReaderAnswer()}
+                >
+                  {readerAnswerSavedPath ? <Check size={13} /> : <FilePlus2 size={13} />}
+                  {readerAnswerSavedPath ? '已存完整回答 · 打开' : '完整回答存入 inbox'}
+                </button>
+                <button
+                  className="vault-button"
+                  type="button"
                   disabled={vaultBusy}
                   title={vaultReady ? `把这条语义写成 Markdown 存进 ${vaultRootName}` : '先在笔记空间里选择 vault 文件夹'}
                   onClick={onSaveSenseToVault}
@@ -323,6 +341,10 @@ export default function AssistantPanel({
         savedMessageIds={savedMessageIds}
         onSend={onSend}
         onSaveExcerpt={onSaveExcerpt}
+        onSaveReaderMessage={onSaveReaderMessage}
+        onOpenSavedAnswer={onOpenSavedReaderAnswer}
+        vaultReady={vaultReady}
+        vaultBusy={vaultBusy}
         onOpenNotebook={() => onTab('notebook')}
       />}
     </aside>

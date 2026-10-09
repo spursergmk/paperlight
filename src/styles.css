@@ -451,6 +451,13 @@ body:has(.splitter.dragging) .reader-scroll { pointer-events: none; }
 .chat-messages li.user { background: #f2f5ef; }
 .chat-messages li.assistant { background: #faf9f5; border: 1px solid #eeede7; }
 .chat-messages p { margin: 0; color: #55604f; font-size: 10px; line-height: 1.75; white-space: pre-wrap; }
+.chat-messages .message-body.markdown-preview { max-width: none; margin: 0; color: #55604f; font-size: 10px; line-height: 1.75; overflow-wrap: anywhere; }
+.chat-messages .message-body.markdown-preview > :last-child { margin-bottom: 0; }
+.chat-messages .message-body .flow-heading { margin: .55em 0 .25em; color: #3d493e; }
+.chat-messages .message-body .flow-h1 { font-size: 1.25em; }
+.chat-messages .message-body .flow-h2 { font-size: 1.15em; }
+.chat-messages .message-body .flow-paragraph, .chat-messages .message-body .flow-list, .chat-messages .message-body .flow-quote { margin-bottom: .45em; }
+.chat-messages .message-body .flow-list { padding-left: 1.35em; }
 .chat-messages button { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 0; border: 0; color: #97a08f; background: transparent; font-size: 9px; cursor: pointer; }
 .chat-messages button.saved { color: #5d7b61; cursor: default; }
 .chat-messages button:disabled { opacity: 1; }
@@ -511,6 +518,7 @@ body:has(.splitter.dragging) .reader-scroll { pointer-events: none; }
 
 /* EPUB chapter body: the book's own CSS is dropped, so these rules apply. */
 .epub-page { padding-top: 4px; }
+.epub-alignment-tail { width: 1px; pointer-events: none; }
 .epub-body > *:first-child { margin-top: 0; }
 .epub-body h1, .epub-body h2, .epub-body h3, .epub-body h4, .epub-body h5, .epub-body h6 {
   margin: 1.7em 0 .7em; color: #2f3a31; font-weight: 650; line-height: 1.4;

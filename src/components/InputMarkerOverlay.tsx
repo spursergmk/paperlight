@@ -102,8 +102,12 @@ export default function InputMarkerOverlay({
     const content = contentRef.current
     if (!container || !content) return
     let frame = 0
+    let fallbackTimer = 0
     const draw = () => {
+      if (frame) window.cancelAnimationFrame(frame)
       frame = 0
+      if (fallbackTimer) window.clearTimeout(fallbackTimer)
+      fallbackTimer = 0
       const containerRect = container.getBoundingClientRect()
       const next: OverlayRect[] = []
       let missing = 0
@@ -132,7 +136,11 @@ export default function InputMarkerOverlay({
     }
     const schedule = () => {
       if (frame) window.cancelAnimationFrame(frame)
+      if (fallbackTimer) window.clearTimeout(fallbackTimer)
       frame = window.requestAnimationFrame(draw)
+      // WebKit may pause animation frames while a window is backgrounded.
+      // Keep a timer fallback so saved source marks still resolve after reopen.
+      fallbackTimer = window.setTimeout(draw, 120)
     }
     schedule()
     const mutation = new MutationObserver(schedule)
@@ -141,16 +149,21 @@ export default function InputMarkerOverlay({
     resize.observe(container)
     resize.observe(content)
     window.addEventListener('resize', schedule)
+    window.addEventListener('focus', schedule)
+    document.addEventListener('visibilitychange', schedule)
     return () => {
       mutation.disconnect()
       resize.disconnect()
       window.removeEventListener('resize', schedule)
+      window.removeEventListener('focus', schedule)
+      document.removeEventListener('visibilitychange', schedule)
       if (frame) window.cancelAnimationFrame(frame)
+      if (fallbackTimer) window.clearTimeout(fallbackTimer)
     }
   }, [containerRef, contentRef, markers])
 
   if (!markers.some((marker) => marker.visualStyle && marker.quote)) return null
-  return <div className="input-marker-overlay" aria-hidden="true">
+  return <div className="input-marker-overlay" aria-hidden="true" data-rendered-rects={rects.length} data-unresolved-count={unresolved}>
     {rects.map((rect, index) => <span
       key={`${rect.markerId}-${index}`}
       className={`input-marker-visual ${rect.style}`}

@@ -9,10 +9,12 @@ const PNG_1PX = Buffer.from(
   'base64',
 )
 
+/** @param {{ title?: string, author?: string, chapters?: string[], includeToc?: boolean }} options */
 export async function createTestEpub({
   title = 'Test Book',
   author = 'Test Author',
   chapters = ['First Chapter', 'Second Chapter'],
+  includeToc = true,
 } = {}) {
   const zip = new JSZip()
   zip.file('mimetype', 'application/epub+zip')
@@ -32,7 +34,7 @@ export async function createTestEpub({
     <dc:identifier id="bookid">urn:uuid:paperlight-test</dc:identifier>
   </metadata>
   <manifest>
-    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    ${includeToc ? '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>' : ''}
     <item id="cover" href="images/cover.png" media-type="image/png" properties="cover-image"/>
     ${items}
   </manifest>
@@ -42,9 +44,9 @@ export async function createTestEpub({
 </package>`)
 
   const links = chapters
-    .map((name, index) => `        <li><a href="chap${index + 1}.xhtml">${name}</a></li>`)
+    .map((name, index) => `        <li><a href="chap${index + 1}.xhtml">${name}</a><ol><li><a href="chap${index + 1}.xhtml#section-${index + 1}">${name} details</a></li></ol></li>`)
     .join('\n')
-  zip.file('OEBPS/nav.xhtml', `<?xml version="1.0" encoding="utf-8"?>
+  if (includeToc) zip.file('OEBPS/nav.xhtml', `<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
   <head><title>Contents</title></head>
   <body>
@@ -63,6 +65,9 @@ ${links}
   <head><title>${name}</title><link rel="stylesheet" href="style.css"/><style>p{color:red}</style></head>
   <body>
     <h1>${name}</h1>
+    ${index === 0 ? Array.from({ length: 12 }, (_, paragraph) => `<p>Alpha chapter lead-in ${paragraph + 1}: this material places the nested contents target below the initial reading position.</p>`).join('\n    ') : ''}
+    <h2 id="section-${index + 1}">${name} details</h2>
+    ${index === 0 ? Array.from({ length: 12 }, (_, paragraph) => `<p>Alpha chapter continuation ${paragraph + 1}: later content ensures the section can align at the reading position.</p>`).join('\n    ') : ''}
     <p>These classifications operate within a broader framework of knowledge.</p>
     <p>Paperlight smoke chapter ${index + 1} of ${chapters.length} for sense lookup.</p>
     <p>The authors take a stance on language learning.</p>

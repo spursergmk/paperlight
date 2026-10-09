@@ -284,6 +284,8 @@ function sanitizeInputMarkers(value: unknown): InputMarker[] {
       ? marker.startOffset : undefined
     const endOffset = typeof marker.endOffset === 'number' && Number.isSafeInteger(marker.endOffset) && marker.endOffset >= 0
       ? marker.endOffset : undefined
+    const blockIndex = typeof marker.blockIndex === 'number' && Number.isSafeInteger(marker.blockIndex) && marker.blockIndex >= 0
+      ? marker.blockIndex : undefined
     const scrollRatio = typeof marker.scrollRatio === 'number' && Number.isFinite(marker.scrollRatio)
       ? Math.max(0, Math.min(1, marker.scrollRatio)) : undefined
     return [{
@@ -300,6 +302,7 @@ function sanitizeInputMarkers(value: unknown): InputMarker[] {
       ...(typeof marker.locationLabel === 'string' && marker.locationLabel ? { locationLabel: marker.locationLabel.slice(0, 300) } : {}),
       ...(startOffset !== undefined ? { startOffset } : {}),
       ...(endOffset !== undefined ? { endOffset } : {}),
+      ...(blockIndex !== undefined ? { blockIndex } : {}),
       ...(scrollRatio !== undefined ? { scrollRatio } : {}),
       comment: typeof marker.comment === 'string' ? marker.comment.slice(0, 2_000) : '',
       createdAt: typeof marker.createdAt === 'string' ? marker.createdAt.slice(0, 60) : new Date().toISOString(),

@@ -92,9 +92,10 @@ async function ensureTextLayer(wc, label, { timeout = 60000 } = {}) {
 
 // The renderer reloads during the restore check, which drops page state, so the
 // canned API responses are installed through one reusable helper.
-async function installSenseStub(wc, stubSense) {
+async function installSenseStub(wc, stubSense, chatAnswer = 'numerous 侧重数量多，比 many 更书面；in large numbers 可表达数量很多。') {
   await evaluate(wc, `(() => {
     window.__senseLookupRequests = []
+    window.__senseChatRequests = []
     const original = window.fetch.bind(window)
     window.fetch = (input, init) => {
       const url = typeof input === 'string' ? input : (input && input.url) || ''
@@ -102,7 +103,7 @@ async function installSenseStub(wc, stubSense) {
         const body = init && init.body ? JSON.parse(init.body) : {}
         const payload = body.task === 'lookup'
           ? (window.__senseLookupRequests.push(body), ${JSON.stringify(stubSense)})
-          : { answer: 'numerous 侧重数量多，比 many 更书面；in large numbers 可表达数量很多。' }
+          : (window.__senseChatRequests.push(body), { answer: ${JSON.stringify(chatAnswer)} })
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       }
       return original(input, init)
@@ -194,6 +195,12 @@ export async function runSmokeTest({ window, projectRoot }) {
   const secondPdf = join(library, 'collection', 'Knowledge-and-Power.pdf')
   writeFileSync(bigPdf, createTestPdf({ pages: 120, title: 'Foucault and Liberal Political Economy' }))
   writeFileSync(secondPdf, createTestPdf({ pages: 24, title: 'Knowledge and Power' }))
+  const printedContentsPdfPath = join(library, 'collection', 'Printed-Contents.pdf')
+  writeFileSync(printedContentsPdfPath, createTestPdf({
+    pages: 4,
+    title: 'Printed Contents Test',
+    contents: [{ title: 'Target section', page: 3 }],
+  }))
   const mixedPdf = join(library, 'collection', 'Mixed-Geometry.pdf')
   writeFileSync(mixedPdf, createTestPdf({ pages: 30, title: 'Mixed Geometry', landscapePages: [4, 11, 17] }))
   const markdownPath = join(library, 'collection', 'Reading-Notes.md')
@@ -221,7 +228,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     ...Array.from({ length: 36 }, (_, index) => `Plain text paragraph ${index + 3}: a stable reading position should return to its original context.`),
     'The unique text marker target remains visible after the document is reopened.',
     ...Array.from({ length: 24 }, (_, index) => `Trailing text paragraph ${index + 1}: the marked passage has room below it for source navigation.`),
-  ].join('\n'))
+  ].join('\n\n'))
   const epubPath = join(library, 'collection', 'Paperlight-Book.epub')
   writeFileSync(epubPath, await createTestEpub({
     title: 'Paperlight Book',
@@ -288,6 +295,182 @@ export async function runSmokeTest({ window, projectRoot }) {
     readingEvents: (window.__paperlightReadingSmokeEvents || []).slice(-20),
     errors: (window.__paperlightErrors || []).slice(-6),
   }))()`
+
+  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'epub-outline') {
+    try {
+      await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'target EPUB outline welcome screen' })
+      wc.send('app:open-paths', [epubPath])
+      await waitFor(wc, `document.querySelector('.epub-body h2') !== null`, { label: 'target EPUB chapter rendered' })
+      await evaluate(wc, `Array.from(document.querySelectorAll('.sidebar-tabs button')).find((button) => button.textContent.includes('目录')).click(); true`)
+      await waitFor(wc, `Array.from(document.querySelectorAll('.outline-entry')).some((button) => button.textContent.includes('Alpha Chapter details'))`, { label: 'target nested EPUB TOC entry' })
+      const before = await evaluate(wc, `(() => { const s = document.querySelector('.reader-scroll'); const h = document.querySelector('.epub-body h2'); return { top: h.getBoundingClientRect().top - s.getBoundingClientRect().top, scrollTop: s.scrollTop, id: h.id, ids: Array.from(document.querySelectorAll('.epub-body [id]')).map((node) => node.id) } })()`)
+      await evaluate(wc, `Array.from(document.querySelectorAll('.outline-entry')).find((button) => button.textContent.includes('Alpha Chapter details')).click(); true`)
+      await sleep(600)
+      const after = await evaluate(wc, `(() => { const s = document.querySelector('.reader-scroll'); const h = document.querySelector('.epub-body h2'); return { top: h.getBoundingClientRect().top - s.getBoundingClientRect().top, scrollTop: s.scrollTop, id: h.id } })()`)
+      record('target EPUB fragment entry scrolls from below to its heading', after.id === 'section-1' && before.top > 130 && after.top < 80 && after.scrollTop > before.scrollTop, JSON.stringify({ before, after }))
+    } catch (error) {
+      record('target EPUB outline run completed', false, error instanceof Error ? error.stack || error.message : String(error))
+    }
+    const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
+    writeFileSync(join(artifacts, 'smoke-target-report.json'), JSON.stringify(report, null, 2))
+    console.log(`${failures === 0 ? 'TARGET SMOKE OK' : `TARGET SMOKE FAILED (${failures})`}`)
+    app.exit(failures === 0 ? 0 : 1)
+    return report
+  }
+
+  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'flow-bookmark') {
+    try {
+      await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'target bookmark welcome screen' })
+      wc.send('app:open-paths', [textPath])
+      await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'target TXT loaded' })
+      await evaluate(wc, `(() => {
+        const scroller = document.querySelector('.reader-scroll')
+        if (!scroller) throw new Error('reader scroller is missing')
+        scroller.scrollTop = scroller.scrollHeight
+        scroller.dispatchEvent(new Event('scroll', { bubbles: true }))
+        return true
+      })()`)
+      await waitFor(wc, `Array.from(document.querySelectorAll('.flow-paragraph')).some((node) => node.textContent.includes('unique text marker target'))`, { label: 'bookmark target paragraph mounted' })
+      await evaluate(wc, `(() => {
+        const scroller = document.querySelector('.reader-scroll')
+        const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((node) => node.textContent.includes('unique text marker target'))
+        const top = paragraph.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+        scroller.scrollTop += top - 140
+        scroller.dispatchEvent(new Event('scroll', { bubbles: true }))
+        return true
+      })()`)
+      await sleep(100)
+      await evaluate(wc, `document.querySelector('.input-marker-menu-toggle').click(); true`)
+      await evaluate(wc, `document.querySelector('.input-marker-progress').click(); true`)
+      await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.querySelector('small')?.textContent.includes('进度'))`, { label: 'target progress bookmark created' })
+      const saved = await evaluate(wc, `(() => {
+        const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+        return (state.inputMarkers || []).find((item) => item.sourcePath === ${JSON.stringify(textPath)} && item.purpose === 'progress') || null
+      })()`)
+      record('target TXT bookmark stores the visible paragraph and block index', saved?.quote?.includes('unique text marker target') && Number.isInteger(saved.blockIndex), JSON.stringify(saved))
+      await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
+      await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Plain-Notes.txt'))`, { label: 'target bookmarked TXT closed' })
+      wc.send('app:open-paths', [textPath])
+      await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'target bookmarked TXT reopened' })
+      await evaluate(wc, `if (!document.querySelector('.input-marker-menu')) document.querySelector('.input-marker-menu-toggle').click(); true`)
+      await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.querySelector('small')?.textContent.includes('进度'))`, { label: 'target bookmark restored in list' })
+      await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).find((item) => item.querySelector('small')?.textContent.includes('进度')).querySelector('button:first-child').click(); true`)
+      const restored = await waitFor(wc, `(() => {
+        const scroller = document.querySelector('.reader-scroll')
+        const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((node) => node.textContent.includes('unique text marker target'))
+        return scroller && paragraph && Math.abs(paragraph.getBoundingClientRect().top - scroller.getBoundingClientRect().top) < 180
+      })()`, { label: 'target bookmark jumps to original paragraph' })
+      record('target TXT bookmark returns to the exact paragraph after reopening', Boolean(restored), JSON.stringify({ quote: saved?.quote, blockIndex: saved?.blockIndex }))
+    } catch (error) {
+      record('target TXT bookmark run completed', false, error instanceof Error ? error.stack || error.message : String(error))
+    }
+    const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
+    writeFileSync(join(artifacts, 'smoke-target-report.json'), JSON.stringify(report, null, 2))
+    console.log(`${failures === 0 ? 'TARGET SMOKE OK' : `TARGET SMOKE FAILED (${failures})`}`)
+    app.exit(failures === 0 ? 0 : 1)
+    return report
+  }
+
+  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'flow-marker') {
+    try {
+      await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'target marker welcome screen' })
+      wc.send('app:open-paths', [markdownPath])
+      await waitFor(wc, `document.querySelector('.flow-paragraph') !== null`, { label: 'target Markdown loaded' })
+      const selected = await selectTextForMarker('.flow-page', 'reflowed reading position')
+      await waitFor(wc, `document.querySelector('.input-mark-inline') !== null`, { label: 'target Markdown selection action' })
+      await evaluate(wc, `document.querySelector('.input-mark-inline').click(); true`)
+      await waitFor(wc, `document.querySelector('.input-marker-composer') !== null`, { label: 'target Markdown mark composer' })
+      await evaluate(wc, `(() => {
+        const select = document.querySelector('.input-marker-visual-choice select')
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+        setter.call(select, 'underline')
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+        document.querySelector('.input-marker-composer > footer .primary-button').click()
+        return true
+      })()`)
+      await waitFor(wc, `Number(document.querySelector('.input-marker-overlay')?.dataset.renderedRects || 0) > 0 || Number(document.querySelector('.input-marker-overlay')?.dataset.unresolvedCount || 0) > 0`, { label: 'target marker overlay layout result' })
+      const detail = await evaluate(wc, `(() => {
+        const marker = (JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').inputMarkers || []).find((item) => item.quote === 'reflowed reading position')
+        const overlay = document.querySelector('.input-marker-overlay')
+        const rect = (() => { const range = document.createRange(); const node = Array.from(document.querySelectorAll('.flow-page *')).find((item) => item.childNodes.length === 1 && item.firstChild?.nodeType === Node.TEXT_NODE && item.textContent.includes(marker?.quote))?.firstChild; if (!node) return null; const start = node.textContent.indexOf(marker.quote); range.setStart(node, start); range.setEnd(node, start + marker.quote.length); const item = range.getBoundingClientRect(); return { width: item.width, height: item.height } })()
+        return { selected: ${selected}, marker, rects: overlay?.dataset.renderedRects || '', unresolved: overlay?.dataset.unresolvedCount || '', rect }
+      })()`)
+      record('target Markdown quote creates a rendered visual marker', Number(detail.rects) > 0, JSON.stringify(detail))
+      await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
+      await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Reading-Notes.md'))`, { label: 'target marked Markdown closed' })
+      wc.send('app:open-paths', [markdownPath])
+      await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Reading-Notes.md')`, { label: 'target marked Markdown reopened' })
+      await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'target saved visual marker restored after reopening' })
+      const restored = await evaluate(wc, `(() => ({ rects: document.querySelector('.input-marker-overlay')?.dataset.renderedRects || '0', unresolved: document.querySelector('.input-marker-overlay')?.dataset.unresolvedCount || '0' }))()`)
+      record('target saved source quote renders a visual mark after reopen', Number(restored.rects) > 0, JSON.stringify(restored))
+
+      wc.send('app:open-paths', [epubPath])
+      await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Alpha Chapter'`, { label: 'target EPUB Alpha chapter loaded' })
+      const epubPhrase = 'The authors take a stance on language learning.'
+      const epubSelected = await selectTextForMarker('.epub-body', epubPhrase)
+      await waitFor(wc, `document.querySelector('.input-mark-inline') !== null`, { label: 'target EPUB input marker action' })
+      await evaluate(wc, `document.querySelector('.input-mark-inline').click(); true`)
+      await waitFor(wc, `document.querySelector('.input-marker-composer') !== null`, { label: 'target EPUB marker composer' })
+      await evaluate(wc, `(() => {
+        const select = document.querySelector('.input-marker-visual-choice select')
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+        setter.call(select, 'underline')
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+        document.querySelector('.input-marker-composer > footer .primary-button').click()
+        return true
+      })()`)
+      const epubMarker = await evaluate(wc, `(() => {
+        const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+        return (state.inputMarkers || []).find((item) => item.sourcePath === ${JSON.stringify(epubPath)} && item.quote === ${JSON.stringify(epubPhrase)}) || null
+      })()`)
+      record('target EPUB mark stores its original chapter and stable paragraph index', epubSelected && epubMarker?.pageNumber === 1 && Number.isInteger(epubMarker.blockIndex), JSON.stringify(epubMarker))
+      await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
+      await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Paperlight-Book.epub'))`, { label: 'target EPUB closed after marking' })
+      wc.send('app:open-paths', [epubPath])
+      await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Paperlight-Book.epub')`, { label: 'target EPUB reopened after marking' })
+      await evaluate(wc, `if (!document.querySelector('.input-marker-menu')) document.querySelector('.input-marker-menu-toggle').click(); true`)
+      await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.textContent.includes(${JSON.stringify(epubPhrase)}))`, { label: 'target EPUB marker restored in list' })
+      const beforeEpubJump = await evaluate(wc, `(() => { const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}'); const scroller = document.querySelector('.reader-scroll'); return { activePath: state.session?.activePath, markerPath: ${JSON.stringify(epubMarker?.sourcePath || '')}, chapter: document.querySelector('.epub-body h1')?.textContent, scrollTop: scroller?.scrollTop, markerRows: document.querySelectorAll('.input-marker-list-item').length } })()`)
+      await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).find((item) => item.textContent.includes(${JSON.stringify(epubPhrase)})).querySelector('button:first-child').click(); true`)
+      await waitFor(wc, `document.querySelector('.input-marker-menu') === null`, { label: 'target EPUB marker row click closes the marker menu' })
+      await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Alpha Chapter'`, { label: 'target EPUB marker returns to Alpha Chapter' })
+      await waitFor(wc, `(() => {
+        const id = ${JSON.stringify(epubMarker?.id || '')}
+        const overlay = document.querySelector('.input-marker-overlay')
+        const visual = document.querySelector('.input-marker-visual[data-marker-id="' + CSS.escape(id) + '"]')
+        return Boolean(visual && Number(overlay?.dataset.renderedRects) > 0 && Number(overlay?.dataset.unresolvedCount) === 0)
+      })()`, { label: 'target EPUB marker highlights the exact source quote' })
+      let alignment = false
+      try {
+        await waitFor(wc, `(() => {
+          const scroller = document.querySelector('.reader-scroll')
+          const visual = document.querySelector('.input-marker-visual[data-marker-id="' + CSS.escape(${JSON.stringify(epubMarker?.id || '')}) + '"]')
+          const top = visual && scroller ? visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null
+          return top !== null && top >= 50 && top <= 220
+        })()`, { label: 'target EPUB marker aligns the original quote', timeout: 5000 })
+        alignment = true
+      } catch {
+        // Keep the strict assertion and capture the actual scroll state for repair.
+      }
+      const epubReturn = await evaluate(wc, `(() => {
+        const scroller = document.querySelector('.reader-scroll')
+        const id = ${JSON.stringify(epubMarker?.id || '')}
+        const visual = document.querySelector('.input-marker-visual[data-marker-id="' + CSS.escape(id) + '"]')
+        const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+        const target = document.querySelector('[data-paperlight-block-index="' + ${JSON.stringify(String(epubMarker?.blockIndex ?? ''))} + '"]')
+        return { heading: document.querySelector('.epub-body h1')?.textContent, top: visual && scroller ? visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null, targetTop: target && scroller ? target.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null, scrollTop: scroller?.scrollTop, activePath: state.session?.activePath, markerPath: ${JSON.stringify(epubMarker?.sourcePath || '')}, blockIndex: ${JSON.stringify(epubMarker?.blockIndex ?? null)}, notice: document.querySelector('.input-marker-notice')?.textContent || '', rendered: document.querySelector('.input-marker-overlay')?.dataset.renderedRects, unresolved: document.querySelector('.input-marker-overlay')?.dataset.unresolvedCount }
+      })()`)
+      record('target EPUB marker returns to and aligns the exact highlighted passage', alignment && epubReturn.heading === 'Alpha Chapter' && epubReturn.top >= 50 && epubReturn.top <= 220 && epubReturn.unresolved === '0', JSON.stringify({ before: beforeEpubJump, after: epubReturn }))
+    } catch (error) {
+      record('target marker run completed', false, error instanceof Error ? error.stack || error.message : String(error))
+    }
+    const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
+    writeFileSync(join(artifacts, 'smoke-target-report.json'), JSON.stringify(report, null, 2))
+    console.log(`${failures === 0 ? 'TARGET SMOKE OK' : `TARGET SMOKE FAILED (${failures})`}`)
+    app.exit(failures === 0 ? 0 : 1)
+    return report
+  }
+
   try {
     await waitFor(wc, `document.querySelectorAll('.welcome-card').length > 0`, { label: 'welcome screen' })
     record('welcome screen renders without a document', true)
@@ -358,6 +541,14 @@ export async function runSmokeTest({ window, projectRoot }) {
       await evaluate(wc, `document.querySelector('.pdf-page canvas')?.dispatchEvent(
         new PointerEvent('pointerdown', { bubbles: true, composed: true, pointerType: 'mouse', isPrimary: true }),
       )`)
+      // Keep this positive activity scenario active even if macOS later moves
+      // native focus back to the automation host; the production blur handler
+      // still runs, and the next simulated reader movement starts a fresh window.
+      await evaluate(wc, `window.__paperlightReadingSmokePulse = window.setInterval(() => {
+        document.querySelector('.pdf-page canvas')?.dispatchEvent(
+          new PointerEvent('pointermove', { bubbles: true, composed: true, pointerType: 'mouse', isPrimary: true }),
+        )
+      }, 4000); true`)
     }
     const readingFocus = await evaluate(wc, `({ focused: document.hasFocus(), hidden: document.hidden, activeSpace: JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').activeSpace, path: JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath })`)
     console.log(`  [reading timer probe] ${JSON.stringify(readingFocus)}`)
@@ -365,6 +556,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       `(() => { const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}'); return state.readingActivity?.['${readingDayKey}']?.seconds > 0 ? state.readingActivity['${readingDayKey}'] : null })()`,
       { timeout: 38000, label: 'active reading estimate after the next timer tick' },
     )
+    await evaluate(wc, `window.clearInterval(window.__paperlightReadingSmokePulse); delete window.__paperlightReadingSmokePulse; true`)
     record('Daily records estimated time only after a foreground reader interaction',
       Boolean(activity?.seconds > 0 && activity.sources?.some((source) => source.sourcePath === bigPdf)),
       JSON.stringify(activity))
@@ -746,6 +938,20 @@ export async function runSmokeTest({ window, projectRoot }) {
     const markdownOutline = await evaluate(wc, `Array.from(document.querySelectorAll('.outline-entry span')).map((n) => n.textContent)`)
     record('Markdown headings become outline entries', markdownOutline.includes('Paperlight Markdown Notes') && markdownOutline.includes('Section two'), markdownOutline.join(' | '))
 
+    wc.send('app:open-paths', [printedContentsPdfPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Printed-Contents.pdf')`, { label: 'PDF with printed contents page' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.sidebar-tabs button')).find((b) => b.textContent.includes('目录')).click(); true`)
+    await waitFor(wc, `Array.from(document.querySelectorAll('.outline-entry span')).some((n) => n.textContent.includes('Target section'))`, { label: 'printed PDF contents recognized' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.outline-entry')).find((b) => b.textContent.includes('Target section')).click(); true`)
+    await waitFor(wc, `document.querySelector('.page-number-input')?.value === '3'`, { label: 'printed contents jumps to its listed page' })
+    await waitFor(wc, `Boolean(document.querySelector('.pdf-page-shell[data-page-number="3"]'))`, { label: 'target PDF page is mounted' })
+    const printedContentsJump = await evaluate(wc, `({ page: document.querySelector('.page-number-input')?.value, targetMounted: Boolean(document.querySelector('.pdf-page-shell[data-page-number="3"]')) })`)
+    record('a PDF without embedded bookmarks recognizes printed contents and jumps to the listed page', printedContentsJump.page === '3' && printedContentsJump.targetMounted, JSON.stringify(printedContentsJump))
+    wc.send('app:open-paths', [markdownPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Reading-Notes.md')`, { label: 'return to Markdown after PDF contents check' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab')).find((tab) => tab.textContent.includes('Printed-Contents.pdf'))?.querySelector('.doc-tab-close')?.click(); true`)
+    await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Printed-Contents.pdf'))`, { label: 'close printed-contents test PDF' })
+
     await evaluate(wc, `(() => {
       const tab = Array.from(document.querySelectorAll('.sidebar-tabs button')).find((b) => b.textContent.includes('文件'))
       tab.click()
@@ -790,6 +996,8 @@ export async function runSmokeTest({ window, projectRoot }) {
     const markdownMarkerProbe = await evaluate(wc, `(() => ({
       visual: document.querySelectorAll('.input-marker-visual.underline').length,
       unresolved: document.querySelector('.input-marker-unresolved')?.textContent || '',
+      renderedRects: document.querySelector('.input-marker-overlay')?.dataset.renderedRects || '',
+      unresolvedCount: document.querySelector('.input-marker-overlay')?.dataset.unresolvedCount || '',
       overlays: document.querySelectorAll('.input-marker-overlay').length,
       sourcePath: JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath || '',
       savedMarkers: (JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').inputMarkers || []).filter((marker) => marker.sourcePath === JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath).length,
@@ -861,9 +1069,9 @@ export async function runSmokeTest({ window, projectRoot }) {
     const savedTextMarker = await evaluate(wc, `(() => {
       const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
       const marker = (state.inputMarkers || []).find((item) => item.sourcePath === ${JSON.stringify(textPath)} && item.quote === ${JSON.stringify(textMarkerQuote)})
-      return { scrollRatio: marker?.scrollRatio, quote: marker?.quote }
+      return { scrollRatio: marker?.scrollRatio, blockIndex: marker?.blockIndex, quote: marker?.quote }
     })()`)
-    record('TXT input markers retain a source reading position', textMarkerSelection && savedTextMarker.scrollRatio > 0.3, JSON.stringify(savedTextMarker))
+    record('TXT input markers retain a source reading position', textMarkerSelection && savedTextMarker.scrollRatio > 0.3 && Number.isInteger(savedTextMarker.blockIndex), JSON.stringify(savedTextMarker))
     await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
     await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Plain-Notes.txt'))`, { label: 'marked text source closed' })
     wc.send('app:open-paths', [textPath])
@@ -872,13 +1080,46 @@ export async function runSmokeTest({ window, projectRoot }) {
     await evaluate(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); scroller.scrollTop = 0; scroller.dispatchEvent(new Event('scroll', { bubbles: true })); document.querySelector('.input-marker-menu-toggle').click(); return true })()`)
     await waitFor(wc, `document.querySelector('.input-marker-list-item button')?.textContent.includes('unique text marker target')`, { label: 'text marker listed after reopen' })
     await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item button')).find((button) => button.textContent.includes('unique text marker target')).click(); true`)
-    await sleep(220)
+    await waitFor(wc, `(() => {
+      const scroller = document.querySelector('.reader-scroll')
+      const visual = document.querySelector('.input-marker-visual.highlight')
+      const visualTop = visual && scroller ? visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null
+      return visualTop !== null && visualTop >= 70 && visualTop <= 220
+    })()`, { label: 'TXT marker jump aligns the original text after overlay redraw', timeout: 5000 })
     const textMarkerJump = await evaluate(wc, `(() => {
       const scroller = document.querySelector('.reader-scroll')
       const visual = document.querySelector('.input-marker-visual.highlight')
       return { scrollTop: scroller?.scrollTop || 0, visualTop: visual && scroller ? visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null }
     })()`)
     record('TXT marker menu jumps back to the marked source passage', textMarkerJump.scrollTop > 0 && textMarkerJump.visualTop >= 70 && textMarkerJump.visualTop <= 220, JSON.stringify(textMarkerJump))
+    await evaluate(wc, `(() => {
+      const scroller = document.querySelector('.reader-scroll')
+      const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((node) => node.textContent.includes('unique text marker target'))
+      if (!scroller || !paragraph) throw new Error('marked paragraph is not mounted')
+      const top = paragraph.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+      scroller.scrollTop += top - 140
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }))
+      return true
+    })()`)
+    await sleep(100)
+    await evaluate(wc, `document.querySelector('.input-marker-menu-toggle').click(); true`)
+    await evaluate(wc, `document.querySelector('.input-marker-progress').click(); true`)
+    await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.querySelector('small')?.textContent.includes('进度') && item.textContent.includes('unique text marker target'))`, { label: 'paragraph progress bookmark created' })
+    const savedParagraphBookmark = await evaluate(wc, `(() => {
+      const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+      return (state.inputMarkers || []).find((item) => item.sourcePath === ${JSON.stringify(textPath)} && item.purpose === 'progress' && item.quote?.includes('unique text marker target')) || null
+    })()`)
+    record('a reading progress bookmark stores the visible paragraph text and block position', Boolean(savedParagraphBookmark?.quote) && Number.isInteger(savedParagraphBookmark?.blockIndex), JSON.stringify({ quote: savedParagraphBookmark?.quote, blockIndex: savedParagraphBookmark?.blockIndex, ratio: savedParagraphBookmark?.scrollRatio }))
+    await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
+    await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Plain-Notes.txt'))`, { label: 'paragraph-bookmarked text closed' })
+    wc.send('app:open-paths', [textPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'paragraph-bookmarked text reopened' })
+    await evaluate(wc, `if (!document.querySelector('.input-marker-menu')) document.querySelector('.input-marker-menu-toggle').click(); true`)
+    await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.querySelector('small')?.textContent.includes('进度') && item.textContent.includes('unique text marker target'))`, { label: 'saved paragraph bookmark available after reopen' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).find((item) => item.querySelector('small')?.textContent.includes('进度') && item.textContent.includes('unique text marker target')).querySelector('button:first-child').click(); true`)
+    await waitFor(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((node) => node.textContent.includes('unique text marker target')); return Boolean(scroller && paragraph && Math.abs(paragraph.getBoundingClientRect().top - scroller.getBoundingClientRect().top) < 180) })()`, { label: 'bookmark restores the original paragraph position' })
+    const bookmarkPosition = await evaluate(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((node) => node.textContent.includes('unique text marker target')); return { quote: paragraph?.textContent, top: paragraph && scroller ? Math.round(paragraph.getBoundingClientRect().top - scroller.getBoundingClientRect().top) : null } })()`)
+    record('closing and reopening TXT returns to the bookmarked paragraph itself', bookmarkPosition.quote?.includes('unique text marker target') && bookmarkPosition.top >= 0 && bookmarkPosition.top < 180, JSON.stringify(bookmarkPosition))
 
     // ------------------------------------------------------------------- EPUB
     wc.send('app:open-paths', [epubPath])
@@ -905,6 +1146,12 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelectorAll('.outline-entry').length >= 2`, { label: 'epub outline' })
     const epubOutline = await evaluate(wc, `Array.from(document.querySelectorAll('.outline-entry span')).map((n) => n.textContent)`)
     record('EPUB table of contents is available', epubOutline.includes('Alpha Chapter') && epubOutline.includes('Beta Chapter'), epubOutline.join(' | '))
+
+    await evaluate(wc, `Array.from(document.querySelectorAll('.outline-entry')).find((button) => button.textContent.includes('Alpha Chapter details')).click(); true`)
+    await waitFor(wc, `document.querySelector('.epub-body h2')?.textContent === 'Alpha Chapter details'`, { label: 'EPUB nested heading target is present' })
+    await waitFor(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); const heading = document.querySelector('.epub-body h2'); return Boolean(scroller && heading && Math.abs(heading.getBoundingClientRect().top - scroller.getBoundingClientRect().top) < 80) })()`, { label: 'EPUB nested contents entry scrolls to its anchor' })
+    const epubAnchorJump = await evaluate(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); const heading = document.querySelector('.epub-body h2'); return { title: heading?.textContent, top: heading && scroller ? Math.round(heading.getBoundingClientRect().top - scroller.getBoundingClientRect().top) : null } })()`)
+    record('EPUB nested contents entries preserve and navigate to chapter fragment anchors', epubAnchorJump.title === 'Alpha Chapter details' && epubAnchorJump.top >= 0 && epubAnchorJump.top < 80, JSON.stringify(epubAnchorJump))
 
     // Chapter navigation.
     await evaluate(wc, `(() => {
@@ -935,25 +1182,17 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.query-meta')?.textContent.includes('Paperlight-Book.epub')`, { label: 'epub selection handed to the assistant' })
     record('selecting text inside an EPUB chapter pre-fills the query without auto-sending', true)
 
-    // The app writes its state through a 400 ms debounce; poll instead of
-    // guessing, and report the browser copy when the file disagrees.
-    const statePath = join(app.getPath('userData'), 'paperlight-state.json')
-    let epubTab = null
-    let diskTabs = -1
-    for (let attempt = 0; attempt < 20 && !epubTab; attempt += 1) {
-      await sleep(300)
+    const persistedBetaChapter = await waitFor(wc, `(() => {
       try {
-        const disk = JSON.parse(readFileSync(statePath, 'utf8'))
-        diskTabs = disk.session.tabs.length
-        epubTab = disk.session.tabs.find((tab) => tab.path.endsWith('Paperlight-Book.epub'))
-      } catch {
-        diskTabs = -1
-      }
-    }
-    const browserTabs = await evaluate(wc, `(() => {
-      try { return JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')?.session?.tabs?.length ?? -1 } catch { return -2 }
-    })()`)
-    record('EPUB chapter position is persisted', epubTab?.chapterIndex === 1, `chapterIndex=${epubTab?.chapterIndex} diskTabs=${diskTabs} browserTabs=${browserTabs}`)
+        const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+        return state.session?.tabs?.find((tab) => tab.path.endsWith('Paperlight-Book.epub'))?.chapterIndex === 1
+      } catch { return false }
+    })()`, { label: 'EPUB chapter position reaches persisted browser state' })
+    const epubReloaded = new Promise((resolve) => wc.once('did-finish-load', resolve))
+    wc.reload()
+    await epubReloaded
+    await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Beta Chapter'`, { label: 'EPUB chapter restored after renderer reload', timeout: 30000 })
+    record('EPUB chapter position survives renderer reload', Boolean(persistedBetaChapter))
     await screenshot(window, artifacts, '14-epub.png')
 
     // ------------------------------------------------- notes vault workspace
@@ -961,7 +1200,9 @@ export async function runSmokeTest({ window, projectRoot }) {
     mkdirSync(join(vaultDir, 'materials', 'books', 'book1'), { recursive: true })
     writeFileSync(join(vaultDir, 'materials', 'books', 'book1', 'book1.pdf'), createTestPdf({ pages: 4, title: 'Book One' }))
     mkdirSync(join(vaultDir, 'notes', '_inbox'), { recursive: true })
-    writeFileSync(join(vaultDir, 'notes', '_inbox', 'Reading-Log.md'), '---\ntitle: Reading Log\nkind: note\n---\n\nvault 里已有的一份笔记：knowledge and power。This note includes numerous language learning terms for the local search test.\n')
+    const legacyInboxFile = join(vaultDir, 'notes', '_inbox', 'Reading-Log.md')
+    const originalLegacyInbox = Buffer.from('---\ntitle: Reading Log\nkind: note\n---\n\nvault 里已有的一份笔记：knowledge and power。This note includes numerous language learning terms for the local search test.\n')
+    writeFileSync(legacyInboxFile, originalLegacyInbox)
     const legacySemanticPath = join(vaultDir, 'notes', 'books', 'book1', 'within--inside-framework.md')
     mkdirSync(join(vaultDir, 'notes', 'books', 'book1'), { recursive: true })
     writeFileSync(legacySemanticPath, [
@@ -1132,14 +1373,24 @@ export async function runSmokeTest({ window, projectRoot }) {
     await addResearchSource(researchMaterialPath)
     await addResearchSource(researchNotePath)
     const researchPath = await evaluate(wc, `document.querySelector('.note-toolbar-path-text')?.textContent || ''`)
-    await sleep(1500)
-    const researchMarkdown = readFileSync(join(vaultDir, researchPath), 'utf8')
+    const researchFile = join(vaultDir, researchPath)
+    let researchMarkdown = ''
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try { researchMarkdown = readFileSync(researchFile, 'utf8') } catch { researchMarkdown = '' }
+      const hasExpectedLinks = researchMarkdown.includes(`[[${researchMaterialPath}]]`) && researchMarkdown.includes(`[[${researchNotePath}]]`)
+      if (researchMarkdown.includes('kind: research') && researchMarkdown.includes('# Argument and evidence') && hasExpectedLinks) break
+      await sleep(200)
+    }
+    const originalResearchNote = Buffer.from(originalLegacyInbox)
+    const researchSourcesUntouched = originalResearchMaterial.equals(readFileSync(join(vaultDir, researchMaterialPath)))
+      && originalResearchNote.equals(readFileSync(join(vaultDir, researchNotePath)))
+    const researchLinksSaved = researchMarkdown.includes('kind: research')
+      && researchMarkdown.includes('# Argument and evidence')
+      && researchMarkdown.includes(`[[${researchMaterialPath}]]`)
+      && researchMarkdown.includes(`[[${researchNotePath}]]`)
     record('a free-form Enlightenment research note links a source PDF and a saved note without modifying either source',
-      researchMarkdown.includes('kind: research')
-        && researchMarkdown.includes('# Argument and evidence')
-        && researchMarkdown.includes(`[[${researchMaterialPath}]]`)
-        && researchMarkdown.includes(`[[${researchNotePath}]]`)
-        && originalResearchMaterial.equals(readFileSync(join(vaultDir, researchMaterialPath))), researchPath)
+      researchLinksSaved && researchSourcesUntouched,
+      JSON.stringify({ researchLinksSaved, researchSourcesUntouched, path: researchPath }))
     await evaluate(wc, `Array.from(document.querySelectorAll('.note-sense-list button')).find((button) => button.title === ${JSON.stringify(researchMaterialPath)})?.click(); true`)
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'research link returns to original material' })
     record('a linked research source opens the original material in the reader', true)
@@ -1209,7 +1460,9 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.reader-toolbar') !== null`, { label: 'switch to reader for expression capture' })
     wc.send('app:open-paths', [expressionPdfPath])
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'vault source PDF opened' })
-    await waitFor(wc, `document.querySelector('.textLayer span')?.textContent`, { label: 'vault source PDF text layer' })
+    const sourcePdfLayer = await ensureTextLayer(wc, 'vault source PDF')
+    record('vault source PDF text layer is available for expression capture', sourcePdfLayer.ok, JSON.stringify(sourcePdfLayer))
+    if (!sourcePdfLayer.ok) throw new Error(`vault source PDF text layer unavailable: ${JSON.stringify(sourcePdfLayer)}`)
     const pdfSelection = await selectPhrase('.textLayer', 'The authors take a stance on language learning.')
     await waitFor(wc, `document.querySelector('.expression-capture-popover') !== null`, { label: 'direct expression capture from PDF' })
     record('a PDF expression can be captured without first saving a semantic or note', pdfSelection)
@@ -1267,6 +1520,13 @@ export async function runSmokeTest({ window, projectRoot }) {
     record('PDF marks and visual positions persist after closing and reopening the source', true)
 
     wc.send('app:open-paths', [epubPath])
+    await waitFor(wc, `document.querySelector('.epub-body h1') !== null`, { label: 'EPUB reopened for expression and marker capture' })
+    await evaluate(wc, `(() => {
+      if (document.querySelector('.epub-body h1')?.textContent === 'Alpha Chapter') return true
+      document.querySelectorAll('.page-navigation .toolbar-button')[0]?.click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Alpha Chapter'`, { label: 'EPUB capture starts from Alpha Chapter' })
     await waitFor(wc, `Array.from(document.querySelectorAll('.epub-body p')).some((paragraph) => paragraph.textContent.includes('The authors take a stance'))`, { label: 'EPUB expression source' })
     const epubSelection = await selectPhrase('.epub-body', 'The authors take a stance on language learning.')
     await waitFor(wc, `document.querySelector('.expression-capture-popover') !== null`, { label: 'direct expression capture from EPUB' })
@@ -1292,7 +1552,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'EPUB underline restored from source text' })
     const epubFollowupSelection = await selectPhrase('.epub-body', 'The authors take a stance on language learning.')
     await waitFor(wc, `document.querySelector('#query-term')?.value.trim().length > 0`, { label: 'EPUB follow-up query prefilled' })
-    await evaluate(wc, `window.__senseLookupRequests = []; true`)
+    await installSenseStub(wc, stubSense)
     await evaluate(wc, `document.querySelector('.query-go').click(); true`)
     await waitFor(wc, `(window.__senseLookupRequests || []).length >= 1`, { label: 'explicit EPUB query reaches the AI client' })
     await waitFor(wc, `document.querySelector('.sense-meaning') !== null`, { label: 'explicit EPUB sense query before contextual follow-up' })
@@ -1302,11 +1562,36 @@ export async function runSmokeTest({ window, projectRoot }) {
     wc.send('app:open-paths', [epubPath])
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Paperlight-Book.epub')`, { label: 'marked EPUB reopened' })
     await evaluate(wc, `if (!document.querySelector('.input-marker-menu')) document.querySelector('.input-marker-menu-toggle').click(); true`)
-    await waitFor(wc, `document.querySelector('.input-marker-list-item button') !== null`, { label: 'saved EPUB marker available after reopen' })
-    await evaluate(wc, `document.querySelector('.input-marker-list-item button').click(); true`)
-    await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent.includes('Beta Chapter')`, { label: 'saved EPUB marker jumps to its chapter' })
-    await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'EPUB mark restored after reopen' })
-    record('EPUB visual input marks persist and return to their chapter after reopening', epubMarkSelection)
+    await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.textContent.includes('The authors take a stance'))`, { label: 'saved EPUB marker available after reopen' })
+    const epubSavedMarker = await evaluate(wc, `(() => {
+      const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+      return (state.inputMarkers || []).find((item) => item.sourcePath === ${JSON.stringify(epubPath)} && item.quote?.includes('The authors take a stance')) || null
+    })()`)
+    await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Alpha Chapter'`, { label: 'EPUB chapter is ready before setting the jump origin' })
+    await evaluate(wc, `document.querySelector('.reader-scroll').scrollTop = 0; true`)
+    await waitFor(wc, `document.querySelector('.reader-scroll')?.scrollTop === 0`, { label: 'EPUB marker jump starts from a different reading position' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).find((item) => item.textContent.includes('The authors take a stance')).querySelector('button:first-child').click(); true`)
+    await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Alpha Chapter'`, { label: 'saved EPUB marker returns to the marked chapter' })
+    await waitFor(wc, `(() => {
+      const id = ${JSON.stringify(epubSavedMarker?.id || '')}
+      const overlay = document.querySelector('.epub-body + .input-marker-overlay') || document.querySelector('.input-marker-overlay')
+      const visual = document.querySelector('.input-marker-visual[data-marker-id="' + CSS.escape(id) + '"]')
+      return Boolean(overlay && visual && Number(overlay.dataset.renderedRects) > 0 && Number(overlay.dataset.unresolvedCount) === 0)
+    })()`, { label: 'EPUB marker quote is highlighted in its original chapter' })
+    await waitFor(wc, `(() => {
+      const scroller = document.querySelector('.reader-scroll')
+      const id = ${JSON.stringify(epubSavedMarker?.id || '')}
+      const visual = document.querySelector('.input-marker-visual[data-marker-id="' + CSS.escape(id) + '"]')
+      const top = visual && scroller ? visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null
+      return top !== null && top >= 50 && top <= 220
+    })()`, { label: 'EPUB marker jump aligns the highlighted quote', timeout: 5000 })
+    const epubMarkerReturn = await evaluate(wc, `(() => {
+      const scroller = document.querySelector('.reader-scroll')
+      const id = ${JSON.stringify(epubSavedMarker?.id || '')}
+      const visual = document.querySelector('.input-marker-visual[data-marker-id="' + CSS.escape(id) + '"]')
+      return { heading: document.querySelector('.epub-body h1')?.textContent, markerId: visual?.dataset.markerId || '', top: visual && scroller ? Math.round(visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top) : null, rendered: document.querySelector('.input-marker-overlay')?.dataset.renderedRects, unresolved: document.querySelector('.input-marker-overlay')?.dataset.unresolvedCount }
+    })()`)
+    record('EPUB visual input marks persist, return to the correct chapter and highlight the saved text', epubMarkSelection && epubMarkerReturn.heading === 'Alpha Chapter' && epubMarkerReturn.markerId === epubSavedMarker?.id && epubMarkerReturn.top >= 50 && epubMarkerReturn.top <= 220 && epubMarkerReturn.unresolved === '0', JSON.stringify(epubMarkerReturn))
 
     // An assistant response can be selected directly. This saves only the
     // chosen wording and its assistant provenance, without saving the reply.
@@ -1338,6 +1623,41 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.expression-detail-head h2')?.textContent.includes('The authors take a stance') && document.querySelectorAll('.expression-context').length === 2`, { label: 'two merged contexts shown in expression pool' })
     const expressionDetails = await evaluate(wc, `({ expression: document.querySelector('.expression-detail-head h2')?.textContent || '', contexts: document.querySelectorAll('.expression-context').length })`)
     record('expression pool displays both source contexts and source navigation', expressionDetails.expression.includes('The authors take a stance') && expressionDetails.contexts === 2, JSON.stringify(expressionDetails))
+    const openExpressionContext = async (sourceName) => evaluate(wc, `(() => {
+      const context = Array.from(document.querySelectorAll('.expression-context')).find((item) => item.querySelector('strong')?.textContent.includes(${JSON.stringify(sourceName)}))
+      context?.querySelector('button')?.click()
+      return Boolean(context)
+    })()`)
+    const openedEpubContext = await openExpressionContext('Paperlight-Book.epub')
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Paperlight-Book.epub') && document.querySelector('.epub-body h1')?.textContent === 'Alpha Chapter'`, { label: 'expression EPUB source opens at its original chapter' })
+    await waitFor(wc, `(() => { const overlay = document.querySelector('.input-marker-visual[title="表达来源"]')?.closest('.input-marker-overlay'); return Boolean(overlay && Number(overlay.dataset.renderedRects) > 0 && Number(overlay.dataset.unresolvedCount) === 0) })()`, { label: 'expression EPUB source quote is highlighted exactly' })
+    const epubExpressionJump = await evaluate(wc, `(() => ({
+      heading: document.querySelector('.epub-body h1')?.textContent,
+      quote: document.querySelector('.epub-body')?.textContent.includes('The authors take a stance on language learning.'),
+      highlight: Boolean(document.querySelector('.input-marker-visual[title="表达来源"]')),
+      rendered: document.querySelector('.input-marker-visual[title="表达来源"]')?.closest('.input-marker-overlay')?.dataset.renderedRects,
+      unresolved: document.querySelector('.input-marker-visual[title="表达来源"]')?.closest('.input-marker-overlay')?.dataset.unresolvedCount,
+    }))()`)
+    record('expression source return opens the correct EPUB chapter and renders an exact quote highlight', openedEpubContext && epubExpressionJump.heading === 'Alpha Chapter' && epubExpressionJump.quote && epubExpressionJump.highlight && epubExpressionJump.unresolved === '0', JSON.stringify(epubExpressionJump))
+    await evaluate(wc, `Array.from(document.querySelectorAll('.space-rail-button')).find((button) => button.textContent.includes('表达')).click(); true`)
+    await waitFor(wc, `document.querySelector('.expression-workspace') !== null && document.querySelector('.expression-list-item')`, { label: 'expression pool returns before opening its PDF context' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.expression-list-item')).find((button) => button.textContent.includes('The authors take a stance'))?.click(); true`)
+    await waitFor(wc, `document.querySelector('.expression-detail-head h2')?.textContent.includes('The authors take a stance') && document.querySelectorAll('.expression-context').length === 2`, { label: 'merged expression detail is selected again before opening its PDF context' })
+    const openedPdfContext = await openExpressionContext('book1.pdf')
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'expression PDF source opens' })
+    const expressionSourcePdfLayer = await ensureTextLayer(wc, 'expression source PDF')
+    await waitFor(wc, `(() => { const overlay = document.querySelector('.input-marker-visual[title="表达来源"]')?.closest('.input-marker-overlay'); return Boolean(overlay && Number(overlay.dataset.renderedRects) > 0 && Number(overlay.dataset.unresolvedCount) === 0) })()`, { label: 'expression PDF source quote is highlighted exactly' })
+    const pdfExpressionJump = await evaluate(wc, `(() => ({
+      quote: Array.from(document.querySelectorAll('.textLayer')).some((layer) => layer.textContent.includes('The authors take a stance on language learning.')),
+      highlight: Boolean(document.querySelector('.input-marker-visual[title="表达来源"]')),
+      rendered: document.querySelector('.input-marker-visual[title="表达来源"]')?.closest('.input-marker-overlay')?.dataset.renderedRects,
+      unresolved: document.querySelector('.input-marker-visual[title="表达来源"]')?.closest('.input-marker-overlay')?.dataset.unresolvedCount,
+    }))()`)
+    record('expression source return opens the original PDF and renders an exact quote highlight', openedPdfContext && expressionSourcePdfLayer.ok && pdfExpressionJump.quote && pdfExpressionJump.highlight && pdfExpressionJump.unresolved === '0', JSON.stringify({ ...pdfExpressionJump, textLayer: expressionSourcePdfLayer.ok }))
+    await evaluate(wc, `Array.from(document.querySelectorAll('.space-rail-button')).find((button) => button.textContent.includes('表达')).click(); true`)
+    await waitFor(wc, `document.querySelector('.expression-workspace') !== null`, { label: 'return to expression pool after source trace' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.expression-list-item')).find((button) => button.textContent.includes('The authors take a stance')).click(); true`)
+    await waitFor(wc, `document.querySelector('.expression-detail-head h2')?.textContent.includes('The authors take a stance')`, { label: 'restore expression detail after source trace' })
     await evaluate(wc, `(() => {
       const input = document.querySelector('.expression-search input')
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
@@ -1561,7 +1881,54 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'sense card for the material' })
     const targetHint = await evaluate(wc, `Array.from(document.querySelectorAll('.vault-hint')).map((n) => n.textContent).join(' ')`)
     record('the assistant says where this reading session writes', targetHint.includes('notes/books/book1'), targetHint.slice(0, 120))
-    await evaluate(wc, `(() => { document.querySelector('.vault-button').click(); return true })()`)
+    const chatCallsBeforeArchive = await evaluate(wc, `(window.__senseChatRequests || []).length`)
+    await evaluate(wc, `Array.from(document.querySelectorAll('.vault-button')).find((button) => button.textContent.includes('完整回答存入 inbox')).click(); true`)
+    await waitFor(wc, `document.querySelector('.notes-space') !== null && document.querySelector('.note-textarea') !== null`, { label: 'complete first reader answer opened as Markdown' })
+    let firstReaderAnswer = ''
+    for (let attempt = 0; attempt < 20 && !firstReaderAnswer; attempt += 1) {
+      await sleep(200)
+      const files = existsSync(join(vaultDir, 'notes', 'inbox')) ? readdirSync(join(vaultDir, 'notes', 'inbox')) : []
+      firstReaderAnswer = files.map((name) => readFileSync(join(vaultDir, 'notes', 'inbox', name), 'utf8'))
+        .find((content) => content.includes('source: reader-assistant') && /answerId:\s*"reader-answer:/.test(content)) || ''
+    }
+    const chatCallsAfterArchive = await evaluate(wc, `(window.__senseChatRequests || []).length`)
+    record('the complete initial reading-assistant answer is stored in notes/inbox without another AI request',
+      firstReaderAnswer.includes('existing in large numbers') && firstReaderAnswer.includes('后面接可数名词复数') && firstReaderAnswer.includes('AI 生成例句') && chatCallsAfterArchive === chatCallsBeforeArchive,
+      firstReaderAnswer ? firstReaderAnswer.slice(0, 200).replace(/\n/g, ' | ') : 'reader answer Markdown not found')
+
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'return to reading assistant after saving first answer' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.right-tabs button')).find((button) => button.textContent.includes('对话')).click(); true`)
+    await waitFor(wc, `document.querySelector('.chat-input textarea') !== null`, { label: 'reader follow-up composer' })
+    await installSenseStub(wc, stubSense, '**回答**\n\n- 场景一\n- 场景二')
+    const readerChatBefore = await evaluate(wc, `document.querySelectorAll('.chat-messages li.assistant').length`)
+    await evaluate(wc, `(() => {
+      const area = document.querySelector('.chat-input textarea')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(area, '请再举一个这个词的使用场景。')
+      area.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.chat-input button').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelectorAll('.chat-messages li.assistant').length > ${readerChatBefore}`, { label: 'reader follow-up answer generated' })
+    await waitFor(wc, `document.querySelector('.chat-messages li.assistant:last-child .message-body strong')?.textContent === '回答' && document.querySelectorAll('.chat-messages li.assistant:last-child .flow-list li').length === 2`, { label: 'reader follow-up Markdown rendered as formatted structure' })
+    record('reading-assistant follow-up responses render Markdown', true)
+    await evaluate(wc, `(() => { const messages = Array.from(document.querySelectorAll('.chat-messages li.assistant')); messages.at(-1)?.querySelectorAll('button')[1]?.click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'reader follow-up note opened' })
+    let readerFollowupNote = ''
+    for (let attempt = 0; attempt < 20 && !readerFollowupNote; attempt += 1) {
+      await sleep(200)
+      const files = existsSync(join(vaultDir, 'notes', 'inbox')) ? readdirSync(join(vaultDir, 'notes', 'inbox')) : []
+      readerFollowupNote = files.map((name) => readFileSync(join(vaultDir, 'notes', 'inbox', name), 'utf8'))
+        .find((content) => content.includes('reader-followup:') && content.includes('source: reader-assistant')) || ''
+    }
+    // The stub answer is plain prose; the source id and question identify the exact follow-up record.
+    record('an arbitrary reader follow-up response can be saved independently to notes/inbox', Boolean(readerFollowupNote), readerFollowupNote ? readerFollowupNote.slice(0, 180).replace(/\n/g, ' | ') : 'follow-up Markdown not found')
+
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'return to material reader before saving its semantic record' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.right-tabs button')).find((button) => button.textContent.includes('语义')).click(); true`)
+    await evaluate(wc, `Array.from(document.querySelectorAll('.vault-button')).find((button) => button.textContent.includes('语义存入 vault')).click(); true`)
     await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'notes desk after saving the sense' })
     let senseSaved = false
     for (let attempt = 0; attempt < 12 && !senseSaved; attempt += 1) {
@@ -1809,18 +2176,39 @@ export async function runSmokeTest({ window, projectRoot }) {
     record('conversation answers render Markdown structure', chatMarkdown.strong > 0 && chatMarkdown.listItems >= 2, JSON.stringify(chatMarkdown))
     await screenshot(window, artifacts, '17-vault-chat.png')
 
+    await evaluate(wc, `(() => { const replies = Array.from(document.querySelectorAll('.vault-chat-messages li.assistant')); replies.at(-1)?.querySelector('.message-actions button:not(.saved)')?.click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.vault-chat-messages li.assistant:last-child .message-actions button.saved') !== null`, { label: 'grounded answer saved to interconnections' })
+    let groundedNote = ''
+    for (let attempt = 0; attempt < 20 && !groundedNote; attempt += 1) {
+      await sleep(200)
+      const files = existsSync(join(vaultDir, 'notes', 'interconnections')) ? readdirSync(join(vaultDir, 'notes', 'interconnections')) : []
+      groundedNote = files.map((name) => readFileSync(join(vaultDir, 'notes', 'interconnections', name), 'utf8'))
+        .find((content) => content.includes('folder: interconnections') && content.includes('vault grounded')) || ''
+    }
+    record('grounded Vault conversation notes are filed in notes/interconnections', Boolean(groundedNote) && groundedNote.includes('[[notes/_inbox/Reading-Log.md]]'), groundedNote ? groundedNote.slice(0, 180).replace(/\n/g, ' | ') : 'grounded note not found')
+
     // Ungrounded mode is explicit, and an answer can be saved back as a note.
     await evaluate(wc, `(() => { document.querySelector('.grounding-chip button:last-child').click(); return true })()`)
     await waitFor(wc, `document.querySelector('.grounding-bar.off') !== null`, { label: 'ungrounded warning' })
     const ungroundedText = await evaluate(wc, `document.querySelector('.grounding-bar.off')?.textContent || ''`)
     record('clearing the selection warns that answers are no longer grounded', ungroundedText.includes('未选择 vault 内容'), ungroundedText.slice(0, 60))
-
-    await evaluate(wc, `(() => { Array.from(document.querySelectorAll('.message-actions button')).find((b) => b.textContent.includes('存为 vault 笔记')).click(); return true })()`)
-    await waitFor(wc, `document.querySelector('.message-actions button.saved') !== null`, { label: 'answer saved to the vault' })
-    const inboxFiles = existsSync(join(vaultDir, 'notes', '_inbox')) ? readdirSync(join(vaultDir, 'notes', '_inbox')) : []
+    const ungroundedReplyCount = await evaluate(wc, `document.querySelectorAll('.vault-chat-messages li.assistant').length`)
+    await evaluate(wc, `(() => {
+      const area = document.querySelector('.vault-chat-input textarea')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(area, '这段对话目前没有限定 vault 来源。')
+      area.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.vault-chat-input button').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelectorAll('.vault-chat-messages li.assistant').length > ${ungroundedReplyCount}`, { label: 'ungrounded answer generated' })
+    await evaluate(wc, `(() => { const replies = Array.from(document.querySelectorAll('.vault-chat-messages li.assistant')); replies.at(-1)?.querySelector('.message-actions button:not(.saved)')?.click(); return true })()`)
+    await waitFor(wc, `document.querySelector('.vault-chat-messages li.assistant:last-child .message-actions button.saved') !== null`, { label: 'ungrounded answer saved to inbox' })
+    const inboxFiles = existsSync(join(vaultDir, 'notes', 'inbox')) ? readdirSync(join(vaultDir, 'notes', 'inbox')) : []
+    const inboxMarkdown = inboxFiles.map((name) => readFileSync(join(vaultDir, 'notes', 'inbox', name), 'utf8'))
     record(
-      'an answer can be saved back into the vault as a note',
-      inboxFiles.some((name) => name.includes('这份-vault-笔记说了什么')),
+      'an ungrounded Vault answer is saved to notes/inbox and legacy notes/_inbox remains unchanged',
+      inboxMarkdown.some((content) => content.includes('一般回答')) && originalLegacyInbox.equals(readFileSync(legacyInboxFile)),
       inboxFiles.join(', '),
     )
 
@@ -2072,7 +2460,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     await installSenseStub(wc, withinVariant)
     await queryTypedSense('within')
     await waitFor(wc, `document.querySelector('.sense-add.added') !== null`, { label: 'within alias before vault save' })
-    await evaluate(wc, `document.querySelector('.vault-action-row .vault-button').click(); true`)
+    await evaluate(wc, `Array.from(document.querySelectorAll('.vault-action-row .vault-button')).find((button) => button.textContent.includes('语义存入 vault')).click(); true`)
     const withinNotePath = join(vaultDir, 'notes', 'books', 'book1', 'within--inside-framework.md')
     let withinNote = ''
     for (let attempt = 0; attempt < 30 && !withinNote; attempt += 1) {

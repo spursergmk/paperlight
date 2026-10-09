@@ -19,7 +19,7 @@
 
 import type {
   ChatMessage, DailyEntry, ExpressionRecord, NoteFrontmatter, NotebookNote, ParsedNote, ReadingActivityDay, SenseAtom,
-  VaultEntry, VaultNoteKind, VaultTreeNode,
+  SensePayload, TextSelection, VaultEntry, VaultNoteKind, VaultTreeNode,
 } from '../types'
 import { readingDurationLabel } from './readingActivity.ts'
 
@@ -30,6 +30,10 @@ export const DAILY_DIR = 'Daily'
 export const EXPRESSIONS_DIR = 'expressions'
 /** Notes folder used when nothing tells us which material is being read. */
 export const INBOX_FOLDER = '_inbox'
+/** New notes from the reading assistant go here; `_inbox/` remains readable. */
+export const READER_INBOX_FOLDER = 'inbox'
+/** Grounded conversations connect selected Vault material to a new note. */
+export const INTERCONNECTIONS_FOLDER = 'interconnections'
 /** Directory names the notes tree keeps visible even while they are empty. */
 export const MANAGED_DIRS = [MATERIALS_DIR, NOTES_DIR, ENLIGHTENMENT_DIR, DAILY_DIR, EXPRESSIONS_DIR]
 
@@ -404,7 +408,96 @@ export function findingNotePath(date: string, title: string): string {
 }
 
 export function chatNotePath(date: string, title: string): string {
-  return vaultJoin(noteFolderPath(null), `${date}-${slugify(title, 'note')}.md`)
+  return chatNotePathForGrounding(date, title, false)
+}
+
+export function chatNotePathForGrounding(date: string, title: string, grounded: boolean): string {
+  const folder = grounded ? INTERCONNECTIONS_FOLDER : READER_INBOX_FOLDER
+  return vaultJoin(NOTES_DIR, folder, `${date}-${slugify(title, 'note')}.md`)
+}
+
+export function readerAnswerPath(answerId: string, title: string): string {
+  return vaultJoin(NOTES_DIR, READER_INBOX_FOLDER, `${slugify(title, 'answer')}-${hashString(answerId)}.md`)
+}
+
+export interface ReaderAnswerOptions {
+  answerId: string
+  title: string
+  markdown: string
+  date: string
+  question?: string
+  sourcePath?: string
+  sourceName?: string
+  locationLabel?: string
+  quote?: string
+  tags?: string[]
+}
+
+/** A direct, non-regenerated copy of a complete reader answer in Markdown. */
+export function readerAnswerMarkdown(options: ReaderAnswerOptions): string {
+  const { answerId, title, markdown, date, question, sourcePath, sourceName, locationLabel, quote, tags = [] } = options
+  const body = [`# ${oneLine(title) || '阅读助手回答'}`, '']
+  if (question?.trim()) body.push(`> ${oneLine(question)}`, '')
+  body.push(markdown.trim())
+  if (sourceName || locationLabel || sourcePath || quote) {
+    body.push('', '## 阅读来源', '')
+    const vaultSource = sourcePath && normalizeVaultPath(sourcePath)
+    if (vaultSource?.startsWith(`${MATERIALS_DIR}/`)) body.push(`- 材料：[[${vaultSource}]]`)
+    else if (sourceName) body.push(`- 材料：${oneLine(sourceName)}`)
+    if (locationLabel) body.push(`- 位置：${oneLine(locationLabel)}`)
+    if (quote?.trim()) body.push('', '### 原文选区', '', `> ${oneLine(quote)}`)
+  }
+  body.push('')
+  return stringifyNote({
+    title: oneLine(title) || '阅读助手回答',
+    kind: 'note',
+    created: new Date().toISOString(),
+    updated: new Date().toISOString(),
+    date,
+    tags: ['paperlight', 'reader-answer', ...tags],
+    source: 'reader-assistant',
+    answerId,
+    folder: READER_INBOX_FOLDER,
+  }, body.join('\n'))
+}
+
+/** Save every field in the first contextual answer without asking the model again. */
+export function semanticAnswerMarkdown(sense: SensePayload, source?: TextSelection | null): string {
+  const body = [
+    `## 语境含义`, '', oneLine(sense.contextualMeaning) || '（未提供）',
+    '', '## 英文释义', '', oneLine(sense.definition) || '（未提供）',
+  ]
+  if (sense.contextSentence) body.push('', '## 回答中的语境例句', '', `> ${oneLine(sense.contextSentence)}`)
+  if (sense.examples.length) {
+    body.push('', '## 例句', '')
+    for (const example of sense.examples) {
+      body.push(`- ${oneLine(example.text)}`)
+      if (example.translation) body.push(`  - ${oneLine(example.translation)}`)
+      body.push(`  - ${example.sourceType === 'verified' && example.citation ? `出处：${oneLine(example.citation)}` : 'AI 生成例句'}`)
+    }
+  }
+  const guidance = sense.guidance
+  if (guidance.scenarios.length) body.push('', '## 使用场景', '', ...guidance.scenarios.map((item) => `- ${oneLine(item)}`))
+  if (guidance.advice.length) body.push('', '## 使用建议', '', ...guidance.advice.map((item) => `- ${oneLine(item)}`))
+  if (guidance.frequency) body.push('', `**使用频率**：${oneLine(guidance.frequency)}`)
+  if (guidance.alternatives.length) body.push('', '## 替代表达', '', ...guidance.alternatives.map((item) => `- **${oneLine(item.term)}** ${oneLine(item.note)}`))
+  if (guidance.synonyms.length) body.push('', '## 近义词对比', '', ...guidance.synonyms.map((item) => `- **${oneLine(item.term)}** ${oneLine(item.contrast)}`))
+  if (guidance.antonyms.length) body.push('', '## 反义词对比', '', ...guidance.antonyms.map((item) => `- **${oneLine(item.term)}** ${oneLine(item.contrast)}`))
+  const morphology = guidance.morphology
+  if (morphology.root || morphology.prefix || morphology.suffix || morphology.note) {
+    body.push('', '## 词根词缀', '')
+    if (morphology.prefix) body.push(`- 前缀：${oneLine(morphology.prefix)}`)
+    if (morphology.root) body.push(`- 词根：${oneLine(morphology.root)}`)
+    if (morphology.suffix) body.push(`- 后缀：${oneLine(morphology.suffix)}`)
+    if (morphology.note) body.push('', oneLine(morphology.note))
+  }
+  if (source) {
+    body.push('', '## 原文来源', '')
+    body.push(`- 材料：${oneLine(source.documentName || source.documentPath || '') || '当前材料'}`)
+    body.push(`- 位置：${oneLine(source.locationLabel || '') || `第 ${source.pageNumber} 页/章`}`)
+    if (source.text.trim()) body.push('', '### 原文选区', '', `> ${oneLine(source.text)}`)
+  }
+  return body.join('\n')
 }
 
 function oneLine(value: string): string {
@@ -638,8 +731,10 @@ export function chatAnswerMarkdown(options: {
   sources: string[]
   model: string
   date: string
+  grounded?: boolean
 }): { path: string; content: string } {
-  const { threadTitle, question, answer, sources, model, date } = options
+  const { threadTitle, question, answer, sources, model, date, grounded = false } = options
+  const folder = grounded ? INTERCONNECTIONS_FOLDER : READER_INBOX_FOLDER
   const title = threadTitle || `vault 对话 · ${date}`
   const body: string[] = [
     `# ${oneLine(title)}`,
@@ -652,7 +747,7 @@ export function chatAnswerMarkdown(options: {
     body.push('', '## 依据的 vault 内容', '', ...sources.map((path) => `- [[${path}]]`))
   }
   body.push('', '---', `由 ${model} 生成 · 来源：对话空间（vault grounded） · ${date}`, '')
-  const path = chatNotePath(date, title)
+  const path = chatNotePathForGrounding(date, title, grounded)
   return {
     path,
     content: stringifyNote({
@@ -663,7 +758,7 @@ export function chatAnswerMarkdown(options: {
       tags: ['paperlight', 'chat'],
       senses: [],
       source: model || 'ai',
-      folder: INBOX_FOLDER,
+      folder,
     }, body.join('\n')),
   }
 }

@@ -10,7 +10,8 @@ function escapeText(value) {
   return String(value).replace(/[\\()]/g, (match) => `\\${match}`)
 }
 
-export function createTestPdf({ pages = 12, title = 'Paperlight Smoke', landscapePages = [] } = {}) {
+/** @param {{ pages?: number, title?: string, landscapePages?: number[], contents?: Array<{title: string, page: number}> }} options */
+export function createTestPdf({ pages = 12, title = 'Paperlight Smoke', landscapePages = [], contents = [] } = {}) {
   const landscape = new Set(landscapePages)
   const fontObjectNumber = 3
   const firstPageObject = 4
@@ -29,7 +30,13 @@ export function createTestPdf({ pages = 12, title = 'Paperlight Smoke', landscap
     const mediaBox = landscape.has(index + 1) ? '[0 0 792 612]' : '[0 0 612 792]'
     const top = landscape.has(index + 1) ? 520 : 704
     objects[pageNumber] = `<< /Type /Page /Parent 2 0 R /MediaBox ${mediaBox} /Resources << /Font << /F1 ${fontObjectNumber} 0 R >> >> /Contents ${contentNumber} 0 R >>`
-    const body = [
+    const tocLines = index === 0 && contents.length > 0
+      ? [
+        `BT /F1 22 Tf 72 ${top} Td (Table of Contents) Tj ET`,
+        ...contents.map((item, tocIndex) => `BT /F1 12 Tf 72 ${top - 38 - tocIndex * 24} Td (${escapeText(`${item.title} ........ ${item.page}`)}) Tj ET`),
+      ]
+      : []
+    const body = (tocLines.length ? tocLines : [
       `BT /F1 22 Tf 72 ${top} Td (Paperlight smoke page ${index + 1} of ${pages}) Tj ET`,
       `BT /F1 12 Tf 72 ${top - 40} Td (${escapeText(title)}) Tj ET`,
       `BT /F1 11 Tf 72 ${top - 74} Td (Foucault and liberal political economy: contexts of the book.) Tj ET`,
@@ -37,7 +44,7 @@ export function createTestPdf({ pages = 12, title = 'Paperlight Smoke', landscap
       `BT /F1 11 Tf 72 ${top - 122} Td (Select any English word of this page to try the contextual sense lookup.) Tj ET`,
       `BT /F1 11 Tf 72 ${top - 146} Td (The authors take a stance on language learning.) Tj ET`,
       `0.85 w 72 ${top - 166} m ${landscape.has(index + 1) ? 720 : 540} ${top - 166} l S`,
-    ].join('\n')
+    ]).join('\n')
     objects[contentNumber] = `<< /Length ${body.length} >>\nstream\n${body}\nendstream`
   }
 

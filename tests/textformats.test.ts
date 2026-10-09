@@ -167,6 +167,7 @@ test('parseToc reads EPUB3 nav and EPUB2 NCX', () => {
   assert.deepEqual(navEntries.map((entry) => entry.title), ['One', 'Two', 'Two A'])
   assert.deepEqual(navEntries.map((entry) => entry.path), ['OEBPS/chap1.xhtml', 'OEBPS/chap2.xhtml', 'OEBPS/chap2.xhtml'])
   assert.deepEqual(navEntries.map((entry) => entry.level), [0, 0, 1])
+  assert.deepEqual(navEntries.map((entry) => entry.anchorId), [undefined, undefined, 's1'])
 
   const ncx = `<ncx><navMap>
     <navPoint><navLabel><text>Alpha</text></navLabel><content src="a.xhtml"/></navPoint>
@@ -199,7 +200,14 @@ test('openEpub reads title, spine order, TOC and chapter markup', async () => {
   assert.deepEqual(book.chapters.map((chapter) => chapter.title), ['Alpha', 'Beta', 'Gamma'], 'titles come from the nav document')
   assert.equal(book.chapters[0].path, 'OEBPS/chap1.xhtml')
   assert.match(book.chapters[0].html, /broader framework of knowledge/)
-  assert.deepEqual(book.outline.map((item) => item.chapterIndex), [0, 1, 2])
-  assert.deepEqual(book.outline.map((item) => item.title), ['Alpha', 'Beta', 'Gamma'])
+  assert.deepEqual(book.outline.map((item) => item.chapterIndex), [0, 0, 1, 1, 2, 2])
+  assert.deepEqual(book.outline.map((item) => item.title), ['Alpha', 'Alpha details', 'Beta', 'Beta details', 'Gamma', 'Gamma details'])
+  assert.deepEqual(book.outline.filter((item) => item.anchorId).map((item) => item.anchorId), ['section-1', 'section-2', 'section-3'])
   assert.equal(book.coverPath, 'OEBPS/images/cover.png')
+})
+
+test('EPUB without a navigation document falls back to every chapter heading', async () => {
+  const book = await openEpub(await createTestEpub({ chapters: ['Opening', 'Methods'], includeToc: false }))
+  assert.deepEqual(book.outline.map((item) => item.title), ['Opening', 'Opening details', 'Methods', 'Methods details'])
+  assert.deepEqual(book.outline.map((item) => item.anchorId), [undefined, 'section-1', undefined, 'section-2'])
 })

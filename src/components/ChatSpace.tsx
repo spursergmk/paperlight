@@ -161,7 +161,7 @@ export default function ChatSpace({
       .reverse()
       .find((item) => item.role === 'user' && item.createdAt <= message.createdAt)?.content || thread.title
     try {
-      const path = await vaultRef.current.saveChatAnswer(thread, question, message.content, message.sources || [])
+      const path = await vaultRef.current.saveChatAnswer(thread, question, message.content, message.sources || [], message.grounded === true)
       patchThread(thread.id, (current) => ({
         ...current,
         messages: current.messages.map((item) => (item.id === message.id ? { ...item, savedPath: path } : item)),

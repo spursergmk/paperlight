@@ -48,7 +48,8 @@ import {
 } from './lib/notebook'
 import { activeReadingInterval, recordReadingInterval, READING_TICK_INTERVAL_MS } from './lib/readingActivity'
 import {
-  absoluteVaultPath, isValidTimeOfDay, mirrorFolderForMaterial, noteFolderPath, remapLegacyNotePath,
+  absoluteVaultPath, isValidTimeOfDay, localDateKey, mirrorFolderForMaterial, noteFolderPath,
+  readerAnswerPath, remapLegacyNotePath, semanticAnswerMarkdown,
 } from './lib/vault'
 import {
   getApiConfigStatus, protocolForBaseUrl, removeApiKey, saveApiKey, translateSelection,
@@ -100,6 +101,65 @@ function newMessage(role: ChatMessage['role'], content: string): ChatMessage {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
+}
+
+function bookmarkText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+function captureFlowBookmark(scroller: HTMLElement): Pick<InputMarker, 'quote' | 'before' | 'after' | 'blockIndex'> {
+  const area = scroller.getBoundingClientRect()
+  const probeY = area.top + Math.min(150, Math.max(70, scroller.clientHeight * 0.28))
+  const candidates = Array.from(scroller.querySelectorAll<HTMLElement>(
+    '.flow-page p, .flow-page h1, .flow-page h2, .flow-page h3, .flow-page h4, .flow-page h5, .flow-page h6, .flow-page li, .flow-page blockquote, .flow-page pre, .epub-body p, .epub-body h1, .epub-body h2, .epub-body h3, .epub-body h4, .epub-body h5, .epub-body h6, .epub-body li, .epub-body blockquote, .epub-body pre',
+  )).filter((element) => bookmarkText(element.innerText || element.textContent || ''))
+  const visible = candidates.filter((element) => {
+    const rect = element.getBoundingClientRect()
+    return rect.bottom > area.top && rect.top < area.bottom
+  })
+  const target = visible.find((element) => {
+    const rect = element.getBoundingClientRect()
+    return rect.top <= probeY && rect.bottom >= probeY
+  }) || visible.reduce<HTMLElement | null>((closest, element) => {
+    if (!closest) return element
+    const center = element.getBoundingClientRect().top + element.getBoundingClientRect().height / 2
+    const closestCenter = closest.getBoundingClientRect().top + closest.getBoundingClientRect().height / 2
+    return Math.abs(center - probeY) < Math.abs(closestCenter - probeY) ? element : closest
+  }, null)
+  if (!target) return {}
+  const quote = bookmarkText(target.innerText || target.textContent || '').slice(0, 900)
+  const previous = target.previousElementSibling?.textContent || target.parentElement?.previousElementSibling?.textContent || ''
+  const next = target.nextElementSibling?.textContent || target.parentElement?.nextElementSibling?.textContent || ''
+  const block = target.closest<HTMLElement>('[id^="flow-block-"]')
+  const blockIndex = block?.id.match(/^flow-block-(\d+)$/)?.[1]
+  return {
+    ...(quote ? { quote } : {}),
+    ...(bookmarkText(previous) ? { before: bookmarkText(previous).slice(-100) } : {}),
+    ...(bookmarkText(next) ? { after: bookmarkText(next).slice(0, 100) } : {}),
+    ...(blockIndex ? { blockIndex: Number(blockIndex) } : {}),
+  }
+}
+
+function findFlowBookmarkTarget(scroller: HTMLElement, marker: InputMarker): HTMLElement | null {
+  const quote = bookmarkText(marker.quote || '')
+  if (!quote) return null
+  const candidates = Array.from(scroller.querySelectorAll<HTMLElement>(
+    '.flow-page p, .flow-page h1, .flow-page h2, .flow-page h3, .flow-page h4, .flow-page h5, .flow-page h6, .flow-page li, .flow-page blockquote, .flow-page pre, .epub-body p, .epub-body h1, .epub-body h2, .epub-body h3, .epub-body h4, .epub-body h5, .epub-body h6, .epub-body li, .epub-body blockquote, .epub-body pre',
+  ))
+  const matches = candidates.filter((element) => bookmarkText(element.innerText || element.textContent || '').includes(quote))
+  if (matches.length < 2) return matches[0] || null
+  const contextMatches = matches.filter((element) => {
+    const before = marker.before ? bookmarkText(element.previousElementSibling?.textContent || '') : ''
+    const after = marker.after ? bookmarkText(element.nextElementSibling?.textContent || '') : ''
+    return (!marker.before || before.endsWith(bookmarkText(marker.before)))
+      && (!marker.after || after.startsWith(bookmarkText(marker.after)))
+  })
+  return contextMatches[0] || matches[0]
+}
+
+function alignReaderElement(scroller: HTMLElement, target: HTMLElement, topPadding = 16): void {
+  const targetTop = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+  scroller.scrollTop = Math.max(0, scroller.scrollTop + targetTop - topPadding)
 }
 
 function touchRecent(list: RecentFile[], entry: RecentFile, limit = 12): RecentFile[] {
@@ -168,6 +228,7 @@ function App() {
   // Sense lookup
   const [queryTerm, setQueryTerm] = useState('')
   const [sense, setSense] = useState<SensePayload | null>(null)
+  const [senseAnswerId, setSenseAnswerId] = useState<string | null>(null)
   const [senseLoading, setSenseLoading] = useState(false)
   const [senseError, setSenseError] = useState('')
   const [allSenses, setAllSenses] = useState<SenseSummary[] | null>(null)
@@ -180,6 +241,8 @@ function App() {
   } | null>(null)
   const [selection, setSelection] = useState<TextSelection | null>(null)
   const [pendingSourceJump, setPendingSourceJump] = useState<{ path: string; position: number; marker?: InputMarker } | null>(null)
+  const [expressionSourcePreview, setExpressionSourcePreview] = useState<InputMarker | null>(null)
+  const [epubAlignmentTail, setEpubAlignmentTail] = useState<{ path: string; chapterIndex: number; padding: number } | null>(null)
   const [expressionCapture, setExpressionCapture] = useState<{
     text: string
     context: Partial<ExpressionContext>
@@ -240,11 +303,18 @@ function App() {
   const atoms = notebook.atoms
   const notebookNotes = notebook.notes
   const activeInputMarkers = activePath ? state.inputMarkers.filter((marker) => marker.sourcePath === activePath) : []
+  const readerInputMarkers = expressionSourcePreview?.sourcePath === activePath
+    ? [...activeInputMarkers, expressionSourcePreview]
+    : activeInputMarkers
   const chat = notebook.chat
   const senseId = sense ? senseKeyOf(sense) : null
   const senseInNotebook = Boolean(senseId && semanticRecordForId(senseId, atoms))
   const relations = useMemo(() => (sense ? relateSense(sense, atoms) : []), [sense, atoms])
   const chatMessages = senseId ? chat[senseId] || [] : []
+
+  useEffect(() => {
+    setEpubAlignmentTail((current) => current && current.path !== activePath ? null : current)
+  }, [activePath])
   const savedMessageIds = useMemo(() => new Set(
     notebookNotes.map((note) => note.sourceMessageId).filter((id): id is string => Boolean(id)),
   ), [notebookNotes])
@@ -668,6 +738,34 @@ function App() {
   // A sense needs archiving when it has no file yet — or when the file it was
   // written to is gone (deleted or moved outside the notes tree).
   const vaultFilePaths = useMemo(() => new Set(vaultApi.files.map((file) => file.path)), [vaultApi.files])
+  const readerAnswerTitle = sense ? `${sense.term} · ${sense.contextualMeaning}` : ''
+  const savedReaderAnswerPath = sense && senseAnswerId
+    ? readerAnswerPath(senseAnswerId, readerAnswerTitle)
+    : null
+  const savedReaderAnswer = savedReaderAnswerPath && vaultFilePaths.has(savedReaderAnswerPath)
+    ? savedReaderAnswerPath
+    : null
+  const saveReaderFirstAnswer = useCallback(() => {
+    if (!sense || !senseAnswerId) return
+    const currentSelection = selection?.documentPath === activePath ? selection : null
+    const root = vaultRef.current.root?.replace(/\\/g, '/').replace(/\/+$/, '')
+    const source = activePath?.replace(/\\/g, '/') || ''
+    const sourcePath = root && source.startsWith(`${root}/`) ? source.slice(root.length + 1) : ''
+    void runVaultAction(
+      () => vaultRef.current.saveReaderAnswer({
+        answerId: senseAnswerId,
+        title: readerAnswerTitle,
+        markdown: semanticAnswerMarkdown(sense, currentSelection),
+        date: localDateKey(),
+        question: `阅读助手对「${sense.term}」的初次回答`,
+        sourcePath: sourcePath.startsWith('materials/') ? sourcePath : undefined,
+        sourceName: activeTab?.name || (activePath ? displayNameForPath(activePath) : undefined),
+        locationLabel: currentSelection?.locationLabel || flowLocation || (activeTab ? `第 ${activeTab.pageNumber} 页/章` : undefined),
+        quote: currentSelection?.text,
+      }),
+      (path) => `完整回答已存入 notes/inbox：${path}`,
+    )
+  }, [activePath, activeTab, flowLocation, readerAnswerTitle, runVaultAction, sense, senseAnswerId, selection])
   const pendingSenseAtoms = useMemo(
     () => atoms.filter((atom) => !atom.notePath || !vaultFilePaths.has(atom.notePath)),
     [atoms, vaultFilePaths],
@@ -709,6 +807,38 @@ function App() {
     )
   }, [atoms, runVaultAction, setNotebook])
 
+  const saveReaderChatAnswer = useCallback((message: ChatMessage) => {
+    if (!sense || !senseId || message.role !== 'assistant') return
+    const currentMessages = stateRef.current.notebook.chat[senseId] || []
+    const messageIndex = currentMessages.findIndex((item) => item.id === message.id)
+    const question = currentMessages.slice(0, messageIndex).reverse().find((item) => item.role === 'user')?.content || sense.term
+    const currentSelection = selection?.documentPath === activePath ? selection : null
+    const root = vaultRef.current.root?.replace(/\\/g, '/').replace(/\/+$/, '')
+    const source = activePath?.replace(/\\/g, '/') || ''
+    const sourcePath = root && source.startsWith(`${root}/`) ? source.slice(root.length + 1) : ''
+    void runVaultAction(async () => {
+      const path = await vaultRef.current.saveReaderAnswer({
+        answerId: `reader-followup:${senseId}:${message.id}`,
+        title: `${sense.term} · ${question.slice(0, 80)}`,
+        markdown: message.content,
+        date: localDateKey(),
+        question,
+        sourcePath: sourcePath.startsWith('materials/') ? sourcePath : undefined,
+        sourceName: activeTab?.name || (activePath ? displayNameForPath(activePath) : undefined),
+        locationLabel: currentSelection?.locationLabel || flowLocation || (activeTab ? `第 ${activeTab.pageNumber} 页/章` : undefined),
+        quote: currentSelection?.text,
+      })
+      setNotebook((current) => ({
+        ...current,
+        chat: {
+          ...current.chat,
+          [senseId]: (current.chat[senseId] || []).map((item) => item.id === message.id ? { ...item, savedPath: path } : item),
+        },
+      }))
+      return path
+    }, (path) => `追问回答已存入 notes/inbox：${path}`)
+  }, [activePath, activeTab, flowLocation, runVaultAction, sense, senseId, selection, setNotebook])
+
   // ------------------------------------------------------------- persistence
 
   // Persist only after hydration. Writing before `state:get` resolves could
@@ -718,12 +848,30 @@ function App() {
   }, [hydrated, state])
 
   useEffect(() => {
-    const onHide = () => flushState(stateRef.current)
-    window.addEventListener('pagehide', onHide)
-    window.addEventListener('beforeunload', onHide)
+    const flushLatest = () => {
+      const current = stateRef.current
+      const positions = scrollPositions.current
+      const ratios = scrollRatios.current
+      const next = {
+        ...current,
+        session: {
+          ...current.session,
+          tabs: current.session.tabs.map((tab) => tab.path in positions ? {
+            ...tab,
+            scrollTop: positions[tab.path],
+            ...(tab.path in ratios ? { scrollRatio: ratios[tab.path] } : {}),
+          } : tab),
+        },
+      }
+      flushState(next)
+    }
+    window.addEventListener('pagehide', flushLatest)
+    window.addEventListener('beforeunload', flushLatest)
+    window.addEventListener('blur', flushLatest)
     return () => {
-      window.removeEventListener('pagehide', onHide)
-      window.removeEventListener('beforeunload', onHide)
+      window.removeEventListener('pagehide', flushLatest)
+      window.removeEventListener('beforeunload', flushLatest)
+      window.removeEventListener('blur', flushLatest)
     }
   }, [])
 
@@ -893,22 +1041,58 @@ function App() {
     const sourcePath = context.sourcePath || ''
     if (!sourcePath) return
     if (context.sourceKind === 'chat' && sourcePath.startsWith('chat:')) {
+      setExpressionSourcePreview(null)
       const threadId = sourcePath.slice('chat:'.length)
       if (threadId) activateThread(threadId)
       switchSpace('chat')
       return
     }
     if (sourcePath.startsWith('notes/') || sourcePath.startsWith('enlightenment/') || sourcePath.startsWith('Daily/')) {
+      setExpressionSourcePreview(null)
       openNoteInNotesSpace(sourcePath)
       return
     }
     const root = stateRef.current.vault.root
     const path = sourcePath.startsWith('materials/') && root ? absoluteVaultPath(root, sourcePath) : sourcePath
     if (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path) && !path.startsWith('\\\\')) return
-    setPendingSourceJump({ path, position: Math.max(1, context.pageNumber || 1) })
+    const preview: InputMarker | undefined = context.quote && !context.generated
+      && (context.sourceKind === 'pdf' || context.sourceKind === 'epub' || context.sourceKind === 'text')
+      ? {
+        id: `expression-source-${context.id}`,
+        sourcePath: path,
+        sourceKind: context.sourceKind,
+        purpose: 'form',
+        visualStyle: 'highlight',
+        quote: context.quote,
+        before: context.before,
+        after: context.after,
+        pageNumber: context.pageNumber,
+        locationLabel: context.locationLabel,
+        startOffset: context.startOffset,
+        endOffset: context.endOffset,
+        blockIndex: context.blockIndex,
+        comment: '表达来源',
+        createdAt: context.createdAt,
+      }
+      : undefined
+    setExpressionSourcePreview(preview || null)
+    setPendingSourceJump({ path, position: Math.max(1, context.pageNumber || 1), ...(preview ? { marker: preview } : {}) })
     switchSpace('reader')
     openDocument(path)
   }, [activateThread, openDocument, openNoteInNotesSpace, switchSpace])
+
+  const expressionPreviewPathRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!expressionSourcePreview) {
+      expressionPreviewPathRef.current = null
+      return
+    }
+    if (activePath === expressionSourcePreview.sourcePath) {
+      expressionPreviewPathRef.current = expressionSourcePreview.sourcePath
+      return
+    }
+    if (expressionPreviewPathRef.current === expressionSourcePreview.sourcePath) setExpressionSourcePreview(null)
+  }, [activePath, expressionSourcePreview])
 
   const commitScroll = useCallback(() => {
     if (!scrollDirty.current) return
@@ -1107,6 +1291,7 @@ function App() {
     setPendingSemanticCapture(null)
     const requestId = ++senseRequestRef.current
     lastContextRef.current = context
+    setSenseAnswerId(null)
     setSenseLoading(true)
     setSenseError('')
     setAllSenses(null)
@@ -1120,6 +1305,7 @@ function App() {
         lemma: result.lemma || cleaned,
         examples: Array.isArray(result.examples) ? result.examples : [],
       })
+      setSenseAnswerId(`reader-answer:${requestId}`)
       setRightTab('sense')
     } catch (error) {
       if (requestId === senseRequestRef.current) {
@@ -1171,6 +1357,9 @@ function App() {
         const pageLayer = pageElement.querySelector('.textLayer') || pageElement
         const sourceText = tidyText(pageLayer.textContent || '')
         const index = sourceText.indexOf(text)
+        const blockElement = startNode?.closest<HTMLElement>('[id^="flow-block-"], [data-paperlight-block-index]')
+        const blockIndexText = blockElement?.id.match(/^flow-block-(\d+)$/)?.[1]
+          ?? blockElement?.dataset.paperlightBlockIndex
         context = {
           sourceKind: activeDoc?.kind === 'pdf' ? 'pdf' : activeDoc?.kind === 'epub' ? 'epub' : 'text',
           sourcePath: activePath || undefined,
@@ -1179,6 +1368,7 @@ function App() {
           pageNumber: Number(pageElement.dataset.pageNumber || 1),
           startOffset: index >= 0 ? index : undefined,
           endOffset: index >= 0 ? index + text.length : undefined,
+          blockIndex: blockIndexText !== undefined && Number.isSafeInteger(Number(blockIndexText)) ? Number(blockIndexText) : undefined,
           quote: text,
           before: index >= 0 ? sourceText.slice(Math.max(0, index - 350), index) : '',
           after: index >= 0 ? sourceText.slice(index + text.length, index + text.length + 350) : '',
@@ -1235,7 +1425,7 @@ function App() {
     }
   }, [expressionCapture, vaultApi.captureExpression, vaultApi.ready])
 
-  const startInputMarker = (context: Partial<ExpressionContext>, x = window.innerWidth / 2, y = window.innerHeight / 2) => {
+  const startInputMarker = (context: Partial<ExpressionContext> & { blockIndex?: number }, x = window.innerWidth / 2, y = window.innerHeight / 2) => {
     const sourceKind = context.sourceKind || (activeDoc?.kind === 'pdf' ? 'pdf' : activeDoc?.kind === 'epub' ? 'epub' : activeDoc?.kind === 'text' ? 'text' : 'manual')
     const sourcePath = context.sourcePath || (sourceKind === 'assistant' ? activePath || undefined : undefined)
     if (!sourcePath) {
@@ -1243,6 +1433,11 @@ function App() {
       window.setTimeout(() => setInputMarkerNotice(''), 4000)
       return
     }
+    const activeScroller = sourcePath === activePath && (sourceKind === 'text' || sourceKind === 'epub')
+      ? document.querySelector<HTMLElement>('.reader-scroll')
+      : null
+    const scrollMax = activeScroller ? Math.max(0, activeScroller.scrollHeight - activeScroller.clientHeight) : 0
+    const liveScrollRatio = activeScroller && scrollMax > 4 ? activeScroller.scrollTop / scrollMax : undefined
     setInputMarkerDraft({
       sourcePath,
       sourceKind,
@@ -1254,8 +1449,9 @@ function App() {
       locationLabel: context.locationLabel,
       startOffset: context.startOffset,
       endOffset: context.endOffset,
-      scrollRatio: sourceKind === 'text' && sourcePath === activePath
-        ? (scrollRatios.current[sourcePath] ?? activeTab?.scrollRatio)
+      blockIndex: context.blockIndex,
+      scrollRatio: (sourceKind === 'text' || sourceKind === 'epub') && sourcePath === activePath
+        ? (liveScrollRatio ?? scrollRatios.current[sourcePath] ?? activeTab?.scrollRatio)
         : undefined,
       comment: '',
       x: Math.max(190, Math.min(window.innerWidth - 190, x)),
@@ -1277,6 +1473,7 @@ function App() {
       locationLabel: selection.locationLabel,
       startOffset: selection.startOffset,
       endOffset: selection.endOffset,
+      blockIndex: selection.blockIndex,
     }, anchor?.x, anchor ? anchor.y + 12 : undefined)
   }
 
@@ -1296,28 +1493,43 @@ function App() {
 
   const addProgressBookmark = () => {
     if (!activePath || !activeDoc || !activeTab) return
-    const duplicate = activeInputMarkers.find((marker) => marker.purpose === 'progress' && marker.pageNumber === activeTab.pageNumber)
+    const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+    const scrollMax = scroller ? Math.max(0, scroller.scrollHeight - scroller.clientHeight) : 0
+    const scrollRatio = scroller && scrollMax > 4 ? scroller.scrollTop / scrollMax : activeTab.scrollRatio ?? 0
+    const sourceKind: InputMarker['sourceKind'] = activeDoc.kind === 'pdf' ? 'pdf' : activeDoc.kind === 'epub' ? 'epub' : 'text'
+    const position: Pick<InputMarker, 'quote' | 'before' | 'after' | 'blockIndex'> = sourceKind === 'pdf'
+      ? {}
+      : scroller ? captureFlowBookmark(scroller) : {}
+    const duplicate = activeInputMarkers.find((marker) => {
+      if (marker.purpose !== 'progress' || marker.sourcePath !== activePath) return false
+      if (sourceKind === 'pdf') return marker.pageNumber === activeTab.pageNumber
+      const quote = bookmarkText(position.quote || '')
+      if (quote && marker.quote) return bookmarkText(marker.quote) === quote
+      return marker.pageNumber === activeTab.pageNumber && Math.abs((marker.scrollRatio ?? -1) - scrollRatio) < 0.015
+    })
     if (duplicate) {
-      setInputMarkerNotice('当前位置已有书签。')
+      setInputMarkerNotice('这个阅读位置已有书签。')
       window.setTimeout(() => setInputMarkerNotice(''), 2500)
       setInputMarkerMenuOpen(true)
       return
     }
-    const sourceKind: InputMarker['sourceKind'] = activeDoc.kind === 'pdf' ? 'pdf' : activeDoc.kind === 'epub' ? 'epub' : 'text'
+    const locationLabel = flowLocation
+      || (activeDoc.kind === 'epub' ? activeDoc.epub?.chapters[activeTab.chapterIndex ?? 0]?.title : undefined)
+      || undefined
     const saved: InputMarker = {
       id: `marker-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       sourcePath: activePath,
       sourceKind,
       purpose: 'progress',
       pageNumber: activeTab.pageNumber || 1,
-      locationLabel: flowLocation || undefined,
-      scrollRatio: activeTab.scrollRatio,
-      comment: '阅读进度',
+      locationLabel,
+      ...(sourceKind === 'pdf' ? {} : { scrollRatio, ...position }),
+      comment: `阅读进度${locationLabel ? ` · ${locationLabel}` : position.quote ? ` · ${position.quote.slice(0, 44)}` : ''}`,
       createdAt: new Date().toISOString(),
     }
     setState((current) => ({ ...current, inputMarkers: [...current.inputMarkers, saved] }))
     setInputMarkerMenuOpen(true)
-    setInputMarkerNotice('阅读进度已加书签。')
+    setInputMarkerNotice(position.quote ? '当前位置和段落已加入阅读书签。' : '阅读位置已加入书签。')
     window.setTimeout(() => setInputMarkerNotice(''), 3000)
   }
 
@@ -1325,7 +1537,49 @@ function App() {
     setState((current) => ({ ...current, inputMarkers: current.inputMarkers.filter((marker) => marker.id !== id) }))
   }
 
+  const restoreFlowBookmark = useCallback((marker: InputMarker) => {
+    if (marker.sourceKind === 'text' && marker.blockIndex !== undefined) {
+      flowApiRef.current?.scrollToBlock?.(marker.blockIndex)
+    }
+    if (marker.sourceKind === 'epub' && marker.blockIndex !== undefined) {
+      let attempt = 0
+      const jumpToEpubBlock = () => {
+        if (stateRef.current.session.activePath !== marker.sourcePath) return
+        const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+        const target = scroller?.querySelector<HTMLElement>(`[data-paperlight-block-index="${marker.blockIndex}"]`)
+        if (target && scroller) {
+          alignReaderElement(scroller, target)
+          return
+        }
+        if (attempt++ < 24) window.setTimeout(jumpToEpubBlock, 80)
+      }
+      window.setTimeout(jumpToEpubBlock, 60)
+    }
+    if (!marker.quote) return
+    let attempt = 0
+    const find = () => {
+      if (stateRef.current.session.activePath !== marker.sourcePath) return
+      const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+      const target = scroller ? findFlowBookmarkTarget(scroller, marker) : null
+      if (target && scroller) {
+        alignReaderElement(scroller, target)
+        return
+      }
+      if (attempt++ < 24) {
+        window.setTimeout(find, 80)
+        return
+      }
+      if (scroller && marker.scrollRatio !== undefined) {
+        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight) * marker.scrollRatio
+      }
+      setInputMarkerNotice('找不到书签中的原文段落，已保留在近似阅读位置；材料内容可能已改变。')
+      window.setTimeout(() => setInputMarkerNotice(''), 4500)
+    }
+    window.setTimeout(find, 60)
+  }, [])
+
   const jumpToInputMarker = (marker: InputMarker) => {
+    if (activeDoc?.kind === 'epub') setEpubAlignmentTail(null)
     setInputMarkerMenuOpen(false)
     if (marker.sourceKind === 'chat' && marker.sourcePath.startsWith('chat:')) {
       activateThread(marker.sourcePath.slice('chat:'.length))
@@ -1352,22 +1606,41 @@ function App() {
       return
     }
     if (activeDoc?.kind === 'pdf') pageApiRef.current?.scrollToPage(marker.pageNumber || 1)
-    else if (activeDoc?.kind === 'epub') handleChapterChange((marker.pageNumber || 1) - 1)
+    else if (activeDoc?.kind === 'epub') {
+      handleChapterChange((marker.pageNumber || 1) - 1)
+      window.setTimeout(() => restoreFlowBookmark(marker), 80)
+    }
     else if (activeDoc?.kind === 'text') {
       const scroller = document.querySelector<HTMLElement>('.reader-scroll')
-      if (scroller && marker.scrollRatio !== undefined) {
+      if (marker.blockIndex !== undefined) flowApiRef.current?.scrollToBlock?.(marker.blockIndex)
+      else if (scroller && marker.scrollRatio !== undefined) {
         scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight) * marker.scrollRatio
       } else flowApiRef.current?.scrollToTop()
+      window.setTimeout(() => restoreFlowBookmark(marker), 80)
     }
     const alignVisualMarker = (attempt = 0) => {
       const visual = document.querySelector<HTMLElement>(`.input-marker-visual[data-marker-id="${CSS.escape(marker.id)}"]`)
       const scroller = document.querySelector<HTMLElement>('.reader-scroll')
       if (visual && scroller) {
         const offset = visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 110
-        if (Math.abs(offset) > 4) scroller.scrollTop += offset
-        if (attempt < 3 && Math.abs(offset) > 4) window.setTimeout(() => alignVisualMarker(attempt + 1), 50)
+        if (Math.abs(offset) > 4) {
+          const desiredScrollTop = scroller.scrollTop + offset
+          const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+          const additionalTail = Math.ceil(desiredScrollTop - maxScrollTop)
+          if (additionalTail > 0 && activeDoc?.kind === 'epub' && activePath) {
+            setEpubAlignmentTail((current) => current?.path === activePath
+              && current.chapterIndex === (activeTab?.chapterIndex ?? 0)
+              && current.padding >= additionalTail
+              ? current
+              : { path: activePath, chapterIndex: activeTab?.chapterIndex ?? 0, padding: additionalTail })
+            if (attempt < 12) window.setTimeout(() => alignVisualMarker(attempt + 1), 80)
+            return
+          }
+          scroller.scrollTop = Math.min(desiredScrollTop, maxScrollTop)
+        }
+        if (attempt < 12 && Math.abs(offset) > 4) window.setTimeout(() => alignVisualMarker(attempt + 1), 60)
       } else if (marker.visualStyle && attempt < 12) {
-        window.setTimeout(() => alignVisualMarker(attempt + 1), 50)
+        window.setTimeout(() => alignVisualMarker(attempt + 1), 60)
       }
     }
     window.setTimeout(() => alignVisualMarker(), 120)
@@ -1387,6 +1660,9 @@ function App() {
     const pageLayer = pageElement.querySelector('.textLayer') || pageElement
     const pageText = tidyText(pageLayer.textContent || '')
     const index = pageText.indexOf(text)
+    const blockElement = startNode?.closest<HTMLElement>('[id^="flow-block-"], [data-paperlight-block-index]')
+    const blockIndexText = blockElement?.id.match(/^flow-block-(\d+)$/)?.[1]
+      ?? blockElement?.dataset.paperlightBlockIndex
     const rect = range.getBoundingClientRect()
     const next: TextSelection = {
       text,
@@ -1395,6 +1671,7 @@ function App() {
       pageNumber: Number(pageElement.dataset.pageNumber || 1),
       startOffset: index >= 0 ? index : undefined,
       endOffset: index >= 0 ? index + text.length : undefined,
+      blockIndex: blockIndexText !== undefined && Number.isSafeInteger(Number(blockIndexText)) ? Number(blockIndexText) : undefined,
       locationLabel: pageElement.dataset.location || undefined,
       documentName: activeTab?.name,
       documentPath: activePath || undefined,
@@ -1414,6 +1691,7 @@ function App() {
     senseRequestRef.current += 1
     setSenseLoading(false)
     setSense(null)
+    setSenseAnswerId(null)
     setSenseError('')
     setAllSenses(null)
   }, [activePath, activeTab?.name])
@@ -1665,6 +1943,7 @@ function App() {
   }, [updateActiveTab])
 
   const handleChapterChange = useCallback((chapterIndex: number) => {
+    setEpubAlignmentTail(null)
     setPageInput(String(chapterIndex + 1))
     // A new chapter starts at the top; the previous chapter's offset is stale.
     scrollPositions.current[activePath || ''] = 0
@@ -1675,15 +1954,22 @@ function App() {
   useEffect(() => {
     if (!pendingSourceJump || pendingSourceJump.path !== activePath || activeDoc?.status !== 'ready') return
     if (activeDoc.kind === 'pdf') pageApiRef.current?.scrollToPage(pendingSourceJump.position)
-    else if (activeDoc.kind === 'epub') handleChapterChange(pendingSourceJump.position - 1)
+    else if (activeDoc.kind === 'epub') {
+      handleChapterChange(pendingSourceJump.position - 1)
+      if (pendingSourceJump.marker) window.setTimeout(() => restoreFlowBookmark(pendingSourceJump.marker!), 80)
+    }
     else if (activeDoc.kind === 'text') {
       const scroller = document.querySelector<HTMLElement>('.reader-scroll')
-      if (scroller && pendingSourceJump.marker?.scrollRatio !== undefined) {
+      if (pendingSourceJump.marker?.blockIndex !== undefined) {
+        flowApiRef.current?.scrollToBlock?.(pendingSourceJump.marker.blockIndex)
+        window.setTimeout(() => restoreFlowBookmark(pendingSourceJump.marker!), 80)
+      } else if (scroller && pendingSourceJump.marker?.scrollRatio !== undefined) {
         scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight) * pendingSourceJump.marker.scrollRatio
+        if (pendingSourceJump.marker) window.setTimeout(() => restoreFlowBookmark(pendingSourceJump.marker!), 80)
       } else if (pendingSourceJump.position > 1) flowApiRef.current?.scrollBy((pendingSourceJump.position - 1) * 480)
     }
     setPendingSourceJump(null)
-  }, [activeDoc, activePath, handleChapterChange, pendingSourceJump])
+  }, [activeDoc, activePath, handleChapterChange, pendingSourceJump, restoreFlowBookmark])
 
   // PDF reports a pixel offset; the reflowing readers report a ratio as well so
   // the position survives window/splitter resizes that change the text height.
@@ -1990,7 +2276,16 @@ function App() {
             ? <div className="sidebar-empty"><span className="sidebar-empty-icon"><List size={19} /></span><span>打开文档后<br />在这里查看目录</span></div>
             : activeDoc.kind === 'pdf'
               ? <div className="outline-list">
-                {flattenOutline(activeDoc.outline).map(({ item, depth }, index) => <button key={`${item.title}-${index}`} className="outline-entry" style={{ paddingLeft: `${15 + depth * 13}px` }} onClick={async () => {
+                {flattenOutline(activeDoc.outline).map(({ item, depth }, index) => <button
+                  key={`${item.title}-${index}`}
+                  className="outline-entry"
+                  style={{ paddingLeft: `${15 + depth * 13}px` }}
+                  title={item.estimatedPage ? `按目录印刷页码估算跳转到第 ${item.pageNumber} 页；PDF 没有页标签，可能存在偏移。` : item.title}
+                  onClick={async () => {
+                  if (item.pageNumber) {
+                    pageApiRef.current?.scrollToPage(item.pageNumber)
+                    return
+                  }
                   if (!activePdf || !item.dest) return
                   try {
                     const destination = typeof item.dest === 'string' ? await activePdf.getDestination(item.dest) : item.dest
@@ -1999,7 +2294,7 @@ function App() {
                     const pageIndex = await activePdf.getPageIndex(reference as never)
                     pageApiRef.current?.scrollToPage(pageIndex + 1)
                   } catch { /* Some PDFs contain incomplete outline destinations. */ }
-                }}><ChevronRight size={12} /><span>{item.title}</span></button>)}
+                }}><ChevronRight size={12} /><span>{item.title}{item.estimatedPage ? ` · ${item.pageNumber}?` : ''}</span></button>)}
                 {activeDoc.outline.length === 0 && <div className="outline-empty">此 PDF 没有目录</div>}
               </div>
               : <div className="outline-list">
@@ -2011,6 +2306,21 @@ function App() {
                     onClick={() => {
                       if ('chapterIndex' in item) {
                         handleChapterChange(item.chapterIndex)
+                        if (item.anchorId) {
+                          const sourcePath = activePath
+                          const anchorId = item.anchorId
+                          const jump = (attempt = 0) => {
+                            if (stateRef.current.session.activePath !== sourcePath) return
+                            const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+                            const target = scroller?.querySelector<HTMLElement>(`#${CSS.escape(anchorId)}`)
+                            if (target) {
+                              target.scrollIntoView({ block: 'start' })
+                              return
+                            }
+                            if (attempt < 30) window.setTimeout(() => jump(attempt + 1), 100)
+                          }
+                          window.setTimeout(() => jump(), 50)
+                        }
                         return
                       }
                       flowApiRef.current?.scrollToAnchor(`flow-block-${item.block}`)
@@ -2121,7 +2431,7 @@ function App() {
               onSelectionKeyUp={(event) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') selectText() }}
               onUserScroll={() => setAnchor(null)}
               onReloadDocument={reloadActiveDocument}
-              inputMarkers={activeInputMarkers}
+              inputMarkers={readerInputMarkers}
               apiRef={pageApiRef}
             />
           ) : activeDoc?.status === 'ready' && activeDoc.kind === 'text' ? (
@@ -2139,7 +2449,7 @@ function App() {
               onSelectionKeyUp={(event) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') selectText() }}
               onUserScroll={() => setAnchor(null)}
               apiRef={flowApiRef}
-              inputMarkers={activeInputMarkers.filter((marker) => marker.pageNumber === 1 && Boolean(marker.visualStyle))}
+              inputMarkers={readerInputMarkers.filter((marker) => marker.pageNumber === 1 && Boolean(marker.visualStyle))}
             />
           ) : activeDoc?.status === 'ready' && activeDoc.kind === 'epub' && activeDoc.epub ? (
             <EpubReader
@@ -2155,7 +2465,8 @@ function App() {
               onUserScroll={() => setAnchor(null)}
               apiRef={flowApiRef}
               onNextChapter={() => handleChapterChange((activeTab.chapterIndex ?? 0) + 1)}
-              inputMarkers={activeInputMarkers.filter((marker) => marker.pageNumber === (activeTab.chapterIndex ?? 0) + 1 && Boolean(marker.visualStyle))}
+              inputMarkers={readerInputMarkers.filter((marker) => marker.pageNumber === (activeTab.chapterIndex ?? 0) + 1 && Boolean(marker.visualStyle))}
+              alignmentTailPadding={epubAlignmentTail?.path === activePath && epubAlignmentTail.chapterIndex === (activeTab.chapterIndex ?? 0) ? epubAlignmentTail.padding : 0}
             />
           ) : activeDoc?.status === 'error' ? (
             <div className="reader-status">
@@ -2242,6 +2553,10 @@ function App() {
             chatError={chatError}
             onSend={(question) => void sendChat(question)}
             onSaveExcerpt={(message) => saveExcerpt(message.content, message.id)}
+            onSaveReaderMessage={saveReaderChatAnswer}
+            onOpenSavedReaderAnswer={openNoteInNotesSpace}
+            readerAnswerSavedPath={savedReaderAnswer}
+            onSaveReaderAnswer={saveReaderFirstAnswer}
             onSaveSense={() => sense && saveExcerpt(`${sense.term}（${sense.contextualMeaning}）`)}
             onRetrySense={() => void runSenseLookup(queryTerm || sense?.term || '', lastContextRef.current)}
             vaultReady={vaultApi.ready}

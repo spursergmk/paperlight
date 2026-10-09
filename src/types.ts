@@ -8,6 +8,8 @@ export interface TextSelection {
   pageNumber: number
   startOffset?: number
   endOffset?: number
+  /** Stable flow block index for TXT/Markdown/EPUB source recovery. */
+  blockIndex?: number
   /** Human-readable position, e.g. an EPUB chapter title. */
   locationLabel?: string
   documentName?: string
@@ -165,6 +167,8 @@ export interface ExpressionContext {
   /** Text offset within a stable page/chapter view, used with quote/context verification. */
   startOffset?: number
   endOffset?: number
+  /** Stable block within a reflowed TXT/Markdown/EPUB chapter. */
+  blockIndex?: number
   quote?: string
   before?: string
   after?: string
@@ -190,6 +194,8 @@ export interface InputMarker {
   locationLabel?: string
   startOffset?: number
   endOffset?: number
+  /** Stable Markdown/TXT block index for progress bookmarks in reflowed files. */
+  blockIndex?: number
   scrollRatio?: number
   comment: string
   createdAt: string

@@ -27,6 +27,8 @@ export interface EpubOutlineItem {
   title: string
   chapterIndex: number
   level: number
+  /** Fragment from an EPUB nav/NCX target, when it points inside a chapter. */
+  anchorId?: string
 }
 
 export interface EpubBook {
@@ -139,7 +141,19 @@ function findElementByAnyName(elements: XmlNode[], names: string[]): XmlNode | n
   return null
 }
 
-interface TocEntry { title: string; path: string; level: number }
+interface TocEntry { title: string; path: string; level: number; anchorId?: string }
+
+function tocTarget(tocPath: string, href: string): { path: string; anchorId?: string } {
+  const hash = href.indexOf('#')
+  const pathHref = hash < 0 ? href : href.slice(0, hash)
+  const rawAnchor = hash < 0 ? '' : href.slice(hash + 1).split('?')[0]
+  let anchorId = rawAnchor
+  try { anchorId = decodeURIComponent(rawAnchor) } catch { /* keep a literal fragment */ }
+  return {
+    path: pathHref ? resolvePath(tocPath, pathHref) : tocPath,
+    ...(anchorId ? { anchorId } : {}),
+  }
+}
 
 /** Parses an EPUB3 nav document (nav[epub:type=toc]) or an EPUB2 NCX. */
 export function parseToc(source: string, tocPath: string): TocEntry[] {
@@ -155,7 +169,7 @@ export function parseToc(source: string, tocPath: string): TocEntry[] {
       if (node.name === 'ol') depth += 1
       if (node.name === 'a' && node.attrs.href) {
         const title = elementText(node)
-        if (title) entries.push({ title, path: resolvePath(tocPath, node.attrs.href), level: Math.max(0, depth - 1) })
+        if (title) entries.push({ title, ...tocTarget(tocPath, node.attrs.href), level: Math.max(0, depth - 1) })
       }
     }
   }
@@ -166,7 +180,7 @@ export function parseToc(source: string, tocPath: string): TocEntry[] {
       const title = elementText(findDescendant([point], 'text') || findDescendant([point], 'navlabel'))
       const content = findDescendant([point], 'content')
       const src = content?.attrs.src
-      if (title && src) entries.push({ title, path: resolvePath(tocPath, src), level: 0 })
+      if (title && src) entries.push({ title, ...tocTarget(tocPath, src), level: 0 })
     }
   }
 
@@ -186,6 +200,15 @@ export function chapterTitleFromHtml(html: string): string {
   const heading = /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i.exec(html)
   if (heading && heading[1].trim()) return decodeText(stripTags(heading[1]))
   return ''
+}
+
+function chapterHeadingsFromHtml(html: string): Array<{ title: string; level: number; anchorId?: string }> {
+  return scanElements(html).flatMap((node) => {
+    const match = /^h([1-6])$/.exec(node.name)
+    const title = elementText(node)
+    if (!match || !title) return []
+    return [{ title, level: Number(match[1]), ...(node.attrs.id ? { anchorId: node.attrs.id } : {}) }]
+  })
 }
 
 function stripTags(value: string): string {
@@ -255,14 +278,34 @@ export async function openEpub(data: Uint8Array): Promise<EpubBook> {
   }
   if (chapters.length === 0) throw new Error('无法读取这个 EPUB 的正文。')
 
-  const outline: EpubOutlineItem[] = []
-  for (const entry of toc) {
-    const index = chapters.findIndex((chapter) => chapter.path === entry.path)
-    if (index >= 0) outline.push({ title: entry.title, chapterIndex: index, level: entry.level })
-  }
-  if (outline.length === 0) {
-    chapters.forEach((chapter, index) => outline.push({ title: chapter.title, chapterIndex: index, level: 0 }))
-  }
+  const tocByChapter = chapters.map((chapter, chapterIndex) => toc.flatMap((entry) =>
+    entry.path === chapter.path
+      ? [{ title: entry.title, chapterIndex, level: entry.level, ...(entry.anchorId ? { anchorId: entry.anchorId } : {}) }]
+      : [],
+  ))
+  const outline: EpubOutlineItem[] = chapters.flatMap((chapter, chapterIndex) => {
+    const navItems = tocByChapter[chapterIndex]
+    const headings = chapterHeadingsFromHtml(chapter.html)
+    if (navItems.length === 0) {
+      return headings.length
+        ? headings.map((heading) => ({ ...heading, chapterIndex }))
+        : [{ title: chapter.title, chapterIndex, level: 0 }]
+    }
+
+    const matched = new Set<EpubOutlineItem>()
+    const result: EpubOutlineItem[] = headings.map((heading) => {
+      const navItem = navItems.find((item) => !matched.has(item)
+        && ((heading.anchorId && item.anchorId === heading.anchorId)
+          || item.title.localeCompare(heading.title, undefined, { sensitivity: 'base' }) === 0))
+      if (navItem) {
+        matched.add(navItem)
+        return navItem
+      }
+      return { ...heading, chapterIndex }
+    })
+    result.push(...navItems.filter((item) => !matched.has(item)))
+    return result
+  })
 
   const assetCache = new Map<string, string | null>()
   const assetUrl = async (fromPath: string, href: string): Promise<string | null> => {

@@ -12,7 +12,7 @@ import {
   mirrorFolderForMaterial, noteFolderForDocument, noteFolderPath, noteKindFor, noteTitleFromPath,
   notebookNoteMarkdown, notebookNotePath, notesFolderFromPath, parseNote, parseTimeOfDay,
   appendResearchChatLink, appendResearchSourceLink, mergeSemanticNoteMarkdown, remapLegacyNotePath, reportSlotDate, researchNoteMarkdown,
-  safeFolderName, senseNoteMarkdown, senseNotePath, slugify,
+  readerAnswerMarkdown, readerAnswerPath, safeFolderName, semanticAnswerMarkdown, senseNoteMarkdown, senseNotePath, slugify,
   stringifyNote, titleFromMarkdown, uniquePath, vaultBasename, vaultDirname, vaultJoin, wikiLinks,
 } from '../src/lib/vault.ts'
 import type { NotebookNote, SenseAtom, VaultEntry } from '../src/types.ts'
@@ -268,9 +268,33 @@ test('notebook notes, AI notes and chat answers land where they belong', () => {
     model: 'deepseek-flash',
     date: '2026-02-14',
   })
-  assert.equal(chat.path, `notes/${INBOX_FOLDER}/2026-02-14-义项整理.md`)
+  assert.equal(chat.path, 'notes/inbox/2026-02-14-义项整理.md')
   assert.equal(chatNotePath('2026-02-14', '义项整理'), chat.path)
   assert.match(chat.content, /## 依据的 vault 内容/)
+
+  const groundedChat = chatAnswerMarkdown({
+    threadTitle: '材料关联', question: '这些内容怎样联系？', answer: '共同点是…',
+    sources: ['notes/books/book1/source.md'], model: 'deepseek-flash', date: '2026-02-14', grounded: true,
+  })
+  assert.equal(groundedChat.path, 'notes/interconnections/2026-02-14-材料关联.md')
+  assert.equal(frontmatterString(parseNote(groundedChat.content).data, 'folder'), 'interconnections')
+
+  const reader = readerAnswerMarkdown({
+    answerId: 'request-7', title: 'numerous · 数量很多', markdown: '## 英文释义\n\nA complete answer.',
+    date: '2026-02-14', question: 'numerous 怎么用？', sourceName: 'Book.epub', locationLabel: 'Chapter 2', quote: 'a numerous set',
+  })
+  const readerNote = parseNote(reader)
+  assert.equal(readerAnswerPath('request-7', 'numerous · 数量很多'), readerAnswerPath('request-7', 'numerous · 数量很多'))
+  assert.equal(frontmatterString(readerNote.data, 'source'), 'reader-assistant')
+  assert.equal(frontmatterString(readerNote.data, 'answerId'), 'request-7')
+  assert.equal(frontmatterString(readerNote.data, 'folder'), 'inbox')
+  assert.match(readerNote.body, /a numerous set/)
+  assert.match(semanticAnswerMarkdown({
+    term: 'numerous', lemma: 'numerous', partOfSpeech: 'adjective', senseId: 'many',
+    contextualMeaning: '数量很多', definition: 'large in number', contextSentence: 'They are numerous.',
+    examples: [{ text: 'Numerous studies agree.', translation: '许多研究一致。', sourceType: 'ai_generated', citation: null }],
+    guidance: { scenarios: ['formal writing'], advice: ['Use with plural count nouns.'], frequency: 'common', alternatives: [], synonyms: [], antonyms: [], morphology: { root: '', prefix: '', suffix: '', note: '' } },
+  }), /AI 生成例句/)
 })
 
 test('a finding is a plain note in enlightenment/', () => {

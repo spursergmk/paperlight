@@ -11,9 +11,10 @@ import {
   dailySourceHash, dailySummarySection, dailyUserNotes, excerptForGrounding, frontmatterString, preserveDailyManagedEdits,
   findingNoteMarkdown, findingNotePath, findingEntries, researchNoteMarkdown, localDailySummary, localDateKey,
   markdownSection, markdownSectionAtLevel, materialMirrorFolders, notebookNoteMarkdown,
-  mergeSemanticNoteMarkdown, notebookNotePath, parseNote, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath,
+  mergeSemanticNoteMarkdown, notebookNotePath, parseNote, readerAnswerMarkdown, readerAnswerPath, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath,
   slugify, stringifyNote, titleFromMarkdown, uniquePath, vaultDirname, vaultJoin,
 } from '../lib/vault'
+import type { ReaderAnswerOptions } from '../lib/vault'
 import {
   buildGroundingContext, generateVaultNote, generateVaultReport, type VaultContextFile,
 } from '../lib/vaultai'
@@ -101,7 +102,8 @@ export interface VaultApi {
   saveNotebookNote(note: NotebookNote, atoms: SenseAtom[]): Promise<string>
   generateSenseNote(sense: SensePayload, context: string, senseIds?: string[], notesFolder?: string): Promise<string>
   generateTopicNote(topic: string, notesFolder?: string): Promise<string>
-  saveChatAnswer(thread: ChatThread, question: string, answer: string, sources: string[]): Promise<string>
+  saveChatAnswer(thread: ChatThread, question: string, answer: string, sources: string[], grounded?: boolean): Promise<string>
+  saveReaderAnswer(answer: ReaderAnswerOptions): Promise<string>
   groundingContext(paths: string[]): Promise<{ context: VaultContextFile[]; skipped: string[] }>
   /** Rebuilds the day's record list (local, cheap, no model call). */
   refreshDaily(date?: string, options?: { force?: boolean; silent?: boolean }): Promise<DailyInfo | null>
@@ -578,7 +580,7 @@ export function useVault(options: {
     }
   }, [takenPaths, writeNote])
 
-  const saveChatAnswer = useCallback(async (thread: ChatThread, question: string, answer: string, sources: string[]) => {
+  const saveChatAnswer = useCallback(async (thread: ChatThread, question: string, answer: string, sources: string[], grounded = false) => {
     const date = localDateKey()
     let target = chatAnswerMarkdown({
       threadTitle: thread.title,
@@ -587,13 +589,31 @@ export function useVault(options: {
       sources,
       model: modelRef.current,
       date,
+      grounded,
     })
-    if (takenPaths.has(target.path)) {
-      target = { path: uniquePath(target.path, takenPaths), content: target.content }
+    const occupied = new Set(entriesRef.current.map((entry) => entry.path))
+    if (occupied.has(target.path)) {
+      target = { path: uniquePath(target.path, occupied), content: target.content }
     }
     await writeNote(target.path, target.content)
     return target.path
-  }, [takenPaths, writeNote])
+  }, [writeNote])
+
+  const saveReaderAnswer = useCallback(async (answer: ReaderAnswerOptions) => {
+    const basePath = readerAnswerPath(answer.answerId, answer.title)
+    const occupied = new Set(entriesRef.current.map((entry) => entry.path))
+    let path = basePath
+    if (occupied.has(basePath)) {
+      try {
+        const existing = parseNote(await readNote(basePath))
+        if (frontmatterString(existing.data, 'source') === 'reader-assistant'
+          && frontmatterString(existing.data, 'answerId') === answer.answerId) return basePath
+      } catch { /* A stale or unreadable path is treated as occupied below. */ }
+      path = uniquePath(basePath, new Set([...occupied, basePath]))
+    }
+    await writeNote(path, readerAnswerMarkdown(answer))
+    return path
+  }, [readNote, writeNote])
 
   const groundingContext = useCallback(async (paths: string[]) => buildGroundingContext(paths, readNote), [readNote])
 
@@ -1002,6 +1022,7 @@ export function useVault(options: {
     generateSenseNote,
     generateTopicNote,
     saveChatAnswer,
+    saveReaderAnswer,
     groundingContext,
     refreshDaily,
     generateReport,

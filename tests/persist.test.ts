@@ -130,13 +130,16 @@ test('legacy state loads without marks and new input markers survive safe state 
   const marker = {
     id: 'mark-1', sourcePath: '/books/sample.pdf', sourceKind: 'pdf', purpose: 'content',
     visualStyle: 'highlight', quote: 'worth considering', before: 'This is ', after: ' again.',
-    pageNumber: 4, startOffset: 28, endOffset: 45, comment: 'check the claim', createdAt: '2026-10-08T12:00:00.000Z',
+    pageNumber: 4, startOffset: 28, endOffset: 45, blockIndex: 7, scrollRatio: 0.62,
+    comment: 'check the claim', createdAt: '2026-10-08T12:00:00.000Z',
   }
   install(stateWith({ savedAt: 20, inputMarkers: [marker, { ...marker, id: '', purpose: 'unknown' }] }))
   const migrated = await loadState()
   assert.equal(migrated.inputMarkers.length, 1)
   assert.equal(migrated.inputMarkers[0]?.quote, 'worth considering')
   assert.equal(migrated.inputMarkers[0]?.sourcePath, '/books/sample.pdf')
+  assert.equal(migrated.inputMarkers[0]?.blockIndex, 7)
+  assert.equal(migrated.inputMarkers[0]?.scrollRatio, 0.62)
 
   install(stateWith({ savedAt: 21, readingActivity: {
     '2026-10-09': {

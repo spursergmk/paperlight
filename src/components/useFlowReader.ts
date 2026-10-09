@@ -9,6 +9,7 @@ export interface FlowScrollState {
 export interface FlowReaderApi {
   scrollToTop: () => void
   scrollToAnchor: (anchorId: string) => void
+  scrollToBlock?: (blockIndex: number) => void
   scrollBy: (delta: number) => void
 }
 

@@ -52,7 +52,7 @@ test('expression Markdown round-trips meanings, notes, relations and provenance'
     cognitivePath: 'manual',
     context: {
       sourceKind: 'assistant', sourceName: '阅读助手回答', quote: 'We seem to be on the same wavelength.',
-      sourcePath: '/library/article.pdf', pageNumber: 5,
+      sourcePath: '/library/article.pdf', pageNumber: 5, blockIndex: 17,
     },
   })
   record.relations.push({

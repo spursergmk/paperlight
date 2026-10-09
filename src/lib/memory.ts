@@ -87,6 +87,7 @@ function cleanContext(value: unknown): ExpressionContext | null {
     ...(pageNumber ? { pageNumber } : {}),
     ...(Number.isSafeInteger(item.startOffset) && Number(item.startOffset) >= 0 ? { startOffset: Number(item.startOffset) } : {}),
     ...(Number.isSafeInteger(item.endOffset) && Number(item.endOffset) >= 0 ? { endOffset: Number(item.endOffset) } : {}),
+    ...(Number.isSafeInteger(item.blockIndex) && Number(item.blockIndex) >= 0 ? { blockIndex: Number(item.blockIndex) } : {}),
     ...(text(item.quote, 1_200) ? { quote: text(item.quote, 1_200) } : {}),
     ...(text(item.before, 500) ? { before: text(item.before, 500) } : {}),
     ...(text(item.after, 500) ? { after: text(item.after, 500) } : {}),

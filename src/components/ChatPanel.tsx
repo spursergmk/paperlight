@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Check, Send, Sparkles, StickyNote } from 'lucide-react'
+import { Check, FilePlus2, Send, Sparkles, StickyNote } from 'lucide-react'
+import MarkdownPreview from './MarkdownPreview'
 import SenseCard from './SenseCard'
 import type { ChatMessage, SensePayload } from '../types'
 
@@ -12,6 +13,10 @@ interface ChatPanelProps {
   savedMessageIds: ReadonlySet<string>
   onSend: (question: string) => void
   onSaveExcerpt: (message: ChatMessage) => void
+  onSaveReaderMessage: (message: ChatMessage) => void
+  onOpenSavedAnswer: (path: string) => void
+  vaultReady: boolean
+  vaultBusy: boolean
   onOpenNotebook: () => void
 }
 
@@ -22,7 +27,8 @@ const SUGGESTIONS = [
 ]
 
 export default function ChatPanel({
-  sense, model, messages, sending, error, savedMessageIds, onSend, onSaveExcerpt, onOpenNotebook,
+  sense, model, messages, sending, error, savedMessageIds, onSend, onSaveExcerpt,
+  onSaveReaderMessage, onOpenSavedAnswer, vaultReady, vaultBusy, onOpenNotebook,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState('')
   const savedCount = messages.filter((message) => savedMessageIds.has(message.id)).length
@@ -38,7 +44,9 @@ export default function ChatPanel({
     <div className="chat-panel">
       {sense ? (
         <>
-          <div className="chat-fixed-label"><Sparkles size={11} /> 本次语义 · 对话的固定首条输出</div>
+          <div className="chat-fixed-label">
+            <span><Sparkles size={11} /> 本次语义 · 对话的固定首条输出</span>
+          </div>
           <SenseCard sense={sense} model={model} compact />
         </>
       ) : (
@@ -51,7 +59,7 @@ export default function ChatPanel({
             const saved = savedMessageIds.has(message.id)
             return (
               <li key={message.id} className={message.role}>
-                <p>{message.content}</p>
+                <MarkdownPreview markdown={message.content} className="message-body" />
                 <button
                   type="button"
                   className={saved ? 'saved' : ''}
@@ -61,6 +69,15 @@ export default function ChatPanel({
                 >
                   {saved ? <><Check size={11} /> 已存笔记</> : <><StickyNote size={11} /> 存为笔记</>}
                 </button>
+                {message.role === 'assistant' && (message.savedPath ? (
+                  <button type="button" className="saved" onClick={() => onOpenSavedAnswer(message.savedPath!)}>
+                    <Check size={11} /> 已存入 inbox · 打开
+                  </button>
+                ) : (
+                  <button type="button" disabled={!vaultReady || vaultBusy} onClick={() => onSaveReaderMessage(message)}>
+                    <FilePlus2 size={11} /> 存入 inbox
+                  </button>
+                ))}
               </li>
             )
           })}

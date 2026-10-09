@@ -2,7 +2,7 @@
   "name": "paperlight",
   "productName": "Paperlight",
   "private": true,
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Paperlight：本地优先的英语阅读与语言积累桌面应用。阅读 PDF/EPUB/TXT/Markdown，收录表达和语义、记笔记，并围绕 Vault 内容开展 grounded 对话。",
   "type": "module",
   "main": "electron/main.mjs",

@@ -32,6 +32,7 @@ export default function EpubReader({
   apiRef,
   onNextChapter,
   inputMarkers,
+  alignmentTailPadding,
 }: {
   book: EpubBook
   chapterIndex: number
@@ -45,6 +46,7 @@ export default function EpubReader({
   apiRef: React.RefObject<FlowReaderApi | null>
   onNextChapter: () => void
   inputMarkers: InputMarker[]
+  alignmentTailPadding: number
 }) {
   const chapter = book.chapters[chapterIndex]
   const pageRef = useRef<HTMLElement>(null)
@@ -79,6 +81,9 @@ export default function EpubReader({
         FORBID_ATTR: ['style', 'onerror', 'onload', 'srcset'],
         ALLOW_DATA_ATTR: false,
       }) as unknown as DocumentFragment
+
+      Array.from(clean.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote, pre, dt, dd'))
+        .forEach((element, index) => element.setAttribute('data-paperlight-block-index', String(index)))
 
       // Resolve images (and SVG references) against the book archive.
       const images = Array.from(clean.querySelectorAll('img'))
@@ -153,6 +158,9 @@ export default function EpubReader({
           </div>
         )}
       </article>
+      {alignmentTailPadding > 0 && (
+        <div className="epub-alignment-tail" aria-hidden="true" style={{ height: `${alignmentTailPadding}px` }} />
+      )}
     </div>
   )
 }

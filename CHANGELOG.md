@@ -9,6 +9,24 @@ V2 开发批次使用版本号：V2.1 → `2.1.0`、V2.2 → `2.2.0`、V2.3 → 
 
 V2 开发批次在现有开发分支更新版本、记录变更、创建 commit 并推送分支。此流程不调用会创建正式标签的 `npm run release`，不推送 `v*` 标签、不发布 GitHub Release，也不构建安装包；本地体验 App 使用 `npm run app:mac` 更新根目录 `Paperlight.app`。
 
+## [2.3.0] · V2.3 Preview（开发分支；不是正式发布）
+
+### 修复
+
+- TXT、Markdown 与 EPUB 的阅读书签记录当前段落和稳定块位置；重新打开后能返回对应原文，定位失败时明确提示并保留近似进度。阅读位置退出或切换后台前会即时落盘。
+- EPUB 目录合并导航条目与章节标题，保留章节内锚点；PDF 没有嵌入目录时扫描开篇印刷目录并标注估算页码。
+- 阅读助手的完整初次回答与任意追问可分别保存为 `notes/inbox/` Markdown；grounded 对话保存到 `notes/interconnections/`，未限定对话存入 `notes/inbox/`。旧 `notes/_inbox/` 数据仍可读取且不自动搬动。
+- 阅读助手和对话里的 AI 回答使用安全 Markdown 预览；保存回答不会再次请求模型。
+- PDF/EPUB/TXT/Markdown 输入标记可恢复视觉高亮和评论；表达来源回溯会打开原材料、恢复章节/页并高亮来源原文。重复表达保留各自语境。
+
+### 本批验证
+
+- `npm run check`：通过；生产构建成功、102 项自动化测试通过、Node 语法检查通过。
+- `npm run smoke`：通过；125 项 Electron 桌面端检查全部通过，包含书签关闭重开、目录识别和跳转、PDF/EPUB 输入标记持久化、表达跨材料合并、表达来源回溯原文高亮、阅读助手回答存笔记、grounded 对话归档、Daily 兼容和 Vault 路径安全。
+- 测试使用临时 Vault 和本地 AI stub；未读写真实用户 Vault。
+- 构建仍提示主 JS chunk 超过 500 KB；本批不调整代码拆分。
+- 版本号 `2.3.0`；只更新仓库根 `Paperlight.app`，不生成安装包、不创建标签、不发布 Release。
+
 ## [2.2.0] · V2.2 Preview（开发分支；不是正式发布）
 
 ### 修复
