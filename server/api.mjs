@@ -416,13 +416,13 @@ function notePrompt(request) {
   return `Write a complete vault note on this topic: ${JSON.stringify(request.term || request.question)}. Extra instruction: ${JSON.stringify(request.question)}`
 }
 
-const dailySummarySystemPrompt = `You are Paperlight's daily report writer for a local Markdown knowledge vault.
-Return Markdown only (no YAML frontmatter, no code fences) with exactly these five sections: "## 读了多久", "## 读了什么", "## 表达", "## 语义", and "## 总结与勉励（继往开来）".
-Use only the supplied records and findings: never invent reading, expressions, senses, files or conclusions. Treat any reading duration as an estimate and do not make it more precise. Keep expression entries distinct from semantic entries. In the last section, summarize what the user actually did, connect it to prior findings only when the supplied notes support that, and offer one next step grounded in today's material; avoid generic encouragement. Cite a source as [[path]] whenever a statement comes from one specific vault record. Do not expose local file paths for reading sources when no vault path is supplied.
+const dailySummarySystemPrompt = `You are Paperlight's daily reflection writer for a local Markdown knowledge vault.
+Return only the content for the fifth Daily section, without a heading, YAML frontmatter or code fences. Use a few concise Markdown paragraphs or bullets.
+Use only the supplied records and findings: never invent reading, expressions, senses, files or conclusions. Treat any reading duration as an estimate and do not make it more precise. In the reflection, summarize what the user actually did, connect it to prior findings only when the supplied notes support that, and offer one next step grounded in today's material; avoid generic encouragement. Cite a source as [[path]] whenever a statement comes from one specific vault record. Do not expose local file paths for reading sources when no vault path is supplied.
 "findings" are the user's own conclusions in the enlightenment folder: treat them as the user's own thinking, reflect them accurately, and mark where they connect to (or go beyond) the day's records. If a finding contradicts a record, say so instead of smoothing it over. Write in Simplified Chinese; keep English terms in English.`
 
 function dailySummaryPrompt(request) {
-  return `Write the report for ${request.date}. Records (JSON): ${JSON.stringify(request.records)}. User findings (JSON): ${JSON.stringify(request.findings)}`
+  return `Write the summary and encouragement for ${request.date}. Records (JSON): ${JSON.stringify(request.records)}. User findings (JSON): ${JSON.stringify(request.findings)}`
 }
 
 // Models sometimes wrap a plain-Markdown answer in a fence or add frontmatter.

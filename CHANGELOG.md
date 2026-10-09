@@ -9,6 +9,22 @@ V2 开发批次使用版本号：V2.1 → `2.1.0`、V2.2 → `2.2.0`、V2.3 → 
 
 V2 开发批次在现有开发分支更新版本、记录变更、创建 commit 并推送分支。此流程不调用会创建正式标签的 `npm run release`，不推送 `v*` 标签、不发布 GitHub Release，也不构建安装包；本地体验 App 使用 `npm run app:mac` 更新根目录 `Paperlight.app`。
 
+## [2.2.0] · V2.2 Preview（开发分支；不是正式发布）
+
+### 修复
+
+- 每天只生成一份 `Daily/<日期>.md`：总结写入第五部分，不再另建日报文件；升级前已有的 `-report.md` 旧日报保留原样，并在 Notes 树中标注为旧版副本。
+- Daily 升级兼容 V1/V2 的旧格式，将旧总结并入当天文件；原 Markdown 与独立旧日报都保留，发生目标冲突时不覆盖现有内容。
+- 阅读时间仅在阅读器前台且聚焦、近期有阅读交互时估算；空闲 45 秒、采样间隔异常过长、切到后台或失焦时停止累计，并按本地午夜分日。
+
+### 本批验证
+
+- `npm run check`：通过；生产构建成功、99 项自动化测试通过、9 个 Node JavaScript 文件语法检查通过。
+- `npm run smoke`：通过；114 项 Electron 桌面检查全部通过，含前台阅读时间实际记账、Daily 单文件生成、旧独立日报保留与标识、旧 Daily 迁移，以及 V1 阅读/标记/笔记/对话回归。
+- `npm run app:mac`：通过；已更新仓库根目录 `Paperlight.app` 为 2.2.0 universal（x64 + arm64），`codesign --verify --deep --strict` 通过；采用 ad-hoc 签名，未公证。
+- 构建仍显示 Vite 主 JS chunk 超过 500 KB 的提示；本批没有调整代码拆分。
+- 测试仅使用临时 Vault，不读取或修改用户真实 Vault。
+
 ## [2.1.0] · V2.1 Preview（开发分支；不是正式发布）
 
 ### 修复

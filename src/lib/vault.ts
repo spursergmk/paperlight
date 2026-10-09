@@ -9,8 +9,8 @@
 //   notes/<mirror>/…       senses and notes for that material (mirror of materials/)
 //   notes/_inbox/…         notes with no material context (chat answers, quick notes)
 //   enlightenment/…        the user's own "专项发现"
-//   Daily/<date>.md        the day's record list
-//   Daily/<date>-report.md the day's report (generated at a fixed time, overwritten)
+//   Daily/<date>.md        the day's records and generated summary
+//   Daily/<date>-report.md legacy generated reports (read-only compatibility)
 //
 // Everything in this module is a pure function over strings and plain objects.
 // The app writes the results through the vault file port (see lib/vaultfs.ts),
@@ -46,7 +46,7 @@ export const MARKDOWN_EXTENSION = /\.(?:md|markdown)$/i
 export const SOURCE_EXTENSION = /\.(?:pdf|epub|txt|text)$/i
 
 /** Bumping this makes every existing daily note regenerate once (format change). */
-export const DAILY_FORMAT_VERSION = 4
+export const DAILY_FORMAT_VERSION = 5
 
 /** Budgets for strictly grounded vault chat (mirrored by server/api.mjs). */
 export const GROUNDING_FILE_LIMIT = 8
@@ -776,7 +776,7 @@ export function dailySourceHash(entries: DailyEntry[], extra: string[] = []): st
   return hashString(material.join('\n'))
 }
 
-/** Always-available aggregation, used as the report body until (or without) AI. */
+/** Always-available five-section Daily, used when no generated summary exists. */
 export function localDailySummary(date: string, entries: DailyEntry[], activity?: ReadingActivityDay): string {
   const senses = entries.filter((entry) => entry.kind === 'sense' || entry.kind === 'semantic')
   const expressions = entries.filter((entry) => entry.kind === 'expression')
@@ -843,7 +843,7 @@ export function preserveDailyManagedEdits(body: string, storedHash: string, user
 /**
  * Text of one `## heading` section, stopping at the next heading of the SAME or
  * a higher level. Used by the legacy daily migration: a summary may contain
- * `###` sub-sections that must survive the move into the report file.
+ * `###` sub-sections that must survive migration into the single Daily file.
  */
 export function markdownSectionAtLevel(body: string, heading: string): string {
   const text = String(body ?? '')
@@ -865,6 +865,20 @@ export function markdownSection(body: string, heading: string): string {
   return (next ? rest.slice(0, next.index) : rest).trim()
 }
 
+/** Reads the text inside Daily's fifth section without consuming its record links. */
+export function dailySummarySection(body: string): string {
+  const heading = '## 总结与勉励（继往开来）'
+  const index = String(body ?? '').indexOf(heading)
+  if (index < 0) return ''
+  const rest = String(body ?? '').slice(index + heading.length)
+  const boundaries = [
+    /\n#{1,2}\s/.exec(rest)?.index,
+    rest.indexOf('\n### 笔记与其他记录') >= 0 ? rest.indexOf('\n### 笔记与其他记录') : undefined,
+    rest.indexOf('\n### 我的补充') >= 0 ? rest.indexOf('\n### 我的补充') : undefined,
+  ].filter((value): value is number => value !== undefined)
+  return rest.slice(0, boundaries.length ? Math.min(...boundaries) : rest.length).trim()
+}
+
 function entryLine(entry: DailyEntry): string {
   const label = entry.kind === 'file'
     ? `[[${entry.path || entry.label}]]`
@@ -873,20 +887,26 @@ function entryLine(entry: DailyEntry): string {
 }
 
 /**
- * The day's record list. The AI report lives in its own file, so this file is
- * always cheap to rebuild (no model call) and always current.
+ * The day's complete Daily: one Markdown file with five evidence-backed
+ * sections. Existing generated summaries are retained here until refreshed.
  */
 export function dailyNoteMarkdown(options: {
   date: string
   entries: DailyEntry[]
   hash: string
   updated?: string
-  reportPath?: string | null
   reportTime?: string
   userNotes?: string
   readingActivity?: ReadingActivityDay
+  summaryText?: string
+  summarySource?: 'ai' | 'local'
+  summaryGeneratedAt?: string
+  summaryHash?: string
 }): string {
-  const { date, entries, hash, updated, reportPath, reportTime = DEFAULT_REPORT_TIME, userNotes = '', readingActivity } = options
+  const {
+    date, entries, hash, updated, reportTime = DEFAULT_REPORT_TIME, userNotes = '', readingActivity,
+    summaryText, summarySource, summaryGeneratedAt, summaryHash,
+  } = options
   const duration = readingActivity?.seconds || 0
   const sources = [...(readingActivity?.sources || [])].sort((a, b) => b.seconds - a.seconds)
   const expressions = entries.filter((entry) => entry.kind === 'expression')
@@ -899,9 +919,7 @@ export function dailyNoteMarkdown(options: {
   const body: string[] = [
     `# ${date}`,
     '',
-    reportPath
-      ? `> 日报：[[${reportPath}]] · 每天 ${reportTime} 自动生成，也可以手动重新生成`
-      : `> 日报：每天 ${reportTime} 自动生成（也可以在右侧手动生成）`,
+    `> Daily · 记录自动更新；总结每天 ${reportTime} 生成，也可以手动更新`,
     '',
     '## 读了多久',
     '',
@@ -923,8 +941,7 @@ export function dailyNoteMarkdown(options: {
   body.push('', '## 语义', '')
   if (semantics.length === 0) body.push('- 今天没有新增语义。')
   else for (const entry of semantics) body.push(entryLine(entry))
-  body.push('', '## 总结与勉励（继往开来）', '', summary)
-  if (reportPath) body.push('', `当天的回顾与后续建议：[[${reportPath}]]`)
+  body.push('', '## 总结与勉励（继往开来）', '', summaryText?.trim() || summary)
   if (otherNotes.length) {
     body.push('', '### 笔记与其他记录')
     for (const entry of otherNotes) body.push(entryLine(entry))
@@ -941,7 +958,9 @@ export function dailyNoteMarkdown(options: {
     hash,
     managedHash: dailyManagedBodyHash(bodyText),
     format: String(DAILY_FORMAT_VERSION),
-    ...(reportPath ? { report: reportPath } : {}),
+    ...(summarySource ? { summarySource } : {}),
+    ...(summaryGeneratedAt ? { summaryGeneratedAt } : {}),
+    ...(summaryHash ? { summaryHash } : {}),
     tags: ['paperlight', 'daily'],
     // The day's senses stay linkable from the note itself, so the info panel
     // (and any backlink view) can resolve them without parsing the body.
@@ -950,7 +969,7 @@ export function dailyNoteMarkdown(options: {
   }, bodyText)
 }
 
-/** The report itself: one file per day, overwritten on every generation. */
+/** Legacy standalone report format retained for reading and recovery. */
 export function dailyReportMarkdown(options: {
   date: string
   summary: string

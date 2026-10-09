@@ -46,7 +46,7 @@ import {
   confirmSemanticMerge, createNote, mergeSemanticAtom, possibleSemanticMergeCandidates, relateSense, semanticRecordForId,
   selectionMatchesSemanticTerm, senseKeyOf, toAtom,
 } from './lib/notebook'
-import { recordReadingInterval } from './lib/readingActivity'
+import { activeReadingInterval, recordReadingInterval, READING_TICK_INTERVAL_MS } from './lib/readingActivity'
 import {
   absoluteVaultPath, isValidTimeOfDay, mirrorFolderForMaterial, noteFolderPath, remapLegacyNotePath,
 } from './lib/vault'
@@ -275,20 +275,34 @@ function App() {
     lastReadingInteractionRef.current = 0
     lastReadingTickRef.current = Date.now()
     const markInteraction = () => { lastReadingInteractionRef.current = Date.now() }
+    const clearForegroundActivity = () => {
+      lastReadingTickRef.current = Date.now()
+      lastReadingInteractionRef.current = 0
+    }
+    const resetForegroundClock = () => { lastReadingTickRef.current = Date.now() }
+    const handleVisibilityChange = () => {
+      lastReadingTickRef.current = Date.now()
+      if (document.hidden) lastReadingInteractionRef.current = 0
+    }
     const interval = window.setInterval(() => {
       const now = Date.now()
       const previous = lastReadingTickRef.current || now
       lastReadingTickRef.current = now
-      const elapsed = Math.min(20_000, Math.max(0, now - previous))
-      const recentlyActive = lastReadingInteractionRef.current > 0 && now - lastReadingInteractionRef.current <= 60_000
-      if (!document.hidden && document.hasFocus() && recentlyActive && elapsed >= 1_000) {
+      const activeInterval = activeReadingInterval({
+        previousTickMs: previous,
+        nowMs: now,
+        lastInteractionMs: lastReadingInteractionRef.current,
+        hidden: document.hidden,
+        focused: document.hasFocus(),
+      })
+      if (activeInterval) {
         const name = activeTab?.name || activePath.split(/[\\/]/).pop() || '阅读材料'
         setState((current) => ({
           ...current,
-          readingActivity: recordReadingInterval(current.readingActivity, now - elapsed, now, activePath, name),
+          readingActivity: recordReadingInterval(current.readingActivity, activeInterval.fromMs, activeInterval.toMs, activePath, name),
         }))
       }
-    }, 15_000)
+    }, READING_TICK_INTERVAL_MS)
     document.documentElement.dataset.paperlightReadingTimer = 'active'
     window.addEventListener('pointerdown', markInteraction, true)
     window.addEventListener('pointermove', markInteraction, { capture: true, passive: true })
@@ -296,6 +310,9 @@ function App() {
     window.addEventListener('wheel', markInteraction, { capture: true, passive: true })
     window.addEventListener('scroll', markInteraction, true)
     window.addEventListener('touchstart', markInteraction, { capture: true, passive: true })
+    window.addEventListener('blur', clearForegroundActivity)
+    window.addEventListener('focus', resetForegroundClock)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => {
       window.clearInterval(interval)
       delete document.documentElement.dataset.paperlightReadingTimer
@@ -305,6 +322,9 @@ function App() {
       window.removeEventListener('wheel', markInteraction, true)
       window.removeEventListener('scroll', markInteraction, true)
       window.removeEventListener('touchstart', markInteraction, true)
+      window.removeEventListener('blur', clearForegroundActivity)
+      window.removeEventListener('focus', resetForegroundClock)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [activeDoc?.status, activePath, activeSpace, activeTab?.name, hydrated])
 

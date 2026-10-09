@@ -5,10 +5,10 @@ import type {
 } from '../types'
 import { getApiConfigStatus } from '../lib/translation'
 import {
-  DAILY_DIR, DAILY_NOTES_HEADING, ENLIGHTENMENT_DIR, FINDING_CHARS_PER_FILE, FINDING_FILE_LIMIT, INBOX_FOLDER,
+  DAILY_DIR, DAILY_FORMAT_VERSION, DAILY_NOTES_HEADING, ENLIGHTENMENT_DIR, FINDING_CHARS_PER_FILE, FINDING_FILE_LIMIT, INBOX_FOLDER,
   LEGACY_DAILY_DIR, MANAGED_DIRS, MATERIALS_DIR, NOTES_DIR, aiNoteMarkdown, aiNotePath,
-  buildVaultTree, chatAnswerMarkdown, dailyEntriesFromNotebook, dailyNoteMarkdown, dailyNotePath,
-  dailyReportMarkdown, dailyReportPath, dailySourceHash, dailyUserNotes, excerptForGrounding, preserveDailyManagedEdits,
+  buildVaultTree, chatAnswerMarkdown, dailyEntriesFromNotebook, dailyNoteMarkdown, dailyNotePath, dailyReportPath,
+  dailySourceHash, dailySummarySection, dailyUserNotes, excerptForGrounding, frontmatterString, preserveDailyManagedEdits,
   findingNoteMarkdown, findingNotePath, findingEntries, researchNoteMarkdown, localDailySummary, localDateKey,
   markdownSection, markdownSectionAtLevel, materialMirrorFolders, notebookNoteMarkdown,
   mergeSemanticNoteMarkdown, notebookNotePath, parseNote, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath,
@@ -39,6 +39,13 @@ export interface ReportInfo {
   records: number
   /** The day's records changed after this report was written. */
   stale: boolean
+}
+
+interface DailySummary {
+  text: string
+  source: 'local' | 'ai'
+  generatedAt: string
+  hash: string
 }
 
 export interface VaultApi {
@@ -159,6 +166,7 @@ export function useVault(options: {
   const scaffolding = useRef(new Set<string>())
   const legacyChecked = useRef(new Set<string>())
   const scheduledAttempts = useRef(new Set<string>())
+  const reportGenerationInProgress = useRef(new Set<string>())
   const noticeTimer = useRef<number | null>(null)
   const dailyTimer = useRef<number | null>(null)
   const refreshDailyRef = useRef<((date?: string, options?: { force?: boolean; silent?: boolean }) => Promise<DailyInfo | null>) | null>(null)
@@ -613,7 +621,11 @@ export function useVault(options: {
     }
   }, [])
 
-  const refreshDaily = useCallback(async (date = localDateKey(), runOptions: { force?: boolean; silent?: boolean } = {}) => {
+  const refreshDaily = useCallback(async (date = localDateKey(), runOptions: {
+    force?: boolean
+    silent?: boolean
+    summary?: DailySummary
+  } = {}) => {
     const current = rootRef.current
     if (!current) return null
     setOrganizingDaily(true)
@@ -628,8 +640,6 @@ export function useVault(options: {
       }
       const path = dailyNotePath(date)
       const { entries: list, hash } = await readDayState(date, listing)
-      const reportPath = dailyReportPath(date)
-      const reportKnown = listing.some((entry) => entry.path === reportPath)
 
       let existing = ''
       if (listing.some((entry) => entry.path === path)) {
@@ -640,10 +650,6 @@ export function useVault(options: {
         }
       }
       const parsed = existing ? parseNote(existing) : null
-      const settled = Boolean(parsed)
-        && parsed?.data.hash === hash
-        && (parsed?.data.report === (reportKnown ? reportPath : undefined)
-          || (!reportKnown && !parsed?.data.report))
 
       let userNotes = parsed ? dailyUserNotes(parsed.body) : ''
       if (!parsed && existing) {
@@ -651,12 +657,48 @@ export function useVault(options: {
         userNotes = markdownSection(existing, DAILY_NOTES_HEADING) || existing.trim()
       }
 
-      if (parsed && (!settled || runOptions.force)) {
+      if (parsed && (parsed.data.hash !== hash || runOptions.force || runOptions.summary)) {
         const managedHash = typeof parsed.data.managedHash === 'string' ? parsed.data.managedHash : ''
         userNotes = preserveDailyManagedEdits(parsed.body, managedHash, userNotes)
       }
 
-      if (!runOptions.force && settled) {
+      let dailySummary = runOptions.summary
+      if (!dailySummary && parsed && frontmatterString(parsed.data, 'summarySource') === 'ai') {
+        const text = dailySummarySection(parsed.body)
+        if (text) {
+          dailySummary = {
+            text,
+            source: 'ai',
+            generatedAt: frontmatterString(parsed.data, 'summaryGeneratedAt'),
+            hash: frontmatterString(parsed.data, 'summaryHash') || frontmatterString(parsed.data, 'hash'),
+          }
+        }
+      }
+      if (!dailySummary && parsed) {
+        const archivePath = frontmatterString(parsed.data, 'report') || dailyReportPath(date)
+        if (listing.some((entry) => !entry.directory && entry.path === archivePath)) {
+          try {
+            const archived = parseNote(await readNote(archivePath))
+            const text = dailySummarySection(archived.body)
+            if (text && frontmatterString(archived.data, 'source') === 'ai') {
+              dailySummary = {
+                text,
+                source: 'ai',
+                generatedAt: frontmatterString(archived.data, 'generated'),
+                hash: frontmatterString(archived.data, 'hash') || frontmatterString(parsed.data, 'hash'),
+              }
+            }
+          } catch { /* the archived report remains untouched if it cannot be read */ }
+        }
+      }
+
+      const settled = Boolean(parsed)
+        && frontmatterString(parsed!.data, 'hash') === hash
+        && frontmatterString(parsed!.data, 'format') === String(DAILY_FORMAT_VERSION)
+        && !frontmatterString(parsed!.data, 'report')
+        && (!dailySummary || frontmatterString(parsed!.data, 'summarySource') === dailySummary.source)
+
+      if (!runOptions.force && !runOptions.summary && settled) {
         const info: DailyInfo = {
           date,
           path,
@@ -665,7 +707,7 @@ export function useVault(options: {
           hash,
         }
         setDaily(info)
-        await loadReportInfo(date, reportPath, list, hash, listing)
+        await loadReportInfo(date, path, list, hash)
         return info
       }
 
@@ -673,14 +715,17 @@ export function useVault(options: {
         date,
         entries: list,
         readingActivity: readingActivityRef.current[date],
-        reportPath: reportKnown ? reportPath : null,
         reportTime: reportTimeRef.current,
         userNotes,
         hash,
+        summaryText: dailySummary?.text,
+        summarySource: dailySummary?.source,
+        summaryGeneratedAt: dailySummary?.generatedAt,
+        summaryHash: dailySummary?.hash,
       }))
       const info: DailyInfo = { date, path, updatedAt: new Date().toISOString(), entryCount: list.length, hash }
       setDaily(info)
-      await loadReportInfo(date, reportPath, list, hash, listing)
+      await loadReportInfo(date, path, list, hash)
       if (!runOptions.silent) flashNotice(`${date} 的记录清单已更新（${list.length} 条）。`)
       return info
     } catch (caught) {
@@ -693,24 +738,24 @@ export function useVault(options: {
 
   const loadReportInfo = useCallback(async (
     date: string,
-    reportPath: string,
+    path: string,
     list: DailyEntry[],
     hash: string,
-    listing: VaultEntry[],
   ) => {
-    if (!listing.some((entry) => entry.path === reportPath)) {
-      setReport(null)
-      return null
-    }
     try {
-      const parsed = parseNote(await readNote(reportPath))
+      const parsed = parseNote(await readNote(path))
+      const source = frontmatterString(parsed.data, 'summarySource')
+      if (source !== 'ai' && source !== 'local') {
+        setReport(null)
+        return null
+      }
       const info: ReportInfo = {
         date,
-        path: reportPath,
-        source: parsed.data.source === 'ai' ? 'ai' : 'local',
-        generatedAt: String(parsed.data.generated || ''),
+        path,
+        source,
+        generatedAt: frontmatterString(parsed.data, 'summaryGeneratedAt'),
         records: list.length,
-        stale: String(parsed.data.hash || '') !== hash,
+        stale: frontmatterString(parsed.data, 'summaryHash') !== hash,
       }
       setReport(info)
       return info
@@ -724,7 +769,8 @@ export function useVault(options: {
 
   const generateReport = useCallback(async (date = localDateKey(), runOptions: { force?: boolean; silent?: boolean } = {}) => {
     const current = rootRef.current
-    if (!current) return null
+    if (!current || reportGenerationInProgress.current.has(date)) return null
+    reportGenerationInProgress.current.add(date)
     setGeneratingReport(true)
     if (!runOptions.silent) setBusy(true)
     try {
@@ -751,7 +797,7 @@ export function useVault(options: {
         return null
       }
 
-      let summary = localDailySummary(date, list, readingActivity)
+      let summary = dailySummarySection(localDailySummary(date, list, readingActivity))
       let source: 'local' | 'ai' = 'local'
       if (apiConfiguredRef.current) {
         try {
@@ -766,7 +812,7 @@ export function useVault(options: {
             model: modelRef.current,
           })
           if (generated) {
-            summary = generated
+            summary = generated.trim()
             source = 'ai'
           }
         } catch (caught) {
@@ -776,51 +822,53 @@ export function useVault(options: {
         flashNotice('还没有配置 API：日报先按本地规则整理。')
       }
 
-      const path = dailyReportPath(date)
-      await writeNote(path, dailyReportMarkdown({
-        date,
-        summary,
-        source,
-        entries: list,
-        hash,
-        reportTime: reportTimeRef.current,
-      }))
+      const generatedAt = new Date().toISOString()
+      const path = dailyNotePath(date)
+      await refreshDaily(date, {
+        silent: true,
+        summary: { text: summary, source, generatedAt, hash },
+      })
       const info: ReportInfo = {
         date,
         path,
         source,
-        generatedAt: new Date().toISOString(),
+        generatedAt,
         records: list.length,
         stale: false,
       }
       setReport(info)
-      // The day's note links the report, so refresh its header line.
-      await refreshDailyRef.current?.(date, { silent: true })
-      if (!runOptions.silent) flashNotice(`${date} 的日报已${source === 'ai' ? '由 AI 整理' : '按本地规则整理'}并写入 ${path}。`)
+      if (!runOptions.silent) flashNotice(`${date} 的总结已${source === 'ai' ? '由 AI 整理' : '按本地规则整理'}并写入当天的 Daily。`)
       return info
     } catch (caught) {
       setError(vaultErrorText(caught, '无法生成日报。'))
       return null
     } finally {
+      reportGenerationInProgress.current.delete(date)
       setGeneratingReport(false)
       if (!runOptions.silent) setBusy(false)
     }
-  }, [flashNotice, port, readDayState, readNote, writeNote])
+  }, [flashNotice, port, readDayState, readNote, refreshDaily])
 
   /** One attempt per day slot: a failure must not retry on every tick. */
   const maybeGenerateReport = useCallback(async () => {
     if (!reportAutoRef.current || !rootRef.current) return
     const now = new Date()
     const slot = reportSlotDate(now, reportTimeRef.current)
-    if (scheduledAttempts.current.has(slot)) return
-    const reportPath = dailyReportPath(slot)
-    if (entriesRef.current.some((entry) => entry.path === reportPath)) return
-    const { entries: list, files, readingActivity } = await readDayState(slot, entriesRef.current)
+    if (scheduledAttempts.current.has(slot) || reportGenerationInProgress.current.has(slot)) return
+    const listing = entriesRef.current
+    const { entries: list, files, readingActivity, hash } = await readDayState(slot, listing)
     if (list.length === 0 && files.length === 0 && readingActivity.seconds === 0) return
+    if (listing.some((entry) => !entry.directory && entry.path === dailyNotePath(slot))) {
+      try {
+        const parsed = parseNote(await readNote(dailyNotePath(slot)))
+        const source = frontmatterString(parsed.data, 'summarySource')
+        if ((source === 'ai' || source === 'local') && frontmatterString(parsed.data, 'summaryHash') === hash) return
+      } catch { /* the scheduler can still build today's summary */ }
+    }
     scheduledAttempts.current.add(slot)
     const info = await generateReport(slot, { silent: true })
     if (info) flashNotice(`${slot} 的日报已自动生成。`)
-  }, [flashNotice, generateReport, readDayState])
+  }, [flashNotice, generateReport, readDayState, readNote])
 
   // -------------------------------------------------- legacy daily migration
 
@@ -850,36 +898,25 @@ export function useVault(options: {
         }
         try {
           const parsed = parseNote(await readNote(file.path))
-          // Keep every sub-section of the old summary: it becomes the report.
-          const summary = markdownSectionAtLevel(parsed.body, '## 当日汇总')
+          // Fold a legacy fifth-section summary into the canonical Daily file.
+          // The original Paperlight/Daily note and any pre-existing `-report`
+          // file remain untouched as recovery copies.
+          const legacySummary = markdownSectionAtLevel(parsed.body, '## 当日汇总')
             || markdownSection(parsed.body, '## 当日汇总')
-          const reportPath = summary ? dailyReportPath(date) : null
-          // A report may already exist even when the day file does not. Leave
-          // both user files untouched rather than overwriting either target.
-          if (reportPath && occupiedPaths.has(reportPath)) {
-            conflicts += 1
-            continue
-          }
+          const summaryText = legacySummary
+            ? dailySummarySection(legacySummary) || (legacySummary.includes('\n## ') ? '' : legacySummary)
+            : ''
           const userNotes = dailyUserNotes(parsed.body)
           const { entries: list, hash } = await readDayState(date, entries)
           await writeNote(target, dailyNoteMarkdown({
             date, entries: list, reportTime: reportTimeRef.current, userNotes, hash,
             readingActivity: readingActivityRef.current[date],
-            reportPath,
+            summaryText,
+            summarySource: summaryText ? (frontmatterString(parsed.data, 'summary') === 'ai' ? 'ai' : 'local') : undefined,
+            summaryGeneratedAt: String(parsed.data.updated || '') || undefined,
+            summaryHash: summaryText ? hash : undefined,
           }))
           occupiedPaths.add(target)
-          if (summary) {
-            await writeNote(reportPath!, dailyReportMarkdown({
-              date,
-              summary,
-              source: parsed.data.summary === 'ai' ? 'ai' : 'local',
-              entries: list,
-              hash,
-              generated: String(parsed.data.updated || '') || undefined,
-              reportTime: reportTimeRef.current,
-            }))
-            occupiedPaths.add(reportPath!)
-          }
           // Keep the original V1 Markdown as a recovery copy. Cleanup can be a
           // separate user decision after they have checked the new files.
           copied += 1
@@ -904,7 +941,17 @@ export function useVault(options: {
     () => [...MANAGED_DIRS, ...materialMirrorFolders(entries).map((folder) => vaultJoin(NOTES_DIR, folder))],
     [entries],
   )
-  const tree = useMemo(() => buildVaultTree(entries, { keepDirs }), [entries, keepDirs])
+  const tree = useMemo(() => {
+    const result = buildVaultTree(entries, { keepDirs })
+    const dailyNode = result.find((node) => node.path === DAILY_DIR && node.type === 'dir')
+    if (dailyNode) {
+      dailyNode.children = dailyNode.children.map((node) => {
+        const archivedDate = /^(\d{4}-\d{2}-\d{2})-report\.md$/i.exec(node.name)
+        return archivedDate ? { ...node, name: `${archivedDate[1]}（旧版日报保留）` } : node
+      })
+    }
+    return result
+  }, [entries, keepDirs])
   const noteTree = useMemo(() => buildVaultTree(entries, { sources: 'none', keepDirs }), [entries, keepDirs])
   const files = useMemo(() => entries.filter((entry) => !entry.directory), [entries])
   const materialFolders = useMemo(() => materialMirrorFolders(entries), [entries])

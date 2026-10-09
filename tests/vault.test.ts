@@ -4,7 +4,7 @@ import {
   DAILY_DIR, ENLIGHTENMENT_DIR, INBOX_FOLDER, LEGACY_DAILY_DIR, MATERIALS_DIR, NOTES_DIR,
   absoluteVaultPath, aiNoteMarkdown, aiNotePath, buildVaultTree, chatAnswerMarkdown, chatNotePath,
   collectFiles, countWords, dailyEntriesFromNotebook, dailyManagedBodyHash, dailyNoteMarkdown, dailyNotePath,
-  dailyReportMarkdown, dailyReportPath, dailySourceHash, dailyUserNotes, excerptForGrounding, preserveDailyManagedEdits,
+  dailyReportMarkdown, dailyReportPath, dailySourceHash, dailySummarySection, dailyUserNotes, excerptForGrounding, preserveDailyManagedEdits,
   filesUnderPath, filterVaultTree, findTreeNode, findingEntries, findingNoteMarkdown,
   findingNotePath, flattenTree, frontmatterList, frontmatterString, isSafeVaultPath,
   isValidTimeOfDay, localDailySummary, localDateKey, markdownSection, markdownSectionAtLevel,
@@ -371,18 +371,23 @@ test('the record list links every entry and keeps the user\'s own section', () =
     date: day,
     entries: list,
     hash,
-    reportPath: dailyReportPath(day),
     reportTime: '20:00',
     updated: '2026-02-14T12:00:00.000Z',
     userNotes: '自己补的一条：读第三章。',
+    summaryText: 'AI 总结：今天从语言形式回到作者的论证。',
+    summarySource: 'ai',
+    summaryGeneratedAt: '2026-02-14T20:00:00.000Z',
+    summaryHash: hash,
   })
   const parsed = parseNote(content)
   assert.equal(frontmatterString(parsed.data, 'kind'), 'daily')
   assert.equal(frontmatterString(parsed.data, 'hash'), hash)
-  assert.equal(frontmatterString(parsed.data, 'report'), 'Daily/2026-02-14-report.md')
+  assert.equal(frontmatterString(parsed.data, 'summarySource'), 'ai')
+  assert.equal(frontmatterString(parsed.data, 'summaryHash'), hash)
   // The daily note links its senses, so the info panel can resolve them.
   assert.deepEqual(frontmatterList(parsed.data, 'senses'), ['numerous|adjective|many'])
-  assert.match(parsed.body, /\[\[Daily\/2026-02-14-report\.md\]\]/)
+  assert.match(parsed.body, /AI 总结：今天从语言形式回到作者的论证。/)
+  assert.ok(!parsed.body.includes('2026-02-14-report'), 'one Daily file holds both the records and its summary')
   assert.match(parsed.body, /\[\[notes\/books\/book1\/numerous--many\.md\|numerous（adjective · many）\]\]/)
   assert.equal(dailyUserNotes(parsed.body), '自己补的一条：读第三章。')
 })
@@ -449,7 +454,7 @@ test('new expression and semantic contexts appear in that day\'s Daily', () => {
   assert.match(list.find((entry) => entry.kind === 'sense')?.body || '', /numerous examples/)
 })
 
-test('the report is its own file, overwritten with every generation', () => {
+test('legacy standalone reports remain readable while new Daily summaries share the day file', () => {
   const day = '2026-02-14'
   const list = dailyEntriesFromNotebook([makeAtom()], [], day, { files: entries, selfPath: dailyNotePath(day) })
   const content = dailyReportMarkdown({
@@ -470,6 +475,21 @@ test('the report is its own file, overwritten with every generation', () => {
   assert.match(parsed.body, /## 来源/)
   assert.equal(dailyReportPath(day), 'Daily/2026-02-14-report.md')
   assert.match(markdownSection(parsed.body, '## 来源'), /numerous/)
+  const daily = parseNote(dailyNoteMarkdown({
+    date: day, entries: list, hash: 'abcd1234', summaryText: '今天的关键收获……',
+    summarySource: 'ai', summaryHash: 'abcd1234', summaryGeneratedAt: '2026-02-14T20:00:00.000Z',
+  }))
+  assert.equal(frontmatterString(daily.data, 'kind'), 'daily')
+  assert.equal(dailySummarySection(daily.body), '今天的关键收获……')
+  assert.ok(!daily.body.includes('## 来源'), 'new output does not create a second report page')
+})
+
+test('Daily summary extraction stops before linked records and user additions', () => {
+  const body = [
+    '## 总结与勉励（继往开来）', '', '回顾今天的阅读。', '',
+    '### 笔记与其他记录', '', '- [[notes/inbox.md]]', '', '### 我的补充', '', '手写内容。',
+  ].join('\n')
+  assert.equal(dailySummarySection(body), '回顾今天的阅读。')
 })
 
 test('the report slot is the last configured time that has passed', () => {

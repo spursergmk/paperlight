@@ -272,7 +272,7 @@ export default function NotesSpace({
   }, [chatThreads, draft, vaultFiles])
 
   const dayEntries = useMemo(
-    () => vault.entries.filter((entry) => !entry.directory && entry.path.startsWith('Daily/')),
+    () => vault.entries.filter((entry) => !entry.directory && /^Daily\/\d{4}-\d{2}-\d{2}\.md$/i.test(entry.path)),
     [vault.entries],
   )
 
@@ -695,44 +695,30 @@ export default function NotesSpace({
           </header>
 
           <section className="notes-side-block">
-            <h4>今日记录 · {localDateKey()}</h4>
+            <h4>今日 Daily · {localDateKey()}</h4>
             <p className="sense-plain">
               {vault.daily
                 ? `${vault.daily.entryCount} 条记录 · ${relativeTime(vault.daily.updatedAt)} 更新`
-                : `打开笔记空间时会自动生成 ${localDateKey()} 的记录清单。`}
+                : `打开笔记空间时会自动生成 ${localDateKey()} 的 Daily。`}
             </p>
-            <div className="notes-side-actions">
-              <button type="button" className="subtle-button" disabled={vault.organizingDaily} onClick={() => void refreshDay(true)}>
-                {vault.organizingDaily ? <><span className="mini-spinner" /> 正在更新…</> : <><WandSparkles size={12} /> 更新今日记录清单</>}
-              </button>
-            </div>
-          </section>
-
-          <section className="notes-side-block">
-            <h4>日报 · 每天 {reportTime} 生成</h4>
             {report && report.date === localDateKey() ? (
               <div className="report-card">
                 <p className="sense-plain">
-                  {report.source === 'ai' ? 'AI 整理' : '本地整理'} · {report.records} 条记录 · {relativeTime(report.generatedAt)}生成
+                  {report.source === 'ai' ? 'AI 总结' : '本地总结'} · {report.records} 条记录 · {relativeTime(report.generatedAt)}更新
                 </p>
-                {staleReport && <p className="report-stale">记录在这之后有更新，可以重新生成日报。</p>}
-                <div className="notes-side-actions">
-                  <button type="button" className="subtle-button" onClick={() => onOpen(report.path)}><FileText size={12} /> 打开日报</button>
-                  <button type="button" className="subtle-button" disabled={vault.generatingReport} onClick={() => void runReport(true)}>
-                    {vault.generatingReport ? <><span className="mini-spinner" /> 生成中…</> : <><RefreshCw size={12} /> 重新生成</>}
-                  </button>
-                </div>
+                {staleReport && <p className="report-stale">今天的记录后来有更新；总结保留在 Daily 中，可重新生成。</p>}
               </div>
             ) : (
-              <>
-                <p className="sense-plain">今天还没有日报。日报在到点后自动生成，也可以现在就手动生成（会覆盖上一版）。</p>
-                <div className="notes-side-actions">
-                  <button type="button" className="subtle-button" disabled={vault.generatingReport} onClick={() => void runReport(false)}>
-                    {vault.generatingReport ? <><span className="mini-spinner" /> 生成中…</> : <><Sparkles size={12} /> 立即生成日报</>}
-                  </button>
-                </div>
-              </>
+              <p className="sense-plain">第五部分先显示基于真实记录的本地总结；到 {reportTime} 自动生成，也可以手动更新。</p>
             )}
+            <div className="notes-side-actions">
+              <button type="button" className="subtle-button" disabled={vault.organizingDaily} onClick={() => void refreshDay(true)}>
+                {vault.organizingDaily ? <><span className="mini-spinner" /> 正在更新…</> : <><WandSparkles size={12} /> 更新 Daily 记录</>}
+              </button>
+              <button type="button" className="subtle-button" disabled={vault.generatingReport} onClick={() => void runReport(Boolean(report && report.date === localDateKey()))}>
+                {vault.generatingReport ? <><span className="mini-spinner" /> 生成中…</> : <><Sparkles size={12} /> {report && report.date === localDateKey() ? '更新总结' : '生成总结'}</>}
+              </button>
+            </div>
           </section>
 
           {readingContext && (

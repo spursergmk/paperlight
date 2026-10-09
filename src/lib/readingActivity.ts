@@ -1,6 +1,31 @@
 import type { ReadingActivityDay, ReadingActivitySource } from '../types'
 import { localDateKey } from './notebook.ts'
 
+export const READING_TICK_INTERVAL_MS = 15_000
+const READING_MAX_TICK_GAP_MS = 25_000
+const READING_IDLE_LIMIT_MS = 45_000
+
+/** A countable foreground interval from one timer tick to the next. */
+export function activeReadingInterval(input: {
+  previousTickMs: number
+  nowMs: number
+  lastInteractionMs: number
+  hidden: boolean
+  focused: boolean
+}): { fromMs: number; toMs: number } | null {
+  const { previousTickMs, nowMs, lastInteractionMs, hidden, focused } = input
+  if (![previousTickMs, nowMs, lastInteractionMs].every(Number.isFinite) || nowMs <= previousTickMs) return null
+  const elapsed = nowMs - previousTickMs
+  if (elapsed < 1_000 || elapsed > READING_MAX_TICK_GAP_MS) return null
+  if (hidden || !focused || lastInteractionMs <= 0 || lastInteractionMs > nowMs) return null
+  if (nowMs - lastInteractionMs > READING_IDLE_LIMIT_MS) return null
+  // An interaction inside this sampling window only proves activity from that
+  // point onward. If the last interaction predates the previous tick, its
+  // recent timestamp proves the whole bounded interval stayed active.
+  const fromMs = lastInteractionMs > previousTickMs ? lastInteractionMs : previousTickMs
+  return nowMs - fromMs >= 1_000 ? { fromMs, toMs: nowMs } : null
+}
+
 /** Add a bounded foreground-reading interval, splitting it at local midnight. */
 export function recordReadingInterval(
   current: Record<string, ReadingActivityDay>,

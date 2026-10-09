@@ -285,6 +285,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     stackHeight: Math.round(document.querySelector('.pages-stack')?.getBoundingClientRect().height || 0),
     rootChildren: document.getElementById('root')?.childElementCount ?? -1,
     bodyText: (document.body?.innerText || '').replace(/\\n+/g, ' ').slice(0, 200),
+    readingEvents: (window.__paperlightReadingSmokeEvents || []).slice(-20),
     errors: (window.__paperlightErrors || []).slice(-6),
   }))()`
   try {
@@ -323,6 +324,14 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.documentElement.dataset.paperlightReadingTimer === 'active'`, { label: 'reading timer listeners installed' })
     if (readerPoint) {
       await sleep(350) // let the reader's post-paint activity listeners attach
+      await evaluate(wc, `(() => {
+        window.__paperlightReadingSmokeEvents = []
+        for (const type of ['focus', 'blur', 'pointerdown', 'pointermove', 'wheel']) {
+          window.addEventListener(type, () => window.__paperlightReadingSmokeEvents.push({ type, at: Date.now() }), true)
+        }
+        document.addEventListener('visibilitychange', () => window.__paperlightReadingSmokeEvents.push({ type: 'visibilitychange', hidden: document.hidden, at: Date.now() }), true)
+        return true
+      })()`)
       app.focus({ steal: true })
       window.show()
       window.focus()
@@ -335,6 +344,10 @@ export async function runSmokeTest({ window, projectRoot }) {
         Object.defineProperty(document, 'hidden', { configurable: true, value: false })
         return true
       })()`)
+      // Let native focus/visibility notifications settle before generating the
+      // simulated reader input; otherwise a delayed automation blur can erase
+      // the interaction immediately after it is dispatched.
+      await sleep(1800)
       wc.sendInputEvent({ type: 'mouseMove', x: readerPoint.x, y: readerPoint.y })
       wc.sendInputEvent({ type: 'mouseDown', x: readerPoint.x, y: readerPoint.y, button: 'left', clickCount: 1 })
       wc.sendInputEvent({ type: 'mouseUp', x: readerPoint.x, y: readerPoint.y, button: 'left', clickCount: 1 })
@@ -350,7 +363,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     console.log(`  [reading timer probe] ${JSON.stringify(readingFocus)}`)
     const activity = await waitFor(wc,
       `(() => { const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}'); return state.readingActivity?.['${readingDayKey}']?.seconds > 0 ? state.readingActivity['${readingDayKey}'] : null })()`,
-      { timeout: 22000, label: 'active reading estimate' },
+      { timeout: 38000, label: 'active reading estimate after the next timer tick' },
     )
     record('Daily records estimated time only after a foreground reader interaction',
       Boolean(activity?.seconds > 0 && activity.sources?.some((source) => source.sourcePath === bigPdf)),
@@ -781,6 +794,23 @@ export async function runSmokeTest({ window, projectRoot }) {
       sourcePath: JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath || '',
       savedMarkers: (JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').inputMarkers || []).filter((marker) => marker.sourcePath === JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath).length,
       sourceText: document.querySelector('.flow-page')?.textContent || '',
+      marker: (JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').inputMarkers || []).find((item) => item.sourcePath === JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath) || null,
+      pageRect: (() => { const r = document.querySelector('.flow-page')?.getBoundingClientRect(); return r ? { x: r.x, y: r.y, width: r.width, height: r.height } : null })(),
+      overlayHtml: document.querySelector('.input-marker-overlay')?.innerHTML || '',
+      directQuoteRects: (() => {
+        const marker = (JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').inputMarkers || []).find((item) => item.sourcePath === JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath)
+        const walker = document.createTreeWalker(document.querySelector('.flow-page'), NodeFilter.SHOW_TEXT)
+        let node
+        while ((node = walker.nextNode())) {
+          const offset = (node.nodeValue || '').indexOf(marker?.quote || '')
+          if (offset < 0) continue
+          const range = document.createRange()
+          range.setStart(node, offset)
+          range.setEnd(node, offset + marker.quote.length)
+          return Array.from(range.getClientRects()).map((r) => ({ x: r.x, y: r.y, width: r.width, height: r.height }))
+        }
+        return []
+      })(),
     }))()`)
     console.log(`  [Markdown input-marker probe] ${JSON.stringify(markdownMarkerProbe)}`)
     record('a Markdown visual input mark renders or reports unresolved source text', markdownMarkerProbe.visual > 0 || Boolean(markdownMarkerProbe.unresolved), JSON.stringify({ visual: markdownMarkerProbe.visual, unresolved: markdownMarkerProbe.unresolved, overlays: markdownMarkerProbe.overlays, savedMarkers: markdownMarkerProbe.savedMarkers }))
@@ -957,8 +987,8 @@ export async function runSmokeTest({ window, projectRoot }) {
       '',
     ].join('\n'))
     mkdirSync(join(vaultDir, 'enlightenment'), { recursive: true })
-    // A note from the previous layout: migrating it must keep the whole summary
-    // (sub-sections included) and the user's own additions.
+    // A note from the previous layout migrates into the one canonical Daily
+    // file; a pre-existing report remains untouched as a recovery copy.
     const legacyDailyFile = join(vaultDir, 'Paperlight', 'Daily', '2026-01-05.md')
     mkdirSync(join(vaultDir, 'Paperlight', 'Daily'), { recursive: true })
     const originalLegacyDaily = Buffer.from([
@@ -1441,20 +1471,27 @@ export async function runSmokeTest({ window, projectRoot }) {
       `${migratedDaily} | original preserved: ${existsSync(legacyDailyFile) && originalLegacyDaily.equals(readFileSync(legacyDailyFile))}`,
     )
     record(
-      'the old summary becomes the day\'s report, sub-sections included',
-      migratedReportText.includes('旧版汇总的概览。')
-        && migratedReportText.includes('### 主题脉络')
-        && migratedReportText.includes('旧版子小节要保留。'),
-      migratedReportText.split('\n').slice(0, 14).join(' | '),
+      'the old summary and its sub-sections move into the single Daily file without creating a second report',
+      migratedDailyText.includes('旧版汇总的概览。')
+        && migratedDailyText.includes('### 主题脉络')
+        && migratedDailyText.includes('旧版子小节要保留。')
+        && !existsSync(migratedReport),
+      `summary=${migratedDailyText.includes('旧版汇总的概览。')} archivedReportCreated=${existsSync(migratedReport)}`,
     )
     record(
-      'legacy Daily migration preserves source and never overwrites an existing report',
+      'legacy Daily migration merges into one day file and preserves an existing report unchanged',
       existsSync(conflictingLegacyFile)
         && conflictingLegacy.equals(readFileSync(conflictingLegacyFile))
-        && !existsSync(conflictingDailyTarget)
+        && existsSync(conflictingDailyTarget)
+        && readFileSync(conflictingDailyTarget, 'utf8').includes('Legacy summary text.')
         && existingReport.equals(readFileSync(conflictingReportTarget)),
       `source=${existsSync(conflictingLegacyFile)} targetDay=${existsSync(conflictingDailyTarget)} reportPreserved=${existingReport.equals(readFileSync(conflictingReportTarget))}`,
     )
+    const archivedDailyLabel = await evaluate(wc, `Array.from(document.querySelectorAll('.notes-tree-pane .vault-node.file'))
+      .find((node) => node.querySelector('.vault-node-toggle')?.title === ${JSON.stringify('Daily/2026-01-06-report.md')})
+      ?.querySelector('.vault-node-name')?.textContent || ''`)
+    record('an existing standalone report remains accessible and is clearly labeled as an archived copy',
+      archivedDailyLabel.includes('旧版日报保留'), archivedDailyLabel)
 
     // The reader's own tab strip offers "new blank note" as well.
     wc.send('app:command', 'space-reader')
@@ -1670,7 +1707,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     }
     record('a sense whose note is missing can be archived again in one click', backfill && backfilled, `${senseNoteFile} → ${backfilled}`)
 
-    // The report is its own file, generated on demand (and at the configured time).
+    // Generate the fifth section in the same canonical Daily file.
     await evaluate(wc, `(() => {
       const button = Array.from(document.querySelectorAll('.notes-side-pane button')).find((b) => b.textContent.includes('生成'))
       if (!button) return false
@@ -1678,13 +1715,15 @@ export async function runSmokeTest({ window, projectRoot }) {
       return true
     })()`)
     let reportContent = ''
-    for (let attempt = 0; attempt < 20 && !reportContent.includes('kind: report'); attempt += 1) {
+    for (let attempt = 0; attempt < 20 && !reportContent.includes('summarySource:'); attempt += 1) {
       await sleep(300)
-      try { reportContent = readFileSync(reportFile, 'utf8') } catch { reportContent = '' }
+      try { reportContent = readFileSync(dailyFile, 'utf8') } catch { reportContent = '' }
     }
     record(
-      'the daily report is written to its own file',
-      reportContent.includes('kind: report') && reportContent.includes('## 来源') && /^source: (ai|local)$/m.test(reportContent),
+      'the generated summary is written into the one five-section Daily file',
+      reportContent.includes('kind: daily') && /^summarySource: (ai|local)$/m.test(reportContent)
+        && !existsSync(reportFile)
+        && ['## 读了多久', '## 读了什么', '## 表达', '## 语义', '## 总结与勉励（继往开来）'].every((heading) => reportContent.includes(heading)),
       reportContent.split('\n').slice(0, 8).join(' | '),
     )
     const reportRequest = await evaluate(wc, `(() => {
@@ -1697,11 +1736,13 @@ export async function runSmokeTest({ window, projectRoot }) {
       JSON.stringify({ records: (reportRequest?.records || []).length, findings: (reportRequest?.findings || []).map((f) => f.path) }),
     )
     let dailyWithReport = ''
-    for (let attempt = 0; attempt < 12 && !dailyWithReport.includes('-report.md'); attempt += 1) {
+    for (let attempt = 0; attempt < 12 && !dailyWithReport.includes('summaryGeneratedAt:'); attempt += 1) {
       await sleep(300)
       try { dailyWithReport = readFileSync(dailyFile, 'utf8') } catch { dailyWithReport = '' }
     }
-    record("the day's list links its report", dailyWithReport.includes(`[[Daily/${todayKey}-report.md]]`), dailyWithReport.split('\n').slice(0, 4).join(' | '))
+    record('the Daily summary stays in its canonical date file with no report link or duplicate file',
+      dailyWithReport.includes(`title: ${todayKey}`) && !dailyWithReport.includes('-report.md') && !existsSync(reportFile),
+      dailyWithReport.split('\n').slice(0, 8).join(' | '))
     await screenshot(window, artifacts, '16-daily-report.png')
 
     // ------------------------------------------------------------- chat desk
