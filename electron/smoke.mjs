@@ -845,7 +845,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     mkdirSync(join(vaultDir, 'materials', 'books', 'book1'), { recursive: true })
     writeFileSync(join(vaultDir, 'materials', 'books', 'book1', 'book1.pdf'), createTestPdf({ pages: 4, title: 'Book One' }))
     mkdirSync(join(vaultDir, 'notes', '_inbox'), { recursive: true })
-    writeFileSync(join(vaultDir, 'notes', '_inbox', 'Reading-Log.md'), '# Reading Log\n\nvault 里已有的一份笔记：knowledge and power。\n')
+    writeFileSync(join(vaultDir, 'notes', '_inbox', 'Reading-Log.md'), '---\ntitle: Reading Log\nkind: note\n---\n\nvault 里已有的一份笔记：knowledge and power。This note includes numerous language learning terms for the local search test.\n')
     mkdirSync(join(vaultDir, 'enlightenment'), { recursive: true })
     // A note from the previous layout: migrating it must keep the whole summary
     // (sub-sections included) and the user's own additions.
@@ -1086,6 +1086,37 @@ export async function runSmokeTest({ window, projectRoot }) {
     const generatedExpressionFile = readdirSync(expressionDir).map((name) => join(expressionDir, name)).find((path) => readFileSync(path, 'utf8').includes('# see eye to eye'))
     const generatedMarkdown = generatedExpressionFile ? readFileSync(generatedExpressionFile, 'utf8') : ''
     record('confirmed AI candidates are labeled generated and never presented as real quotations', generatedMarkdown.includes('AI 生成候选') && !generatedMarkdown.includes('> see eye to eye'))
+
+    const setExpressionSearch = async (query) => evaluate(wc, `(() => {
+      const input = document.querySelector('input[aria-label="检索表达、语义和笔记"]')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, ${JSON.stringify(query)})
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    await setExpressionSearch('numerous')
+    await waitFor(wc, `(() => {
+      const labels = Array.from(document.querySelectorAll('.memory-search-results > button small')).map((node) => node.textContent)
+      return ['语义', '记录本', 'Vault 笔记'].every((label) => labels.includes(label))
+    })()`, { label: 'unified semantic, notebook and Vault search results' })
+    const numerousSearchLabels = await evaluate(wc, `Array.from(document.querySelectorAll('.memory-search-results > button small')).map((node) => node.textContent)`)
+    record('local unified search finds semantics, notebook notes and Markdown note bodies', ['语义', '记录本', 'Vault 笔记'].every((label) => numerousSearchLabels.includes(label)), numerousSearchLabels.join(', '))
+    await evaluate(wc, `Array.from(document.querySelectorAll('.memory-search-results > button')).find((button) => button.querySelector('small')?.textContent === '语义')?.click(); true`)
+    await waitFor(wc, `document.querySelector('.sense-head h3')?.textContent === 'numerous'`, { label: 'semantic search result opens its canonical record' })
+    record('a semantic search result opens its existing semantic record', true)
+
+    await evaluate(wc, `Array.from(document.querySelectorAll('.space-rail-button')).find((button) => button.textContent.includes('表达')).click(); true`)
+    await waitFor(wc, `document.querySelector('.expression-workspace') !== null`, { label: 'return to expression pool search' })
+    await setExpressionSearch('language learning')
+    await waitFor(wc, `(() => {
+      const labels = Array.from(document.querySelectorAll('.memory-search-results > button small')).map((node) => node.textContent)
+      return labels.includes('表达') && labels.includes('Vault 笔记')
+    })()`, { label: 'expression and Markdown body search results' })
+    const languageSearch = await evaluate(wc, `Array.from(document.querySelectorAll('.memory-search-results > button')).map((button) => ({ kind: button.querySelector('small')?.textContent, title: button.querySelector('strong')?.textContent }))`)
+    record('local unified search finds expression records and returns matching note sources', languageSearch.some((hit) => hit.kind === '表达') && languageSearch.some((hit) => hit.kind === 'Vault 笔记'), JSON.stringify(languageSearch))
+    await evaluate(wc, `Array.from(document.querySelectorAll('.memory-search-results > button')).find((button) => button.querySelector('small')?.textContent === 'Vault 笔记' && button.querySelector('strong')?.textContent.includes('Reading Log'))?.click(); true`)
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes('Reading-Log.md')`, { label: 'search result opens its source Markdown note' })
+    record('a Vault search result opens the original Markdown source', true)
 
     await screenshot(window, artifacts, '15-notes-vault.png')
 

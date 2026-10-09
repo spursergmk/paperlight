@@ -101,7 +101,11 @@ export default function ExpressionSpace({
               hits.push({ kind: 'notebook', id: note.id, title: `${note.date} 第 ${note.dailyOrdinal} 份笔记`, body: note.body })
             }
           }
-          const files = vault.files.filter((file) => /\.(?:md|markdown)$/i.test(file.path))
+          // Expressions have their own searchable collection above. Treating
+          // their backing Markdown as ordinary notes creates duplicate hits
+          // and a dead-end Vault-note link for paths under expressions/.
+          const files = vault.files.filter((file) =>
+            /\.(?:md|markdown)$/i.test(file.path) && !file.path.startsWith('expressions/'))
           let cursor = 0
           let noteHitCount = 0
           const workers = Array.from({ length: Math.min(8, files.length) }, async () => {
