@@ -212,6 +212,39 @@ test('semantic note updates append contexts while preserving user-edited Markdow
   assert.equal(frontmatterString(merged.data, 'kind'), 'semantic')
 })
 
+test('repeated semantic migration upgrades a legacy sense note without duplicating contexts or replacing user content', () => {
+  const legacy = stringifyNote({
+    title: 'A title chosen by the reader',
+    kind: 'sense',
+    tags: ['paperlight', 'my-tag'],
+    senses: ['numerous|adjective|many'],
+    customField: 'keep this',
+  }, '# My edited explanation\n\nThe user-authored definition stays authoritative.\n\n## Personal note\n\nRemember this contrast.\n')
+  const atom = makeAtom({ contexts: [
+    { id: 'legacy-context', createdAt: '2026-02-14T08:00:00.000Z', sourceKind: 'pdf', sourcePath: 'materials/one.pdf', sourceName: 'one.pdf', quote: 'A sentence kept from the original reading.' },
+    { id: 'second-context', createdAt: '2026-02-15T08:00:00.000Z', sourceKind: 'epub', sourcePath: 'materials/two.epub', sourceName: 'two.epub', quote: 'A sentence from a second source.' },
+  ] })
+
+  const once = mergeSemanticNoteMarkdown(legacy, atom)
+  const twice = mergeSemanticNoteMarkdown(once, atom)
+  const migrated = parseNote(twice)
+
+  assert.equal(frontmatterString(migrated.data, 'kind'), 'semantic')
+  assert.equal(frontmatterString(migrated.data, 'title'), 'A title chosen by the reader')
+  assert.deepEqual(frontmatterList(migrated.data, 'tags'), ['paperlight', 'my-tag'])
+  assert.deepEqual(frontmatterList(migrated.data, 'senses'), ['numerous|adjective|many'])
+  assert.deepEqual(frontmatterList(migrated.data, 'semantics'), ['numerous|adjective|many'])
+  assert.equal(frontmatterString(migrated.data, 'customField'), 'keep this')
+  assert.match(migrated.body, /The user-authored definition stays authoritative\./)
+  assert.match(migrated.body, /Remember this contrast\./)
+  assert.equal((migrated.body.match(/paperlight:semantic-contexts:start/g) || []).length, 1)
+  assert.equal((migrated.body.match(/paperlight:semantic-contexts:end/g) || []).length, 1)
+  assert.equal((migrated.body.match(/A sentence kept from the original reading\./g) || []).length, 1)
+  assert.equal((migrated.body.match(/A sentence from a second source\./g) || []).length, 1)
+  assert.match(migrated.body, /materials\/one\.pdf/)
+  assert.match(migrated.body, /materials\/two\.epub/)
+})
+
 test('notebook notes, AI notes and chat answers land where they belong', () => {
   const notebook = notebookNoteMarkdown(makeNote({ notesFolder: 'books/book1' }), [makeAtom({ notesFolder: 'books/book1' })])
   const parsed = parseNote(notebook)
