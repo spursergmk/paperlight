@@ -147,6 +147,7 @@ function App() {
   const [state, setState] = useState<PersistedState>(loadStateSync)
   const [hydrated, setHydrated] = useState(false)
   const [docs, setDocs] = useState<Record<string, LoadedDocument>>({})
+  const automaticPdfReloads = useRef(new Map<string, number>())
   const [leftTab, setLeftTab] = useState<LeftTab>('files')
   const [rightTab, setRightTab] = useState<AssistantTab>('sense')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -288,6 +289,7 @@ function App() {
         }))
       }
     }, 15_000)
+    document.documentElement.dataset.paperlightReadingTimer = 'active'
     window.addEventListener('pointerdown', markInteraction, true)
     window.addEventListener('pointermove', markInteraction, { capture: true, passive: true })
     window.addEventListener('keydown', markInteraction, true)
@@ -296,6 +298,7 @@ function App() {
     window.addEventListener('touchstart', markInteraction, { capture: true, passive: true })
     return () => {
       window.clearInterval(interval)
+      delete document.documentElement.dataset.paperlightReadingTimer
       window.removeEventListener('pointerdown', markInteraction, true)
       window.removeEventListener('pointermove', markInteraction, true)
       window.removeEventListener('keydown', markInteraction, true)
@@ -436,6 +439,11 @@ function App() {
   const activateThread = useCallback((id: string) => {
     setChatSpace((current) => ({ ...current, activeThreadId: id }))
   }, [setChatSpace])
+
+  const openChatThread = useCallback((id: string) => {
+    activateThread(id)
+    switchSpace('chat')
+  }, [activateThread, switchSpace])
 
   const updateThread = useCallback((id: string, updater: (thread: ChatThread) => ChatThread) => {
     setChatSpace((current) => ({
@@ -722,7 +730,7 @@ function App() {
 
   // ------------------------------------------------------------- documents
 
-  const loadDocument = useCallback(async (path: string, name: string) => {
+  const loadDocument = useCallback(async (path: string, name: string, force = false) => {
     const kind = documentKindFor(path)
     if (!kind) {
       setDocs((prev) => ({
@@ -732,7 +740,7 @@ function App() {
       return
     }
     const existing = docsRef.current[path]
-    if (existing?.status === 'ready' && existing.kind === kind) return
+    if (!force && existing?.status === 'ready' && existing.kind === kind) return
 
     // A generation token per path: closing (and reopening) a tab while its file
     // is still loading must not let the stale load write into the new tab.
@@ -1724,27 +1732,48 @@ function App() {
   const retryActive = useCallback(() => {
     const path = stateRef.current.session.activePath
     if (!path) return
+    // A forced reload acquires a new PDF cache reference. Release the current
+    // tab's reference first so repeated retries do not pin stale workers.
+    releaseDocument(documentKeyFor(path, displayNameForPath(path)))
     setDocs((prev) => {
       const next = { ...prev }
       delete next[path]
       return next
     })
-    void loadDocument(path, displayNameForPath(path))
+    void loadDocument(path, displayNameForPath(path), true)
   }, [loadDocument])
 
   // Rebuilds the PDF from scratch (new loading task and worker). Releasing first
   // matters: `acquireDocument` would otherwise hand back the wedged document.
-  const reloadActiveDocument = useCallback(() => {
+  const reloadActiveDocument = useCallback((automatic = false) => {
     const path = stateRef.current.session.activePath
-    if (!path) return
+    if (!path) return false
+    if (automatic) {
+      const lastReloadedAt = automaticPdfReloads.current.get(path) ?? 0
+      if (Date.now() - lastReloadedAt < 60_000) return false
+      automaticPdfReloads.current.set(path, Date.now())
+    } else {
+      automaticPdfReloads.current.delete(path)
+    }
     const name = displayNameForPath(path)
+    const scrollTop = pageApiRef.current?.scrollTop()
+    if (scrollTop !== undefined && Number.isFinite(scrollTop)) {
+      setState((current) => ({
+        ...current,
+        session: {
+          ...current.session,
+          tabs: current.session.tabs.map((tab) => tab.path === path ? { ...tab, scrollTop } : tab),
+        },
+      }))
+    }
     releaseDocument(documentKeyFor(path, name))
     setDocs((prev) => {
       const next = { ...prev }
       delete next[path]
       return next
     })
-    void loadDocument(path, name)
+    void loadDocument(path, name, true)
+    return true
   }, [loadDocument])
 
   return (
@@ -2207,6 +2236,7 @@ function App() {
           vault={vaultApi}
           atoms={atoms}
           notes={notebookNotes}
+          chatThreads={chatSpace.threads}
           recentRoots={vaultState.recentRoots}
           openPaths={notesSpace.openPaths}
           activePath={notesSpace.activePath}
@@ -2230,6 +2260,7 @@ function App() {
           readingContext={readingContext}
           reportTime={state.settings.dailyReportTime}
           onOpenSource={openVaultSource}
+          onOpenChatThread={openChatThread}
           pendingSenseCount={pendingSenseAtoms.length}
           onSavePendingSenses={savePendingSenses}
           onCreateBlankNote={() => void createBlankNote()}
@@ -2271,7 +2302,6 @@ function App() {
       {activeSpace === 'reader' && anchor && senseLoading && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
         <div className="popover-title"><span className="provider-dot openai" />上下文语义<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
         <div className="popover-loading"><span className="mini-spinner" /> 正在判断语义…</div>
-        {expressionCapture?.reader && <button className="expression-inline-add" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void saveSelectedExpression()}><Plus size={12} /> 收录表达</button>}
         {selection && <button className="input-mark-inline" type="button" onMouseDown={(event) => event.preventDefault()} onClick={startMarkerFromReaderSelection}><Highlighter size={12} /> 标记输入</button>}
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
@@ -2280,7 +2310,6 @@ function App() {
       {activeSpace === 'reader' && anchor && !senseLoading && sense && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
         <div className="popover-title"><span className="provider-dot openai" />上下文语义{sense.partOfSpeech ? ` · ${sense.partOfSpeech}` : ''}<span className="popover-page">{selection ? `P.${selection.pageNumber}` : ''}</span></div>
         <p className="popover-meaning">{sense.contextualMeaning}</p>
-        {expressionCapture?.reader && <button className="expression-inline-add" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void saveSelectedExpression()}><Plus size={12} /> 收录表达</button>}
         {selection && <button className="input-mark-inline" type="button" onMouseDown={(event) => event.preventDefault()} onClick={startMarkerFromReaderSelection}><Highlighter size={12} /> 标记输入</button>}
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
@@ -2289,13 +2318,12 @@ function App() {
       {activeSpace === 'reader' && anchor && !senseLoading && !sense && senseError && <div className="selection-popover" style={{ left: `${anchor.x}px`, top: `${anchor.y}px` }}>
         <div className="popover-title"><span className="provider-dot mock" />语义查询失败</div>
         <p className="popover-meaning">{senseError}</p>
-        {expressionCapture?.reader && <button className="expression-inline-add" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void saveSelectedExpression()}><Plus size={12} /> 收录表达</button>}
         {selection && <button className="input-mark-inline" type="button" onMouseDown={(event) => event.preventDefault()} onClick={startMarkerFromReaderSelection}><Highlighter size={12} /> 标记输入</button>}
         <button className="popover-close" aria-label="关闭浮层" onClick={() => setAnchor(null)}><X size={13} /></button>
         <span className="popover-pointer" />
       </div>}
-      {expressionCapture && !expressionCapture.reader && <div
-        className="expression-capture-popover"
+      {expressionCapture && <div
+        className={`expression-capture-popover${expressionCapture.reader ? ' reader' : ''}`}
         style={{ left: `${expressionCapture.x}px`, top: `${expressionCapture.y}px` }}
         onMouseDown={(event) => event.preventDefault()}
       >

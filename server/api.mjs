@@ -199,7 +199,7 @@ function asString(value) {
 function parseSenseRequest(value) {
   const input = asRecord(value)
   if (input.task !== 'lookup' && input.task !== 'expand' && input.task !== 'ask') {
-    throw new RequestError(400, '无效的义项查询任务。')
+    throw new RequestError(400, '无效的语义查询任务。')
   }
   const term = asString(input.term).trim()
   if (!term || term.length > 120) throw new RequestError(400, '查询词语必须为 1 到 120 个字符。')
@@ -336,7 +336,7 @@ function parseNoteRequest(value) {
     sense,
     model: requestModel(input.model),
   }
-  if (task === 'sense' && !sense) throw new RequestError(400, '缺少要整理的义项内容。')
+  if (task === 'sense' && !sense) throw new RequestError(400, '缺少要整理的语义内容。')
   if (task === 'excerpt' && !request.context.trim()) throw new RequestError(400, '缺少要整理的摘录内容。')
   if (task === 'topic' && !request.question.trim() && !request.term) throw new RequestError(400, '请提供要写笔记的主题。')
   return request
@@ -653,7 +653,7 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
   async function handleSense(req, res, next) {
     if (req.method !== 'POST') return next()
     if (!isAllowedLocalRequest(req)) {
-      sendJson(res, 403, { error: '义项查询只允许从本机 Paperlight 访问。' })
+      sendJson(res, 403, { error: '语义查询只允许从本机 Paperlight 访问。' })
       return
     }
     try {
@@ -694,7 +694,7 @@ export function createPaperlightApi({ root, csrfNonce = randomBytes(32).toString
       }
     } catch (error) {
       if (error instanceof RequestError) sendJson(res, error.status, { error: error.message })
-      else sendJson(res, 500, { error: '义项查询失败。' })
+      else sendJson(res, 500, { error: '语义查询失败。' })
     }
   }
 

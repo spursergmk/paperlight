@@ -11,7 +11,8 @@ import {
   materialMirrorFolders,
   mirrorFolderForMaterial, noteFolderForDocument, noteFolderPath, noteKindFor, noteTitleFromPath,
   notebookNoteMarkdown, notebookNotePath, notesFolderFromPath, parseNote, parseTimeOfDay,
-  mergeSemanticNoteMarkdown, remapLegacyNotePath, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath, slugify,
+  appendResearchChatLink, appendResearchSourceLink, mergeSemanticNoteMarkdown, remapLegacyNotePath, reportSlotDate, researchNoteMarkdown,
+  safeFolderName, senseNoteMarkdown, senseNotePath, slugify,
   stringifyNote, titleFromMarkdown, uniquePath, vaultBasename, vaultDirname, vaultJoin, wikiLinks,
 } from '../src/lib/vault.ts'
 import type { NotebookNote, SenseAtom, VaultEntry } from '../src/types.ts'
@@ -246,6 +247,36 @@ test('a finding is a plain note in enlightenment/', () => {
   assert.equal(frontmatterString(parsed.data, 'date'), '2026-02-14')
   assert.match(parsed.body, /^# 货币的两种含义/)
   assert.equal(findingNotePath('2026-02-14', '货币的两种含义'), 'enlightenment/2026-02-14-货币的两种含义.md')
+})
+
+test('a research note stays free-form and source links are additive, deduplicated Markdown', () => {
+  const research = researchNoteMarkdown({ title: 'Narrative and evidence', date: '2026-02-14' })
+  const parsed = parseNote(research)
+  assert.equal(frontmatterString(parsed.data, 'kind'), 'research')
+  assert.equal(frontmatterString(parsed.data, 'date'), '2026-02-14')
+  assert.equal(parsed.body, '# Narrative and evidence\n')
+
+  const authored = '# Narrative and evidence\n\nMy own research notes.\n\n## Next questions\n\nKeep this section.\n'
+  const first = appendResearchSourceLink(authored, 'materials/papers/essay.pdf')
+  const second = appendResearchSourceLink(first, 'notes/_inbox/Reading-Log.md')
+  assert.equal((second.match(/^## 研究材料与笔记$/gm) || []).length, 1)
+  assert.match(second, /## 研究材料与笔记\n\n- \[\[materials\/papers\/essay\.pdf\]\]\n- \[\[notes\/_inbox\/Reading-Log\.md\]\]/)
+  assert.match(second, /## Next questions\n\nKeep this section\./)
+  assert.equal(appendResearchSourceLink(second, 'materials/papers/essay.pdf'), second)
+  assert.throws(() => appendResearchSourceLink(second, '../outside.md'), /Vault 内/)
+})
+
+test('a research note links to a local conversation by stable ID without copying its messages', () => {
+  const authored = '# Narrative and evidence\n\nMy own research notes.\n\n## Next questions\n\nKeep this section.\n'
+  const first = appendResearchChatLink(authored, 'thread-123', 'Evidence review | round one')
+  assert.match(first, /## 研究材料与笔记\n\n- \[\[chat:thread-123\|Evidence review round one\]\]/)
+  assert.match(first, /My own research notes\./)
+  assert.match(first, /## Next questions\n\nKeep this section\./)
+  assert.deepEqual(wikiLinks(first), ['chat:thread-123'])
+  assert.equal(appendResearchChatLink(first, 'thread-123', 'Renamed title'), first)
+  assert.throws(() => appendResearchChatLink(authored, '../unsafe', 'bad'), /标识无效/)
+  const bounded = appendResearchChatLink(authored, 'valid-id', 'x'.repeat(129))
+  assert.match(bounded, new RegExp(`\\[\\[chat:valid-id\\|${'x'.repeat(120)}\\]\\]`))
 })
 
 test('a day rolls senses, notebook notes and vault files into one record list', () => {

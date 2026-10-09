@@ -197,7 +197,7 @@ test('relations only surface strong connections', () => {
   })
 
   const reasons = relateSense(current, [sameLemma, sameRoot, shared, unrelated]).map((relation) => relation.reason)
-  assert.deepEqual(reasons, ['同一词的另一个义项', '同词根', '共享近义表达：amid'])
+  assert.deepEqual(reasons, ['同一词的另一个语义', '同词根', '共享近义表达：amid'])
   assert.equal(relateSense(current, [unrelated]).length, 0)
 })
 

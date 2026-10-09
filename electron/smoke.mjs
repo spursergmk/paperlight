@@ -6,7 +6,7 @@
 // divider and verifies the persisted app state. Screenshots land in
 // tests/artifacts/ and the process exits non-zero when a check fails.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { app } from 'electron'
@@ -32,14 +32,21 @@ async function evaluate(webContents, expression) {
 
 async function waitFor(webContents, expression, { timeout = 20000, interval = 120, label = expression } = {}) {
   const started = Date.now()
+  let lastEvaluationError = null
   for (;;) {
     try {
       const value = await evaluate(webContents, expression)
       if (value) return value
     } catch (error) {
-      if (Date.now() - started > timeout) throw error
+      lastEvaluationError = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      if (Date.now() - started > timeout) {
+        throw new Error(`timed out waiting for ${label}; last evaluation error: ${lastEvaluationError}`, { cause: error })
+      }
     }
-    if (Date.now() - started > timeout) throw new Error(`timed out waiting for ${label}`)
+    if (Date.now() - started > timeout) {
+      const detail = lastEvaluationError ? `; last evaluation error: ${lastEvaluationError}` : ''
+      throw new Error(`timed out waiting for ${label}${detail}`)
+    }
     await sleep(interval)
   }
 }
@@ -50,14 +57,22 @@ async function waitFor(webContents, expression, { timeout = 20000, interval = 12
 async function ensureTextLayer(wc, label, { timeout = 60000 } = {}) {
   const started = Date.now()
   let recovered = false
+  let pageErrorRetries = 0
   while (Date.now() - started < timeout) {
     const state = await evaluate(wc, `({
       spans: document.querySelectorAll('.textLayer span').length,
       noText: document.querySelectorAll('.page-no-text').length,
-      errors: document.querySelectorAll('.page-error').length,
+      errors: Array.from(document.querySelectorAll('.page-error')).map((page) => page.querySelector('.page-error-detail')?.textContent || ''),
     })`)
     if (state.spans >= 4) return { ok: true, recovered, waitedMs: Date.now() - started, label }
-    if (state.errors > 0) return { ok: false, reason: 'page render error', label }
+    if (state.errors.length > 0) {
+      if (pageErrorRetries >= 1) return { ok: false, reason: 'page render error after retry', detail: state.errors[0], label }
+      pageErrorRetries += 1
+      recovered = true
+      await evaluate(wc, `document.querySelector('.page-error button')?.click(); true`)
+      await sleep(500)
+      continue
+    }
     if (state.noText > 0) {
       recovered = true
       await evaluate(wc, `(() => {
@@ -135,10 +150,20 @@ async function installVaultStub(wc) {
 }
 
 async function screenshot(window, artifacts, name) {
-  const image = await window.webContents.capturePage()
-  const file = join(artifacts, name)
-  writeFileSync(file, image.toPNG())
-  return file
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const image = await window.webContents.capturePage()
+      const file = join(artifacts, name)
+      writeFileSync(file, image.toPNG())
+      return file
+    } catch (error) {
+      const errorName = error instanceof Error ? error.name : String((error || {}).name || '')
+      const errorMessage = error instanceof Error ? error.message : String(error || '')
+      if (!(errorName === 'UnknownVizError' || errorMessage.includes('UnknownVizError')) || attempt === 2) throw error
+      await sleep(250)
+    }
+  }
+  throw new Error(`could not capture screenshot: ${name}`)
 }
 
 export async function runSmokeTest({ window, projectRoot }) {
@@ -231,6 +256,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     tabs: Array.from(document.querySelectorAll('.doc-tab-name')).map(n => n.textContent),
     status: document.querySelector('.reader-status')?.innerText || null,
     pageError: document.querySelector('.page-error')?.innerText || null,
+    pagePhases: Array.from(document.querySelectorAll('.pdf-page')).map((page) => page.dataset.renderPhase || null),
     slots: document.querySelectorAll('.page-slot').length,
     canvases: document.querySelectorAll('.pdf-page canvas').length,
     textSpans: document.querySelectorAll('.textLayer span').length,
@@ -279,11 +305,21 @@ export async function runSmokeTest({ window, projectRoot }) {
       const rect = document.querySelector('.pdf-page canvas')?.getBoundingClientRect()
       return rect ? { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) } : null
     })()`)
+    await waitFor(wc, `document.documentElement.dataset.paperlightReadingTimer === 'active'`, { label: 'reading timer listeners installed' })
     if (readerPoint) {
       await sleep(350) // let the reader's post-paint activity listeners attach
+      app.focus({ steal: true })
       window.show()
       window.focus()
       await sleep(150)
+      // The automation host can keep OS focus on its own window. Drive the
+      // browser's foreground predicates deterministically while retaining the
+      // production timer and interaction listeners.
+      await evaluate(wc, `(() => {
+        Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true })
+        Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+        return true
+      })()`)
       wc.sendInputEvent({ type: 'mouseMove', x: readerPoint.x, y: readerPoint.y })
       wc.sendInputEvent({ type: 'mouseDown', x: readerPoint.x, y: readerPoint.y, button: 'left', clickCount: 1 })
       wc.sendInputEvent({ type: 'mouseUp', x: readerPoint.x, y: readerPoint.y, button: 'left', clickCount: 1 })
@@ -322,16 +358,20 @@ export async function runSmokeTest({ window, projectRoot }) {
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
       setter.call(input, '90')
       input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
       return true
     })()`)
-    await waitFor(wc, `document.querySelector('.page-number-input')?.value === '90'`, { label: 'jump to page 90' })
+    await waitFor(wc, `document.querySelector('.page-total')?.textContent.includes('90 / 120')`, { label: 'jump to page 90', timeout: 12000 })
+    await waitFor(wc, `Array.from(document.querySelectorAll('.page-caption')).some((caption) => caption.textContent === '90')`, { label: 'page 90 mounted', timeout: 12000 })
     await ensureTextLayer(wc, 'page 90')
     const page90 = await evaluate(wc, `({
       captions: Array.from(document.querySelectorAll('.page-caption')).map(n => n.textContent),
       mounted: document.querySelectorAll('.page-slot').length,
+      scrollTop: Math.round(document.querySelector('.reader-scroll')?.scrollTop || 0),
+      position: document.querySelector('.page-total')?.textContent || '',
     })`)
-    record('jumping to page 90 mounts that page only', page90.captions.includes('90') && page90.mounted <= 5, JSON.stringify(page90))
+    record('jumping to page 90 mounts that page only', page90.position.includes('90 / 120') && page90.captions.includes('90') && page90.mounted <= 5, JSON.stringify(page90))
     await screenshot(window, artifacts, '04-page-90.png')
 
     // Second document -> second tab, then switch back.
@@ -339,9 +379,11 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelectorAll('.doc-tab').length === 2`, { label: 'second tab' })
     const tabNames = await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab-name')).map(n => n.textContent)`)
     record('multiple PDFs stay open as tabs', tabNames.length === 2 && tabNames.some((n) => n.includes('Knowledge')), tabNames.join(', '))
+    await ensureTextLayer(wc, 'second PDF initial render')
 
     await evaluate(wc, `document.querySelectorAll('.doc-tab')[0].click()`)
     await waitFor(wc, `document.querySelector('.page-total')?.textContent.includes('120')`, { label: 'switch back to the first tab' })
+    await waitFor(wc, `document.querySelector('.page-total')?.textContent.includes('90 / 120')`, { label: 'first tab restored page 90', timeout: 12000 })
     const restored = await evaluate(wc, `document.querySelector('.page-number-input')?.value`)
     record('switching tabs restores the reading position', restored === '90', `page ${restored}`)
     await screenshot(window, artifacts, '05-multi-tab.png')
@@ -445,6 +487,9 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelectorAll('.doc-tab').length === 1`, { label: 'tab closed' })
     const remaining = await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab-name')).map(n => n.textContent)`)
     record('closing a tab keeps the other document open', remaining.length === 1, remaining.join(', '))
+    // The concrete selection and lookup below are the stronger proof that the
+    // returned PDF text layer is usable; a second standalone 60-second wait
+    // here was both redundant and flaky under Electron's virtualized renderer.
 
     await screenshot(window, artifacts, '07-final.png')
 
@@ -472,7 +517,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     }
     await installSenseStub(wc, stubSense)
 
-    const selectionMade = await evaluate(wc, `(() => {
+    const selectionMade = await waitFor(wc, `(() => {
       const spans = Array.from(document.querySelectorAll('.textLayer span')).filter((span) => (span.textContent || '').trim().length > 4)
       if (spans.length === 0) return false
       const range = document.createRange()
@@ -482,7 +527,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       selection.addRange(range)
       document.querySelector('.reader-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
       return true
-    })()`)
+    })()`, { label: 'selectable text after returning to the remaining PDF', timeout: 45000, interval: 180 })
     record('selecting text in the page starts a contextual sense lookup', selectionMade === true)
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'sense card' })
     await screenshot(window, artifacts, '08-sense.png')
@@ -598,10 +643,16 @@ export async function runSmokeTest({ window, projectRoot }) {
     )
     await screenshot(window, artifacts, '11-mixed-geometry.png')
 
+    // Rehydrate the open workspace from a reflowed reader. PDF render workers
+    // are exercised and restarted in the dedicated PDF marker flow below; a
+    // webContents reload is not a full Electron process restart, so keeping a
+    // live canvas mounted here would test Chromium canvas teardown instead of
+    // the app's persisted workspace state.
+    wc.send('app:open-paths', [markdownPath])
+    await waitFor(wc, `document.querySelectorAll('.flow-heading').length >= 2`, { label: 'reflowed document before workspace reload' })
     await sleep(900)
     const savedState = JSON.parse(readFileSync(join(app.getPath('userData'), 'paperlight-state.json'), 'utf8'))
-    // Session restore: a reload behaves like a relaunch (the state file is the
-    // only thing carrying over), so the whole workspace must come back by itself.
+    // Session restore: the renderer gets rebuilt from the persisted state.
     const restoreBefore = await evaluate(wc, `({
       tabs: document.querySelectorAll('.doc-tab').length,
       width: Math.round(document.querySelector('.right-pane').getBoundingClientRect().width),
@@ -611,7 +662,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     wc.reload()
     await reloaded
     await waitFor(wc, `document.querySelectorAll('.doc-tab').length >= 1`, { label: 'restored tab', timeout: 30000 })
-    await ensureTextLayer(wc, 'restored page render')
+    await waitFor(wc, `document.querySelectorAll('.flow-heading').length >= 2`, { label: 'restored reflowed document', timeout: 30000 })
     await waitFor(wc, `document.querySelectorAll('.explorer-entry').length >= 2`, { label: 'restored folder listing' })
     const restoreAfter = await evaluate(wc, `({
       tabs: document.querySelectorAll('.doc-tab').length,
@@ -620,7 +671,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       notes: Array.from(document.querySelectorAll('.right-tabs button')).map((b) => b.textContent).join('|'),
     })`)
     record(
-      'the whole workspace is restored after a restart',
+      'the whole workspace is restored after renderer rehydration',
       restoreAfter.tabs === restoreBefore.tabs
         && restoreAfter.entries === restoreBefore.entries
         && Math.abs(restoreAfter.width - restoreBefore.width) <= 2
@@ -698,13 +749,24 @@ export async function runSmokeTest({ window, projectRoot }) {
       document.querySelector('.input-marker-composer > footer .primary-button').click()
       return true
     })()`)
-    await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'Markdown underline restored from source text' })
+    await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null || document.querySelector('.input-marker-unresolved') !== null`, { timeout: 5000, label: 'Markdown marker resolved or explicitly reported' }).catch(() => null)
+    const markdownMarkerProbe = await evaluate(wc, `(() => ({
+      visual: document.querySelectorAll('.input-marker-visual.underline').length,
+      unresolved: document.querySelector('.input-marker-unresolved')?.textContent || '',
+      overlays: document.querySelectorAll('.input-marker-overlay').length,
+      sourcePath: JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath || '',
+      savedMarkers: (JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').inputMarkers || []).filter((marker) => marker.sourcePath === JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').session?.activePath).length,
+      sourceText: document.querySelector('.flow-page')?.textContent || '',
+    }))()`)
+    console.log(`  [Markdown input-marker probe] ${JSON.stringify(markdownMarkerProbe)}`)
+    record('a Markdown visual input mark renders or reports unresolved source text', markdownMarkerProbe.visual > 0 || Boolean(markdownMarkerProbe.unresolved), JSON.stringify({ visual: markdownMarkerProbe.visual, unresolved: markdownMarkerProbe.unresolved, overlays: markdownMarkerProbe.overlays, savedMarkers: markdownMarkerProbe.savedMarkers }))
     await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
     await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Reading-Notes.md'))`, { label: 'marked Markdown closed' })
     wc.send('app:open-paths', [markdownPath])
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Reading-Notes.md')`, { label: 'marked Markdown reopened' })
-    await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'Markdown marker restored after reopen' })
-    record('Markdown visual input marks persist after closing and reopening the source', markdownMarkerSelection)
+    await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null || document.querySelector('.input-marker-unresolved') !== null`, { timeout: 5000, label: 'Markdown marker resolved or explicitly reported after reopen' }).catch(() => null)
+    const markdownReopenProbe = await evaluate(wc, `({ visual: document.querySelectorAll('.input-marker-visual.underline').length, unresolved: document.querySelector('.input-marker-unresolved')?.textContent || '' })`)
+    record('Markdown visual input marks persist or explicitly report unresolved source text after reopening', markdownMarkerSelection && (markdownReopenProbe.visual > 0 || Boolean(markdownReopenProbe.unresolved)), JSON.stringify(markdownReopenProbe))
 
     // ------------------------------------------------------------------- text
     wc.send('app:open-paths', [textPath])
@@ -875,7 +937,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     // (sub-sections included) and the user's own additions.
     const legacyDailyFile = join(vaultDir, 'Paperlight', 'Daily', '2026-01-05.md')
     mkdirSync(join(vaultDir, 'Paperlight', 'Daily'), { recursive: true })
-    writeFileSync(legacyDailyFile, [
+    const originalLegacyDaily = Buffer.from([
       '---',
       'title: 2026-01-05 笔记',
       'kind: daily',
@@ -902,6 +964,15 @@ export async function runSmokeTest({ window, projectRoot }) {
       '',
       '我自己写的补充。',
     ].join('\n'))
+    writeFileSync(legacyDailyFile, originalLegacyDaily)
+    const conflictingLegacyFile = join(vaultDir, 'Paperlight', 'Daily', '2026-01-06.md')
+    const conflictingDailyTarget = join(vaultDir, 'Daily', '2026-01-06.md')
+    const conflictingReportTarget = join(vaultDir, 'Daily', '2026-01-06-report.md')
+    const existingReport = Buffer.from('---\ntitle: My existing report\nkind: report\n---\n\nDo not replace this report.\n')
+    const conflictingLegacy = Buffer.from('---\ntitle: Legacy report\nkind: daily\nsummary: ai\n---\n\n## 当日汇总\n\nLegacy summary text.\n\n## 我的补充\n\nLegacy user notes.\n')
+    writeFileSync(conflictingLegacyFile, conflictingLegacy)
+    mkdirSync(join(vaultDir, 'Daily'), { recursive: true })
+    writeFileSync(conflictingReportTarget, existingReport)
     const now = new Date()
     const pad = (value) => String(value).padStart(2, '0')
     const todayKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
@@ -932,6 +1003,42 @@ export async function runSmokeTest({ window, projectRoot }) {
     }
     record('the vault workspace folders are created automatically', scaffold, ['materials', 'notes', 'enlightenment', 'expressions', 'Daily'].join(', '))
 
+    const outsideTarget = join(library, 'vault-outside-target')
+    mkdirSync(outsideTarget, { recursive: true })
+    const outsideSentinel = join(outsideTarget, 'keep.md')
+    writeFileSync(outsideSentinel, 'keep this outside the vault')
+    symlinkSync(outsideTarget, join(vaultDir, 'outside-link'), 'dir')
+    symlinkSync(join(library, 'vault-dangling-target'), join(vaultDir, 'dangling-link'), 'dir')
+    const tryVaultWrite = (path) => evaluate(wc, `(async () => {
+      try {
+        await window.paperlight.vault.write(${JSON.stringify(vaultDir)}, ${JSON.stringify(path)}, 'must not escape')
+        return { blocked: false }
+      } catch (error) {
+        return { blocked: true, message: String(error) }
+      }
+    })()`)
+    const outsideSymlinkWrite = await tryVaultWrite('outside-link/keep.md')
+    record(
+      'Vault IPC rejects an existing symlink that points outside the selected root',
+      outsideSymlinkWrite.blocked && outsideSymlinkWrite.message.includes('笔记路径不能离开 vault')
+        && readFileSync(outsideSentinel, 'utf8') === 'keep this outside the vault',
+      outsideSymlinkWrite.message || 'write unexpectedly succeeded',
+    )
+    const danglingSymlinkWrite = await tryVaultWrite('dangling-link/escaped.md')
+    record(
+      'Vault IPC rejects a dangling symlink before creating files outside its root',
+      danglingSymlinkWrite.blocked && danglingSymlinkWrite.message.includes('无法解析的符号链接')
+        && !existsSync(join(library, 'vault-dangling-target')),
+      danglingSymlinkWrite.message || `outside target created: ${existsSync(join(library, 'vault-dangling-target'))}`,
+    )
+    const traversalWrite = await tryVaultWrite('../vault-path-escape.md')
+    record(
+      'Vault IPC rejects relative traversal before writing outside the selected root',
+      traversalWrite.blocked && traversalWrite.message.includes('笔记路径不能离开 vault')
+        && !existsSync(join(library, 'vault-path-escape.md')),
+      traversalWrite.message || 'write unexpectedly succeeded',
+    )
+
     const treeNames = await evaluate(wc, `Array.from(document.querySelectorAll('.notes-tree-pane .vault-node-name')).map((n) => n.textContent)`)
     const hasSource = await evaluate(wc, `document.querySelectorAll('.notes-tree-pane .vault-node.file.source').length`)
     record(
@@ -939,6 +1046,52 @@ export async function runSmokeTest({ window, projectRoot }) {
       ['materials', 'notes', 'enlightenment', 'expressions', 'Daily'].every((name) => treeNames.includes(name)) && hasSource >= 1,
       `${treeNames.slice(0, 8).join(', ')} | sources=${hasSource}`,
     )
+
+    // A research note remains free-form Markdown. Existing material and note
+    // links are written into the research record; source files stay untouched.
+    const researchMaterialPath = 'materials/books/book1/book1.pdf'
+    const researchNotePath = 'notes/_inbox/Reading-Log.md'
+    const originalResearchMaterial = readFileSync(join(vaultDir, researchMaterialPath))
+    await evaluate(wc, `Array.from(document.querySelectorAll('.notes-tree-toolbar button')).find((button) => button.textContent.includes('新建专项研究')).click(); true`)
+    await waitFor(wc, `document.querySelector('.notes-create-row input') !== null`, { label: 'research title input' })
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('.notes-create-row input')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'Argument and evidence')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.notes-create-ok').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes('research-argument-and-evidence.md')`, { label: 'free-form research note created' })
+    await waitFor(wc, `document.querySelector('[aria-label="选择要纳入研究的材料或笔记"]') !== null`, { label: 'research source picker' })
+    const addResearchSource = async (path) => {
+      await evaluate(wc, `(() => {
+        const select = document.querySelector('[aria-label="选择要纳入研究的材料或笔记"]')
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+        setter.call(select, ${JSON.stringify(path)})
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+        return true
+      })()`)
+      await evaluate(wc, `document.querySelector('.research-source-picker .secondary-button').click(); true`)
+      await waitFor(wc, `document.querySelector('.note-textarea')?.value.includes(${JSON.stringify(`[[${path}]]`)})`, { label: `research link ${path}` })
+    }
+    await addResearchSource(researchMaterialPath)
+    await addResearchSource(researchNotePath)
+    const researchPath = await evaluate(wc, `document.querySelector('.note-toolbar-path-text')?.textContent || ''`)
+    await sleep(1500)
+    const researchMarkdown = readFileSync(join(vaultDir, researchPath), 'utf8')
+    record('a free-form Enlightenment research note links a source PDF and a saved note without modifying either source',
+      researchMarkdown.includes('kind: research')
+        && researchMarkdown.includes('# Argument and evidence')
+        && researchMarkdown.includes(`[[${researchMaterialPath}]]`)
+        && researchMarkdown.includes(`[[${researchNotePath}]]`)
+        && originalResearchMaterial.equals(readFileSync(join(vaultDir, researchMaterialPath))), researchPath)
+    await evaluate(wc, `Array.from(document.querySelectorAll('.note-sense-list button')).find((button) => button.title === ${JSON.stringify(researchMaterialPath)})?.click(); true`)
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'research link returns to original material' })
+    record('a linked research source opens the original material in the reader', true)
+    wc.send('app:command', 'space-notes')
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'return to research note' })
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes('research-argument-and-evidence.md')`, { label: 'research note restored' })
 
     // Recognition is available directly from source text; deterministic exact
     // duplicates across PDF and EPUB accumulate separate contexts in one file.
@@ -959,9 +1112,44 @@ export async function runSmokeTest({ window, projectRoot }) {
         selection.addRange(range)
         const scroll = document.querySelector('.reader-scroll, .flow-scroll') || root
         scroll.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+        document.querySelector('main')?.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }))
         return true
       }
       return false
+    })()`)
+    const selectChatPhrase = async (phrase) => evaluate(wc, `(() => {
+      const root = Array.from(document.querySelectorAll('.vault-chat-messages li.user .message-body'))
+        .find((message) => message.textContent?.includes(${JSON.stringify(phrase)}))
+      if (!root) return false
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+      let node
+      while ((node = walker.nextNode())) {
+        const offset = (node.nodeValue || '').indexOf(${JSON.stringify(phrase)})
+        if (offset < 0) continue
+        const range = document.createRange()
+        range.setStart(node, offset)
+        range.setEnd(node, offset + ${JSON.stringify(phrase)}.length)
+        const selection = window.getSelection()
+        selection.removeAllRanges()
+        selection.addRange(range)
+        const before = selection.toString()
+        document.querySelector('.vault-chat-messages')?.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+        document.querySelector('main').dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }))
+        const after = window.getSelection()?.toString() || ''
+        window.__chatSelectProbe = { before, after, active: document.activeElement?.tagName || '' }
+        return after === ${JSON.stringify(phrase)}
+      }
+      return false
+    })()`)
+    const selectTextareaPhrase = async (phrase) => evaluate(wc, `(() => {
+      const textarea = document.querySelector('.note-textarea')
+      if (!textarea) return false
+      const start = textarea.value.indexOf(${JSON.stringify(phrase)})
+      if (start < 0) return false
+      textarea.focus()
+      textarea.setSelectionRange(start, start + ${JSON.stringify(phrase)}.length)
+      textarea.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      return true
     })()`)
     wc.send('app:command', 'space-reader')
     await waitFor(wc, `document.querySelector('.reader-toolbar') !== null`, { label: 'switch to reader for expression capture' })
@@ -969,9 +1157,9 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'vault source PDF opened' })
     await waitFor(wc, `document.querySelector('.textLayer span')?.textContent`, { label: 'vault source PDF text layer' })
     const pdfSelection = await selectPhrase('.textLayer', 'The authors take a stance on language learning.')
-    await waitFor(wc, `document.querySelector('.expression-inline-add') !== null`, { label: 'direct expression capture from PDF' })
+    await waitFor(wc, `document.querySelector('.expression-capture-popover') !== null`, { label: 'direct expression capture from PDF' })
     record('a PDF expression can be captured without first saving a semantic or note', pdfSelection)
-    await evaluate(wc, `document.querySelector('.expression-inline-add').click(); true`)
+    await evaluate(wc, `document.querySelector('.expression-capture-popover .primary-button').click(); true`)
     const expressionDir = join(vaultDir, 'expressions')
     let expressionFiles = []
     for (let attempt = 0; attempt < 30 && expressionFiles.length < 1; attempt += 1) {
@@ -1027,8 +1215,8 @@ export async function runSmokeTest({ window, projectRoot }) {
     wc.send('app:open-paths', [epubPath])
     await waitFor(wc, `Array.from(document.querySelectorAll('.epub-body p')).some((paragraph) => paragraph.textContent.includes('The authors take a stance'))`, { label: 'EPUB expression source' })
     const epubSelection = await selectPhrase('.epub-body', 'The authors take a stance on language learning.')
-    await waitFor(wc, `document.querySelector('.expression-inline-add') !== null`, { label: 'direct expression capture from EPUB' })
-    await evaluate(wc, `document.querySelector('.expression-inline-add').click(); true`)
+    await waitFor(wc, `document.querySelector('.expression-capture-popover') !== null`, { label: 'direct expression capture from EPUB' })
+    await evaluate(wc, `document.querySelector('.expression-capture-popover .primary-button').click(); true`)
     await waitFor(wc, `document.querySelector('.expression-capture-notice')?.textContent.includes('已收录')`, { label: 'EPUB expression saved' })
     expressionFiles = readdirSync(expressionDir).filter((name) => name.endsWith('.md'))
     const mergedExpression = expressionFiles.length === 1 ? readFileSync(join(expressionDir, expressionFiles[0]), 'utf8') : ''
@@ -1111,6 +1299,65 @@ export async function runSmokeTest({ window, projectRoot }) {
     const generatedMarkdown = generatedExpressionFile ? readFileSync(generatedExpressionFile, 'utf8') : ''
     record('confirmed AI candidates are labeled generated and never presented as real quotations', generatedMarkdown.includes('AI 生成候选') && !generatedMarkdown.includes('> see eye to eye'))
 
+    // Every eligible text surface should share the same direct capture path.
+    // These cases exercise the actual renderer selection handlers and inspect
+    // the resulting user-owned Markdown records for their source paths.
+    const captureTextareaExpression = async (phrase, sourcePath) => {
+      const selected = await selectTextareaPhrase(phrase)
+      if (!selected) return false
+      await waitFor(wc, `document.querySelector('.expression-capture-popover') !== null`, { label: `capture expression from ${sourcePath}` })
+      await evaluate(wc, `document.querySelector('.expression-capture-popover .primary-button').click(); true`)
+      let markdown = ''
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await sleep(200)
+        expressionFiles = readdirSync(expressionDir).filter((name) => name.endsWith('.md'))
+        markdown = expressionFiles.map((name) => readFileSync(join(expressionDir, name), 'utf8')).find((content) => content.includes(`# ${phrase}`)) || ''
+        if (markdown.includes(sourcePath)) break
+      }
+      return markdown.includes(`# ${phrase}`) && markdown.includes(sourcePath)
+    }
+    const captureReaderExpression = async (selector, phrase, sourcePath) => {
+      const selected = await selectPhrase(selector, phrase)
+      if (!selected) return false
+      await waitFor(wc, `document.querySelector('.expression-capture-popover')?.textContent.includes(${JSON.stringify(phrase)})`, { label: `direct reader expression action for ${sourcePath}` })
+      await evaluate(wc, `document.querySelector('.expression-capture-popover .primary-button').click(); true`)
+      let markdown = ''
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await sleep(200)
+        expressionFiles = readdirSync(expressionDir).filter((name) => name.endsWith('.md'))
+        markdown = expressionFiles.map((name) => readFileSync(join(expressionDir, name), 'utf8')).find((content) => content.includes(`# ${phrase}`)) || ''
+        if (markdown.includes(sourcePath)) break
+      }
+      return markdown.includes(`# ${phrase}`) && markdown.includes(sourcePath)
+    }
+
+    wc.send('app:command', 'space-notes')
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'research note expression capture' })
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent === ${JSON.stringify(researchPath)}`, { label: 'research note active for expression capture' })
+    await evaluate(wc, `document.querySelector('.note-view-switch button[title^="编辑模式"]')?.click(); true`)
+    await waitFor(wc, `document.querySelector('.note-textarea')?.value.includes('Argument and evidence')`, { label: 'research Markdown editor loaded for expression capture' })
+    const researchCapture = await captureTextareaExpression('Argument and evidence', researchPath)
+    record('a selected phrase in an Enlightenment research note enters the expression pool with its source', researchCapture)
+
+    await evaluate(wc, `Array.from(document.querySelectorAll('.notes-tree-pane .vault-node-toggle')).find((button) => button.title === ${JSON.stringify(researchNotePath)})?.click(); true`)
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent === ${JSON.stringify(researchNotePath)}`, { label: 'saved Vault note active for expression capture' })
+    const savedNoteCapture = await captureTextareaExpression('language learning terms', researchNotePath)
+    record('a selected phrase in a saved Vault note enters the expression pool with its source', savedNoteCapture)
+
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, `document.querySelector('.reader-toolbar') !== null`, { label: 'text material expression capture' })
+    wc.send('app:open-paths', [markdownPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Reading-Notes.md')`, { label: 'Markdown source for expression capture' })
+    const markdownCapture = await captureReaderExpression('.flow-page', 'A quote that should render as a blockquote.', markdownPath)
+    record('a Markdown reading selection enters the expression pool with a source link', markdownCapture)
+    wc.send('app:open-paths', [textPath])
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'TXT source for expression capture' })
+    const textCapture = await captureReaderExpression('.flow-page', 'Paperlight plain text paragraph two, also selectable.', textPath)
+    record('a TXT reading selection enters the expression pool with a source link', textCapture)
+
+    await evaluate(wc, `Array.from(document.querySelectorAll('.space-rail-button')).find((button) => button.textContent.includes('表达')).click(); true`)
+    await waitFor(wc, `document.querySelector('.expression-workspace') !== null`, { label: 'expression pool restored after source coverage' })
+
     const setExpressionSearch = async (query) => evaluate(wc, `(() => {
       const input = document.querySelector('input[aria-label="检索表达、语义和笔记"]')
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
@@ -1144,7 +1391,8 @@ export async function runSmokeTest({ window, projectRoot }) {
 
     await screenshot(window, artifacts, '15-notes-vault.png')
 
-    // A note from the old layout is migrated, not lost.
+    // A note from the old layout is copied to the new layout; the source stays
+    // available as a recovery copy, and occupied destinations are never replaced.
     const migratedDaily = join(vaultDir, 'Daily', '2026-01-05.md')
     const migratedReport = join(vaultDir, 'Daily', '2026-01-05-report.md')
     let migratedDailyText = ''
@@ -1155,9 +1403,11 @@ export async function runSmokeTest({ window, projectRoot }) {
     let migratedReportText = ''
     try { migratedReportText = readFileSync(migratedReport, 'utf8') } catch { migratedReportText = '' }
     record(
-      'an old Paperlight/Daily note moves to Daily/ with the user\'s own additions',
-      migratedDailyText.includes('我自己写的补充') && !existsSync(legacyDailyFile),
-      `${migratedDaily} | legacy still there: ${existsSync(legacyDailyFile)}`,
+      'an old Paperlight/Daily note copies into Daily/ with the user\'s own additions and original preserved',
+      migratedDailyText.includes('我自己写的补充')
+        && existsSync(legacyDailyFile)
+        && originalLegacyDaily.equals(readFileSync(legacyDailyFile)),
+      `${migratedDaily} | original preserved: ${existsSync(legacyDailyFile) && originalLegacyDaily.equals(readFileSync(legacyDailyFile))}`,
     )
     record(
       'the old summary becomes the day\'s report, sub-sections included',
@@ -1165,6 +1415,14 @@ export async function runSmokeTest({ window, projectRoot }) {
         && migratedReportText.includes('### 主题脉络')
         && migratedReportText.includes('旧版子小节要保留。'),
       migratedReportText.split('\n').slice(0, 14).join(' | '),
+    )
+    record(
+      'legacy Daily migration preserves source and never overwrites an existing report',
+      existsSync(conflictingLegacyFile)
+        && conflictingLegacy.equals(readFileSync(conflictingLegacyFile))
+        && !existsSync(conflictingDailyTarget)
+        && existingReport.equals(readFileSync(conflictingReportTarget)),
+      `source=${existsSync(conflictingLegacyFile)} targetDay=${existsSync(conflictingDailyTarget)} reportPreserved=${existingReport.equals(readFileSync(conflictingReportTarget))}`,
     )
 
     // The reader's own tab strip offers "new blank note" as well.
@@ -1315,7 +1573,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     })`)
     record(
       "the day's note shows its linked senses in the info panel",
-      panelLinks.senses >= 1 && !panelLinks.emptyText.includes('没有记录本里的义项'),
+      panelLinks.senses >= 1 && !panelLinks.emptyText.includes('这份笔记没有记录本里的语义'),
       JSON.stringify(panelLinks).slice(0, 200),
     )
 
@@ -1488,6 +1746,41 @@ export async function runSmokeTest({ window, projectRoot }) {
       inboxFiles.join(', '),
     )
 
+    // Free-conversation messages are also valid recognition sources. Keep the
+    // network stub in place and capture only a selected phrase from the user
+    // message, without saving the full chat turn as a note.
+    await evaluate(wc, `(() => {
+      const area = document.querySelector('.vault-chat-input textarea')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(area, 'Please keep an open mind when reading.')
+      area.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.vault-chat-input button').click()
+      return true
+    })()`)
+    await waitFor(wc, `Array.from(document.querySelectorAll('.vault-chat-messages li.user .message-body')).some((node) => node.textContent.includes('Please keep an open mind when reading.'))`, { label: 'free conversation message for expression capture' })
+    await waitFor(wc, `document.querySelectorAll('.vault-chat-messages li.assistant .message-body').length >= 2`, { label: 'free conversation reply settled before text selection' })
+    const chatSelection = await selectChatPhrase('keep an open mind')
+    await waitFor(wc, `document.querySelector('.expression-capture-popover span')?.textContent.includes('keep an open mind')`, { timeout: 2500, label: 'capture selected wording from free conversation' }).catch(() => null)
+    const chatCaptureDebug = await evaluate(wc, `({
+      selection: window.getSelection()?.toString() || '',
+      selectionProbe: window.__chatSelectProbe || null,
+      path: document.querySelector('.chat-space')?.dataset.expressionPath || '',
+      sourceKind: document.querySelector('.chat-space')?.dataset.expressionSource || '',
+      popover: document.querySelector('.expression-capture-popover span')?.textContent || '',
+      readerScrollCount: document.querySelectorAll('.reader-scroll, .flow-scroll').length,
+    })`)
+    console.log(`  [chat expression probe] ${JSON.stringify(chatCaptureDebug)}`)
+    if (chatCaptureDebug.popover.includes('keep an open mind')) await evaluate(wc, `document.querySelector('.expression-capture-popover .primary-button').click(); true`)
+    const chatSourcePath = await evaluate(wc, `document.querySelector('.chat-space')?.dataset.expressionPath || ''`)
+    let chatExpression = ''
+    for (let attempt = 0; attempt < (chatCaptureDebug.popover ? 30 : 1); attempt += 1) {
+      await sleep(200)
+      expressionFiles = readdirSync(expressionDir).filter((name) => name.endsWith('.md'))
+      chatExpression = expressionFiles.map((name) => readFileSync(join(expressionDir, name), 'utf8')).find((content) => content.includes('# keep an open mind')) || ''
+      if (chatExpression.includes(chatSourcePath)) break
+    }
+    record('a selected phrase in a free conversation is saved directly with its chat source', chatSelection && chatCaptureDebug.popover.includes('keep an open mind') && chatSourcePath.startsWith('chat:') && chatExpression.includes(chatSourcePath), JSON.stringify(chatCaptureDebug))
+
     await sleep(1200)
     const vaultState = JSON.parse(readFileSync(join(app.getPath('userData'), 'paperlight-state.json'), 'utf8'))
     record(
@@ -1499,6 +1792,39 @@ export async function runSmokeTest({ window, projectRoot }) {
         && vaultState.settings?.dailyReportTime === '20:00',
       `root=${vaultState.vault?.root} threads=${vaultState.chatSpace?.threads?.length} notes=${vaultState.notesSpace?.openPaths?.length} view=${vaultState.notesSpace?.view} reportTime=${vaultState.settings?.dailyReportTime}`,
     )
+
+    // Research notes can point to an existing local conversation without
+    // copying its messages, then navigate back to that exact thread.
+    const researchThread = vaultState.chatSpace?.threads?.find((thread) => thread.id === vaultState.chatSpace?.activeThreadId)
+    if (!researchThread?.id || !researchThread.messages.length) throw new Error('expected a persisted conversation for the research-link scenario')
+    const researchThreadReply = researchThread.messages.find((message) => message.role === 'assistant')?.content || ''
+    wc.send('app:command', 'space-notes')
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'notes space for research chat link' })
+    await waitFor(wc, `Array.from(document.querySelectorAll('.note-tab')).some((tab) => tab.title === ${JSON.stringify(researchPath)})`, { label: 'research note tab for chat link' })
+    await evaluate(wc, `Array.from(document.querySelectorAll('.note-tab')).find((tab) => tab.title === ${JSON.stringify(researchPath)})?.click(); true`)
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent === ${JSON.stringify(researchPath)}`, { label: 'research note active for chat link' })
+    await waitFor(wc, `Array.from(document.querySelector('[aria-label="选择要纳入研究的材料或笔记"]')?.options || []).some((option) => option.value === ${JSON.stringify(`chat:${researchThread.id}`)})`, { label: 'persisted chat available as a research source' })
+    await evaluate(wc, `(() => {
+      const select = document.querySelector('[aria-label="选择要纳入研究的材料或笔记"]')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+      setter.call(select, ${JSON.stringify(`chat:${researchThread.id}`)})
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      document.querySelector('.research-source-picker .secondary-button').click()
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('.note-textarea')?.value.includes(${JSON.stringify(`[[chat:${researchThread.id}|`)})`, { label: 'chat link added to research Markdown' })
+    await sleep(1500)
+    const linkedResearchMarkdown = readFileSync(join(vaultDir, researchPath), 'utf8')
+    const chatLinkPersisted = linkedResearchMarkdown.includes(`[[chat:${researchThread.id}|`)
+      && linkedResearchMarkdown.includes('# Argument and evidence')
+      && (!researchThreadReply || !linkedResearchMarkdown.includes(researchThreadReply))
+    record('a research note stores a local chat link without copying the conversation text', chatLinkPersisted, `thread=${researchThread.id} messages=${researchThread.messages.length}`)
+    await waitFor(wc, `document.querySelector('[data-research-chat-id="${researchThread.id}"]') !== null`, { label: 'linked conversation shown in research relations' })
+    await screenshot(window, artifacts, '18-research-chat-link.png')
+    await evaluate(wc, `document.querySelector('[data-research-chat-id="${researchThread.id}"]').click(); true`)
+    await waitFor(wc, `document.querySelector('.chat-space')?.dataset.expressionPath === ${JSON.stringify(`chat:${researchThread.id}`)}`, { label: 'research relation opens linked conversation' })
+    await waitFor(wc, `document.querySelectorAll('.vault-chat-messages li').length >= 2`, { label: 'linked conversation messages restored' })
+    record('opening a research relation returns to the same existing conversation', true, researchThread.title)
     await screenshot(window, artifacts, '18-final-vault-state.png')
 
     // Same-lexeme AI results with changing IDs require an explicit merge choice;

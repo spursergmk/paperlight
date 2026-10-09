@@ -230,7 +230,7 @@ export function relateSense(current: SensePayload, atoms: SenseAtom[]): SenseRel
   for (const atom of atoms) {
     if (atom.id === key) continue
     if (atom.lemma.toLowerCase() === current.lemma.toLowerCase()) {
-      relations.push({ atom, reason: '同一词的另一个义项' })
+      relations.push({ atom, reason: '同一词的另一个语义' })
       continue
     }
     if (root.length > 2 && (atom.guidance?.morphology?.root || '').trim().toLowerCase() === root) {

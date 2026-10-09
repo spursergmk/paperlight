@@ -260,8 +260,21 @@ function vaultTarget(rootValue, relative) {
   const realRoot = realpathSync(root)
   let probe = target
   for (let depth = 0; depth <= VAULT_MAX_DEPTH + 2; depth += 1) {
-    if (existsSync(probe)) {
-      const realProbe = realpathSync(probe)
+    let info = null
+    try {
+      // lstat sees a dangling symlink; existsSync would treat it as absent.
+      info = lstatSync(probe)
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error
+    }
+    if (info) {
+      let realProbe
+      try {
+        realProbe = realpathSync(probe)
+      } catch (error) {
+        if (info.isSymbolicLink()) throw new Error('笔记路径包含无法解析的符号链接。')
+        throw error
+      }
       if (realProbe !== realRoot && !realProbe.startsWith(realRoot + sep)) {
         throw new Error('笔记路径不能离开 vault。')
       }

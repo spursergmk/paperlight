@@ -15,6 +15,7 @@ import type { InputMarker } from '../types'
 // with an explicit way out.
 
 const TEXT_LAYER_TIMEOUT_MS = 8000
+const PAGE_RENDER_TIMEOUT_MS = 20000
 const AUTO_RETRIES = 1
 
 type PagePhase = 'loading' | 'ready' | 'no-text' | 'error'
@@ -27,12 +28,13 @@ interface PDFPageProps {
   reservedHeight: number
   onRatio: (pageNumber: number, ratio: number) => void
   /** Last-resort recovery: rebuild the whole document (fresh worker). */
-  onReloadDocument: () => void
+  onReloadDocument: () => boolean
+  onRecoverStalledPage: (pageNumber: number) => boolean
   inputMarkers: InputMarker[]
 }
 
 export default function PDFPage({
-  pdf, pageNumber, width, reservedHeight, onRatio, onReloadDocument, inputMarkers,
+  pdf, pageNumber, width, reservedHeight, onRatio, onReloadDocument, onRecoverStalledPage, inputMarkers,
 }: PDFPageProps) {
   const pageRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -41,6 +43,7 @@ export default function PDFPage({
   const [renderError, setRenderError] = useState('')
   const [attempt, setAttempt] = useState(0)
   const autoRetries = useRef(0)
+  const retryTarget = useRef({ pdf, pageNumber, width })
   // pdf.js refuses to paint onto a canvas whose render task was replaced, and an
   // in-flight task must therefore be settled before this one reuses the canvas.
   const pendingRender = useRef<Promise<unknown> | null>(null)
@@ -51,7 +54,11 @@ export default function PDFPage({
     let renderTask: ReturnType<PDFPageProxy['render']> | undefined
     let textLayer: { render(): Promise<void>; cancel(): void } | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
-    autoRetries.current = 0
+    let renderWatchdog: ReturnType<typeof setTimeout> | undefined
+    if (retryTarget.current.pdf !== pdf || retryTarget.current.pageNumber !== pageNumber || retryTarget.current.width !== width) {
+      retryTarget.current = { pdf, pageNumber, width }
+      autoRetries.current = 0
+    }
 
     async function renderPage() {
       const canvas = canvasRef.current
@@ -122,6 +129,7 @@ export default function PDFPage({
             setAttempt((value) => value + 1)
             return
           }
+          if (onRecoverStalledPage(pageNumber)) return
           setPhase('no-text')
           return
         }
@@ -132,13 +140,29 @@ export default function PDFPage({
         }
       } finally {
         if (timer) clearTimeout(timer)
+        if (renderWatchdog) clearTimeout(renderWatchdog)
       }
     }
+
+    // Cover the entire page pipeline, including pdf.getPage() and canvas
+    // painting. A worker can stall before TextLayer.render() starts; without a
+    // watchdog that leaves the page spinner active forever and blocks selection.
+    renderWatchdog = setTimeout(() => {
+      if (cancelled) return
+      cancelled = true
+      renderTask?.cancel()
+      textLayer?.cancel()
+      if (!onRecoverStalledPage(pageNumber)) {
+        setRenderError('页面加载超时；文档已自动重新载入一次，仍未恢复。可手动重载文档。')
+        setPhase('error')
+      }
+    }, PAGE_RENDER_TIMEOUT_MS)
 
     void renderPage()
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
+      if (renderWatchdog) clearTimeout(renderWatchdog)
       renderTask?.cancel()
       textLayer?.cancel()
       // Remember the cancelled task instead of clearing the canvas: zeroing the
@@ -147,7 +171,7 @@ export default function PDFPage({
       pendingRender.current = renderTask ? renderTask.promise.catch(() => undefined) : null
       textLayerRef.current?.replaceChildren()
     }
-  }, [attempt, onRatio, pageNumber, pdf, width])
+  }, [attempt, onRatio, onRecoverStalledPage, pageNumber, pdf, width])
 
   const retryPage = useCallback(() => {
     autoRetries.current = 0
@@ -158,7 +182,7 @@ export default function PDFPage({
 
   return (
     <article className="pdf-page-shell" data-page-number={pageNumber}>
-      <div className="pdf-page" ref={pageRef} style={{ width: `${width}px`, height: `${innerHeight}px` }}>
+      <div className="pdf-page" ref={pageRef} data-render-phase={phase} style={{ width: `${width}px`, height: `${innerHeight}px` }}>
         {/* A fresh element per render: pdf.js paints asynchronously and refuses a
             canvas that another render task touched, which surfaced as
             UnknownVizError when zooming or switching tabs mid-render. */}
@@ -182,6 +206,7 @@ export default function PDFPage({
             <span>第 {pageNumber} 页无法渲染</span>
             <span className="page-error-detail">{renderError}</span>
             <button type="button" onClick={retryPage}>重试</button>
+            <button type="button" onClick={() => onReloadDocument()}>重新载入文档</button>
           </div>
         )}
       </div>

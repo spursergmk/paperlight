@@ -25,7 +25,7 @@ interface PageStackProps {
   onSelectionKeyUp: (event: React.KeyboardEvent<HTMLDivElement>) => void
   onUserScroll: () => void
   /** Rebuilds the document when a page's text layer cannot be recovered. */
-  onReloadDocument: () => void
+  onReloadDocument: (automatic?: boolean) => boolean
   inputMarkers: InputMarker[]
   apiRef: React.RefObject<PageStackApi | null>
   children?: React.ReactNode
@@ -105,6 +105,12 @@ export default function PageStack({
   }, [containerWidth, pageWidth])
 
   const currentPage = currentPageFromScroll(layout.boxes, scrollTop, containerHeight)
+  const currentPageRef = useRef(currentPage)
+  currentPageRef.current = currentPage
+  const recoverStalledPage = useCallback((pageNumber: number) => {
+    if (pageNumber !== currentPageRef.current) return false
+    return onReloadDocument(true)
+  }, [onReloadDocument])
   const [windowStart, windowEnd] = renderWindow(pageCount, currentPage, 1)
 
   // Keep the reading position anchored across every layout change: a zoom step,
@@ -178,8 +184,12 @@ export default function PageStack({
     if (!element) return
     const top = scrollTopForPage(layout.boxes, page)
     element.scrollTop = top
+    // Programmatic navigation does not reliably fire a scroll event before a
+    // tab switch. Persist the position at the point where it is set so the
+    // next mount restores the requested page instead of the previous anchor.
+    onScrollPosition(top)
     setScrollTop(top)
-  }, [layout.boxes])
+  }, [layout.boxes, onScrollPosition])
 
   useEffect(() => {
     apiRef.current = {
@@ -202,7 +212,8 @@ export default function PageStack({
           width={pageWidth}
           reservedHeight={box.height}
           onRatio={handleRatio}
-          onReloadDocument={onReloadDocument}
+          onReloadDocument={() => onReloadDocument(false)}
+          onRecoverStalledPage={recoverStalledPage}
           inputMarkers={inputMarkers.filter((marker) => marker.pageNumber === index + 1 && Boolean(marker.visualStyle))}
         />
       </div>,

@@ -8,9 +8,9 @@ import SpaceRail from './SpaceRail'
 import Splitter from './Splitter'
 import VaultTree from './VaultTree'
 import type { VaultApi } from './useVault'
-import type { AppSpace, NoteViewMode, NotebookNote, SenseAtom, VaultEntry, VaultNoteKind } from '../types'
+import type { AppSpace, ChatThread, NoteViewMode, NotebookNote, SenseAtom, VaultEntry, VaultNoteKind } from '../types'
 import {
-  countWords, dailyNotePath, filterVaultTree, frontmatterList, frontmatterString, isVaultNoteKind,
+  appendResearchChatLink, appendResearchSourceLink, countWords, dailyNotePath, filterVaultTree, frontmatterList, frontmatterString, isVaultNoteKind,
   localDateKey, noteFolderPath, notesFolderFromPath, noteTitleFromPath, parseNote, relativeTime,
   vaultBasename, vaultDirname, wikiLinks,
 } from '../lib/vault'
@@ -25,14 +25,16 @@ const KIND_LABELS: Record<VaultNoteKind, string> = {
   chat: 'vault 对话',
   inbox: '记录本',
   finding: '专项发现',
+  research: '专项研究',
 }
 
-type CreateKind = 'note' | 'folder' | 'material' | 'finding'
+type CreateKind = 'note' | 'folder' | 'material' | 'finding' | 'research'
 
 interface NotesSpaceProps {
   vault: VaultApi
   atoms: SenseAtom[]
   notes: NotebookNote[]
+  chatThreads: ChatThread[]
   recentRoots: string[]
   openPaths: string[]
   activePath: string | null
@@ -58,6 +60,8 @@ interface NotesSpaceProps {
   onOpenSense: (atomId: string) => void
   /** Opens an original material (vault-relative path) in the reading desk. */
   onOpenSource: (path: string) => void
+  /** Opens a conversation linked from a research note. */
+  onOpenChatThread: (threadId: string) => void
   /** Notebook senses that do not have a vault file yet. */
   pendingSenseCount: number
   onSavePendingSenses: () => void
@@ -66,10 +70,10 @@ interface NotesSpaceProps {
 }
 
 export default function NotesSpace({
-  vault, atoms, notes, recentRoots, openPaths, activePath, view, treeWidth, sideOpen, sideWidth, collapsed,
+  vault, atoms, notes, chatThreads, recentRoots, openPaths, activePath, view, treeWidth, sideOpen, sideWidth, collapsed,
   readingContext, reportTime,
   onOpen, onClose, onActivate, onView, onTreeWidth, onTreeReset, onSideWidth, onSideReset,
-  onToggleCollapsed, onToggleSide, onSwitchSpace, onOpenSense, onOpenSource,
+  onToggleCollapsed, onToggleSide, onSwitchSpace, onOpenSense, onOpenSource, onOpenChatThread,
   pendingSenseCount, onSavePendingSenses, onCreateBlankNote,
 }: NotesSpaceProps) {
   const [draft, setDraft] = useState('')
@@ -87,6 +91,7 @@ export default function NotesSpace({
   const [aiTopic, setAiTopic] = useState('')
   const [aiOpen, setAiOpen] = useState(false)
   const [aiBusy, setAiBusy] = useState(false)
+  const [researchTarget, setResearchTarget] = useState('')
 
   // The vault API object is rebuilt on every render, so callbacks read it
   // through a ref: an effect that depended on it would reload the note and
@@ -106,6 +111,8 @@ export default function NotesSpace({
 
   const tree = useMemo(() => filterVaultTree(vault.tree, query), [query, vault.tree])
   const activeEntry = vaultFiles.find((entry) => entry.path === activePath) || null
+
+  useEffect(() => { setResearchTarget('') }, [activePath])
 
   // Load the active note into the editor buffer.
   useEffect(() => {
@@ -224,6 +231,7 @@ export default function NotesSpace({
     const seen = new Set<string>()
     const resolved: Array<{ path: string; title: string }> = []
     for (const target of wikiLinks(draft)) {
+      if (target.startsWith('chat:')) continue
       const lower = target.toLowerCase()
       const match = vaultFiles.find((entry) => entry.path === target)
         || vaultFiles.find((entry) => entry.path === `${target}.md`)
@@ -238,10 +246,30 @@ export default function NotesSpace({
     return resolved
   }, [activePath, draft, vaultFiles])
 
+  const linkedChatThreads = useMemo(() => {
+    const threadsById = new Map(chatThreads.map((thread) => [thread.id, thread]))
+    const seen = new Set<string>()
+    return wikiLinks(draft).flatMap((target) => {
+      if (!target.startsWith('chat:')) return []
+      const id = target.slice('chat:'.length)
+      if (seen.has(id)) return []
+      seen.add(id)
+      const thread = threadsById.get(id)
+      return thread ? [thread] : []
+    })
+  }, [chatThreads, draft])
+
+  const researchSources = useMemo(() => vaultFiles
+    .filter((entry) => !entry.directory && entry.path !== activePath && !entry.path.startsWith('Daily/'))
+    .sort((a, b) => a.path.localeCompare(b.path)), [activePath, vaultFiles])
+
   const unresolvedLinks = useMemo(() => {
     const known = new Set(vaultFiles.map((entry) => entry.path))
-    return wikiLinks(draft).filter((target) => !known.has(target) && !known.has(`${target}.md`)).slice(0, 6)
-  }, [draft, vaultFiles])
+    const chatIds = new Set(chatThreads.map((thread) => thread.id))
+    return wikiLinks(draft).filter((target) => target.startsWith('chat:')
+      ? !chatIds.has(target.slice('chat:'.length))
+      : !known.has(target) && !known.has(`${target}.md`)).slice(0, 6)
+  }, [chatThreads, draft, vaultFiles])
 
   const dayEntries = useMemo(
     () => vault.entries.filter((entry) => !entry.directory && entry.path.startsWith('Daily/')),
@@ -278,6 +306,10 @@ export default function NotesSpace({
       } else if (createKind === 'material') {
         const path = await vaultRef.current.createMaterial(name)
         setStatus(`已新建 ${path}，笔记会自动镜像到 notes/${vaultBasename(path)}/`)
+      } else if (createKind === 'research') {
+        const path = await vaultRef.current.createResearch(name)
+        onOpen(path)
+        setStatus(`已新建专项研究 ${path}`)
       } else {
         const path = await vaultRef.current.createFinding(name)
         onOpen(path)
@@ -291,6 +323,34 @@ export default function NotesSpace({
       setNoteError(caught instanceof Error ? caught.message : '新建失败。')
     }
   }, [createKind, createName, createTarget, defaultNoteFolder, onOpen, save])
+
+  const addResearchSource = useCallback(() => {
+    if (!researchTarget || !activePath || kind !== 'research') return
+    try {
+      const linkedThread = researchTarget.startsWith('chat:')
+        ? chatThreads.find((thread) => thread.id === researchTarget.slice('chat:'.length))
+        : undefined
+      if (researchTarget.startsWith('chat:') && !linkedThread) {
+        setStatus('这段对话已不存在，无法加入研究。')
+        return
+      }
+      const next = linkedThread
+        ? appendResearchChatLink(draft, linkedThread.id, linkedThread.title)
+        : appendResearchSourceLink(draft, researchTarget)
+      if (next === draft) {
+        setStatus('这份内容已经在研究关联中。')
+        return
+      }
+      setDraft(next)
+      setDirty(true)
+      setStatus(linkedThread
+        ? `已把对话「${linkedThread.title}」加入研究；聊天内容仍保存在对话空间。`
+        : `已把「${noteTitleFromPath(researchTarget)}」加入研究；链接保存在这份 Markdown 中。`)
+      setResearchTarget('')
+    } catch (caught) {
+      setNoteError(caught instanceof Error ? caught.message : '无法关联这份内容。')
+    }
+  }, [activePath, chatThreads, draft, kind, researchTarget])
 
   const refreshDay = useCallback(async (force = false) => {
     const today = localDateKey()
@@ -310,6 +370,15 @@ export default function NotesSpace({
 
   const openWikiLink = useCallback((target: string) => {
     const normalized = target.trim()
+    if (normalized.startsWith('chat:')) {
+      const threadId = normalized.slice('chat:'.length)
+      if (chatThreads.some((thread) => thread.id === threadId)) {
+        void save().then(() => onOpenChatThread(threadId))
+      } else {
+        setStatus('这段对话已不存在。')
+      }
+      return
+    }
     const lower = normalized.toLowerCase()
     const direct = vaultFiles.find((entry) => entry.path === normalized)
       || vaultFiles.find((entry) => entry.path === `${normalized}.md`)
@@ -321,7 +390,7 @@ export default function NotesSpace({
       return
     }
     setStatus(`vault 里没有找到「${normalized}」这份笔记。`)
-  }, [onOpen, save, vaultFiles])
+  }, [chatThreads, onOpen, onOpenChatThread, save, vaultFiles])
 
   const removeActive = useCallback(async () => {
     const path = activePath
@@ -425,7 +494,7 @@ export default function NotesSpace({
             <div className="notes-tree-toolbar">
               <button type="button" onClick={() => startCreate('note')}><FileText size={12} /> 新建笔记</button>
               <button type="button" onClick={() => startCreate('material')} title="在 materials/ 下新建资料夹，notes/ 会自动镜像"><FolderPlus size={12} /> 新建资料夹</button>
-              <button type="button" onClick={() => startCreate('finding')} title="在 enlightenment/ 下写下你的专项发现，日报会读它"><Lightbulb size={12} /> 新建发现</button>
+              <button type="button" onClick={() => startCreate('research')} title="在 enlightenment/ 下创建自由 Markdown 专项研究"><Lightbulb size={12} /> 新建专项研究</button>
               <button type="button" className="daily" title="打开并更新今天的记录清单" onClick={() => void refreshDay(false)}><CalendarDays size={12} /> 今日记录</button>
             </div>
 
@@ -437,7 +506,7 @@ export default function NotesSpace({
                   placeholder={createKind === 'note' ? '笔记标题'
                     : createKind === 'folder' ? '文件夹名称'
                       : createKind === 'material' ? '资料夹名称（如 books、book1）'
-                        : '发现的标题'}
+                        : createKind === 'research' ? '研究主题或问题' : '发现的标题'}
                   value={createName}
                   onChange={(event) => setCreateName(event.target.value)}
                   onKeyDown={(event) => {
@@ -742,12 +811,32 @@ export default function NotesSpace({
                   </li>
                 ))}
               </ul>
-              <h4>链接到的笔记（{linkedNotes.length}）</h4>
-              {linkedNotes.length === 0 && <p className="sense-plain">正文里还没有 [[链接]]。</p>}
+              <h4>{kind === 'research' ? `研究关联（${linkedNotes.length + linkedChatThreads.length}）` : `链接到的笔记（${linkedNotes.length}）`}</h4>
+              {kind === 'research' && (
+                <div className="research-source-picker">
+                  <select aria-label="选择要纳入研究的材料或笔记" value={researchTarget} onChange={(event) => setResearchTarget(event.target.value)}>
+                    <option value="">选择材料或笔记…</option>
+                    <optgroup label="材料与笔记">
+                      {researchSources.map((entry) => <option key={entry.path} value={entry.path}>{entry.path}</option>)}
+                    </optgroup>
+                    <optgroup label="对话">
+                      {chatThreads.map((thread) => <option key={thread.id} value={`chat:${thread.id}`}>{thread.title} · {thread.messages.length} 条消息</option>)}
+                    </optgroup>
+                  </select>
+                  <button type="button" className="secondary-button" disabled={!researchTarget} onClick={addResearchSource}><Link2 size={12} /> 加入研究</button>
+                  <p className="sense-plain">材料以 Vault 链接、对话以本地标识写入研究 Markdown；聊天内容仍留在对话空间。</p>
+                </div>
+              )}
+              {linkedNotes.length === 0 && (kind !== 'research' || linkedChatThreads.length === 0) && <p className="sense-plain">正文里还没有 [[链接]]。</p>}
               <ul className="note-sense-list">
                 {linkedNotes.map((note) => (
                   <li key={note.path}>
-                    <button type="button" title={note.path} onClick={() => onOpen(note.path)}>→ {note.title}</button>
+                    <button type="button" title={note.path} onClick={() => (/\.(?:md|markdown)$/i.test(note.path) ? onOpen(note.path) : onOpenSource(note.path))}>→ {note.title}</button>
+                  </li>
+                ))}
+                {linkedChatThreads.map((thread) => (
+                  <li key={`chat:${thread.id}`}>
+                    <button type="button" data-research-chat-id={thread.id} title={`chat:${thread.id}`} onClick={() => onOpenChatThread(thread.id)}>→ 对话：{thread.title} · {thread.messages.length} 条消息</button>
                   </li>
                 ))}
               </ul>

@@ -5,11 +5,11 @@ import type {
 } from '../types'
 import { getApiConfigStatus } from '../lib/translation'
 import {
-  DAILY_DIR, DAILY_NOTES_HEADING, FINDING_CHARS_PER_FILE, FINDING_FILE_LIMIT, INBOX_FOLDER,
+  DAILY_DIR, DAILY_NOTES_HEADING, ENLIGHTENMENT_DIR, FINDING_CHARS_PER_FILE, FINDING_FILE_LIMIT, INBOX_FOLDER,
   LEGACY_DAILY_DIR, MANAGED_DIRS, MATERIALS_DIR, NOTES_DIR, aiNoteMarkdown, aiNotePath,
   buildVaultTree, chatAnswerMarkdown, dailyEntriesFromNotebook, dailyNoteMarkdown, dailyNotePath,
   dailyReportMarkdown, dailyReportPath, dailySourceHash, dailyUserNotes, excerptForGrounding, preserveDailyManagedEdits,
-  findingNoteMarkdown, findingNotePath, findingEntries, localDailySummary, localDateKey,
+  findingNoteMarkdown, findingNotePath, findingEntries, researchNoteMarkdown, localDailySummary, localDateKey,
   markdownSection, markdownSectionAtLevel, materialMirrorFolders, notebookNoteMarkdown,
   mergeSemanticNoteMarkdown, notebookNotePath, parseNote, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath,
   slugify, stringifyNote, titleFromMarkdown, uniquePath, vaultDirname, vaultJoin,
@@ -75,6 +75,7 @@ export interface VaultApi {
   createFolder(folder: string, name: string): Promise<string>
   createMaterial(name: string, parent?: string): Promise<string>
   createFinding(name: string, body?: string): Promise<string>
+  createResearch(name: string): Promise<string>
   renameNote(path: string, name: string): Promise<string>
   removeEntry(path: string): Promise<void>
   revealEntry(path: string): Promise<void>
@@ -380,6 +381,14 @@ export function useVault(options: {
     const date = localDateKey()
     const path = uniquePath(findingNotePath(date, title), takenPaths)
     await writeNote(path, findingNoteMarkdown({ title, body: body || `## 观察\n\n## 推论\n\n## 待验证\n`, date }))
+    return path
+  }, [takenPaths, writeNote])
+
+  const createResearch = useCallback(async (name: string) => {
+    const title = name.trim() || '未命名研究'
+    const date = localDateKey()
+    const path = uniquePath(vaultJoin(ENLIGHTENMENT_DIR, `${date}-research-${slugify(title, 'research')}.md`), takenPaths)
+    await writeNote(path, researchNoteMarkdown({ title, date }))
     return path
   }, [takenPaths, writeNote])
 
@@ -828,26 +837,39 @@ export function useVault(options: {
         .filter((entry) => !entry.directory && /^Paperlight\/Daily\/\d{4}-\d{2}-\d{2}\.md$/i.test(entry.path))
         .slice(0, 40)
       if (legacy.length === 0) return
-      let moved = 0
+      let copied = 0
+      let conflicts = 0
+      const occupiedPaths = new Set(entries.filter((entry) => !entry.directory).map((entry) => entry.path))
       for (const file of legacy) {
         const date = /(\d{4}-\d{2}-\d{2})\.md$/i.exec(file.path)?.[1]
         if (!date) continue
         const target = dailyNotePath(date)
-        if (entries.some((entry) => entry.path === target)) continue
+        if (occupiedPaths.has(target)) {
+          conflicts += 1
+          continue
+        }
         try {
           const parsed = parseNote(await readNote(file.path))
           // Keep every sub-section of the old summary: it becomes the report.
           const summary = markdownSectionAtLevel(parsed.body, '## 当日汇总')
             || markdownSection(parsed.body, '## 当日汇总')
+          const reportPath = summary ? dailyReportPath(date) : null
+          // A report may already exist even when the day file does not. Leave
+          // both user files untouched rather than overwriting either target.
+          if (reportPath && occupiedPaths.has(reportPath)) {
+            conflicts += 1
+            continue
+          }
           const userNotes = dailyUserNotes(parsed.body)
           const { entries: list, hash } = await readDayState(date, entries)
           await writeNote(target, dailyNoteMarkdown({
             date, entries: list, reportTime: reportTimeRef.current, userNotes, hash,
             readingActivity: readingActivityRef.current[date],
-            reportPath: summary ? dailyReportPath(date) : null,
+            reportPath,
           }))
+          occupiedPaths.add(target)
           if (summary) {
-            await writeNote(dailyReportPath(date), dailyReportMarkdown({
+            await writeNote(reportPath!, dailyReportMarkdown({
               date,
               summary,
               source: parsed.data.summary === 'ai' ? 'ai' : 'local',
@@ -856,19 +878,25 @@ export function useVault(options: {
               generated: String(parsed.data.updated || '') || undefined,
               reportTime: reportTimeRef.current,
             }))
+            occupiedPaths.add(reportPath!)
           }
-          await removeEntry(file.path)
-          moved += 1
+          // Keep the original V1 Markdown as a recovery copy. Cleanup can be a
+          // separate user decision after they have checked the new files.
+          copied += 1
         } catch {
           // Leave a legacy file alone when it cannot be migrated cleanly.
         }
       }
-      if (moved > 0) {
-        flashNotice(`已把 ${moved} 份旧的 Paperlight/Daily 笔记迁移到 Daily/（汇总整理成独立的日报文件）。`)
+      if (copied > 0 || conflicts > 0) {
+        const details = [
+          copied > 0 ? `已复制 ${copied} 份旧记录到 Daily/；原始 Paperlight/Daily 文件仍保留，供核对或恢复。` : '',
+          conflicts > 0 ? `${conflicts} 份因目标文件已存在而跳过，未覆盖现有内容。` : '',
+        ].filter(Boolean).join(' ')
+        flashNotice(details)
         await refresh()
       }
     })()
-  }, [entries, flashNotice, loading, readDayState, readNote, refresh, removeEntry, root, writeNote])
+  }, [entries, flashNotice, loading, readDayState, readNote, refresh, root, writeNote])
 
   // ------------------------------------------------------------- derived
 
@@ -913,6 +941,7 @@ export function useVault(options: {
     createFolder,
     createMaterial,
     createFinding,
+    createResearch,
     renameNote,
     removeEntry,
     revealEntry,

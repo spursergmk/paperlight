@@ -39,9 +39,15 @@ function normalizedTextWithOffsets(raw: string): { text: string; offsets: number
 
 function pointAt(nodes: Text[], offset: number): { node: Text; offset: number } | null {
   let walked = 0
-  for (const node of nodes) {
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index]
     const end = walked + (node.nodeValue?.length || 0)
-    if (offset <= end) return { node, offset: Math.max(0, offset - walked) }
+    // At a text-node boundary, start in the following node. A DOM Range that
+    // starts at the end of the preceding block can span different list or
+    // paragraph containers and may report no client rects in WebKit.
+    if (offset < end || (offset === end && index === nodes.length - 1)) {
+      return { node, offset: Math.max(0, offset - walked) }
+    }
     walked = end
   }
   return null

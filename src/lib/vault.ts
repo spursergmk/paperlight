@@ -60,7 +60,7 @@ const FRONTMATTER_FENCE = '---'
 const MAX_VAULT_DEPTH = 12
 const DEFAULT_REPORT_TIME = '20:00'
 
-const NOTE_KINDS: VaultNoteKind[] = ['daily', 'report', 'sense', 'semantic', 'expression', 'note', 'chat', 'inbox', 'finding']
+const NOTE_KINDS: VaultNoteKind[] = ['daily', 'report', 'sense', 'semantic', 'expression', 'note', 'chat', 'inbox', 'finding', 'research']
 
 export function isVaultNoteKind(value: string): value is VaultNoteKind {
   return (NOTE_KINDS as string[]).includes(value)
@@ -576,6 +576,58 @@ export function findingNoteMarkdown(options: { title: string; body: string; date
     tags: ['paperlight', 'finding'],
     source: 'user',
   }, `${text}\n`)
+}
+
+/** A free-form research note; the body stays blank for the user's own Markdown. */
+export function researchNoteMarkdown(options: { title: string; date: string }): string {
+  const title = options.title.trim().slice(0, 120) || '未命名研究'
+  return stringifyNote({
+    title,
+    kind: 'research',
+    created: new Date().toISOString(),
+    updated: new Date().toISOString(),
+    date: options.date,
+    tags: ['paperlight', 'research'],
+  }, `# ${title}\n\n`)
+}
+
+/** Adds a vault-relative source link to the research note without changing the source file. */
+export function appendResearchSourceLink(markdown: string, sourcePath: string): string {
+  if (!isSafeVaultPath(sourcePath)) throw new Error('研究来源必须位于当前 Vault 内。')
+  const target = normalizeVaultPath(sourcePath)
+  if (!target || /[\]\r\n]/.test(target)) throw new Error('研究来源路径无效。')
+  const text = String(markdown ?? '')
+  if (wikiLinks(text).some((link) => normalizeVaultPath(link) === target)) return text
+  return appendResearchLinkLine(text, `[[${target}]]`)
+}
+
+/** Adds a stable local chat-thread reference; conversation text stays in chat state. */
+export function appendResearchChatLink(markdown: string, threadId: string, title: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(threadId)) throw new Error('对话标识无效。')
+  const target = `chat:${threadId}`
+  const text = String(markdown ?? '')
+  if (wikiLinks(text).includes(target)) return text
+  const alias = String(title ?? '').replace(/[\[\]|\r\n]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) || '对话'
+  return appendResearchLinkLine(text, `[[${target}|${alias}]]`)
+}
+
+function appendResearchLinkLine(markdown: string, linkLine: string): string {
+  const text = String(markdown ?? '')
+  const heading = '## 研究材料与笔记'
+  const listItem = `- ${linkLine}`
+  const headingPattern = /^## 研究材料与笔记[ \t]*$/m
+  const found = headingPattern.exec(text)
+  if (!found) return `${text.trimEnd()}${text.trim() ? '\n\n' : ''}${heading}\n\n${listItem}\n`
+
+  const contentStart = found.index + found[0].length
+  const nextHeading = /^#{1,2}\s+/gm
+  nextHeading.lastIndex = contentStart
+  const next = nextHeading.exec(text)
+  const contentEnd = next?.index ?? text.length
+  const section = text.slice(contentStart, contentEnd)
+  const trimmedSection = section.replace(/\s*$/, '')
+  const insertion = `${trimmedSection}${trimmedSection.trim() ? '\n' : '\n'}${listItem}\n\n`
+  return `${text.slice(0, contentStart)}${insertion}${text.slice(contentEnd)}`
 }
 
 /** The assistant's grounded answer, saved as a vault note. */

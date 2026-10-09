@@ -245,7 +245,7 @@ export interface VaultEntry {
   mtimeMs: number
 }
 
-export type VaultNoteKind = 'daily' | 'report' | 'sense' | 'semantic' | 'expression' | 'note' | 'chat' | 'inbox' | 'finding'
+export type VaultNoteKind = 'daily' | 'report' | 'sense' | 'semantic' | 'expression' | 'note' | 'chat' | 'inbox' | 'finding' | 'research'
 
 /**
  * The safe YAML subset Paperlight writes and reads. Values are either a single
