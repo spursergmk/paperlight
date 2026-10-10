@@ -111,10 +111,67 @@ async function installSenseStub(wc, stubSense, chatAnswer = 'numerous 侧重数�
   await evaluate(wc, `(() => {
     window.__senseLookupRequests = []
     window.__senseChatRequests = []
+    window.__queryRequests = []
+    window.__analysisRequests = []
+    window.__holdNextAnalysis = false
     window.__senseAbortObserved = { lookup: false, ask: false }
+    window.__analysisAbortObserved = false
     const original = window.fetch.bind(window)
     window.fetch = (input, init) => {
       const url = typeof input === 'string' ? input : (input && input.url) || ''
+      if (url.includes('/api/query')) {
+        const body = init && init.body ? JSON.parse(init.body) : {}
+        window.__queryRequests.push(body)
+        if (body.task === 'default') {
+          window.__senseLookupRequests.push(body)
+          if (body.term === 'PAPERLIGHT-SLOW-LOOKUP-9F3A') return new Promise((_resolve, reject) => {
+            const stop = () => {
+              window.__senseAbortObserved.lookup = true
+              reject(new DOMException('Aborted', 'AbortError'))
+            }
+            if (init?.signal?.aborted) stop()
+            else init?.signal?.addEventListener('abort', stop, { once: true })
+          })
+          const canned = ${JSON.stringify(stubSense)}
+          const payload = {
+            status: canned.status || 'resolved',
+            explanation: canned.explanation || '',
+            ...(canned.sense ? { sense: canned.sense } : {}),
+            modules: canned.modules || [
+              ...(body.isSentence ? [{ key: 'syntax', title: '语法与句法', markdown: '当前句子的主干清楚，修饰成分围绕核心谓语展开。' }] : []),
+              { key: 'usage', title: '用法与搭配', markdown: '常用于说明数量较多的对象。', expressions: [{ expression: 'in large numbers', meaning: '大量地', usageScenario: '描述数量' }] },
+            ],
+          }
+          return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+        }
+        const moduleTitles = { syntax: '语法与句法', synonyms: '近义表达对比', 'scenario-pack': '场景表达包', background: '背景与文化解释' }
+        const module = {
+          key: body.task,
+          title: moduleTitles[body.task] || '语言查询',
+          markdown: body.task === 'synonyms' ? 'nearby expression 的语气更宽泛；in large numbers 强调数量。' : '这个模块的结果与当前原文相关。',
+          expressions: body.task === 'synonyms' || body.task === 'scenario-pack'
+            ? [{ expression: 'in large numbers', meaning: '大量地', usageScenario: '描述数量' }]
+            : [],
+        }
+        return Promise.resolve(new Response(JSON.stringify({ status: 'resolved', explanation: '', modules: [module] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      if (url.includes('/api/analysis')) {
+        const body = init && init.body ? JSON.parse(init.body) : {}
+        window.__analysisRequests.push(body)
+        if (window.__holdNextAnalysis || body.source?.text?.includes('PAPERLIGHT-SLOW-ANALYSIS-9F3A')) return new Promise((_resolve, reject) => {
+          window.__holdNextAnalysis = false
+          const stop = () => {
+            window.__analysisAbortObserved = true
+            reject(new DOMException('Aborted', 'AbortError'))
+          }
+          if (init?.signal?.aborted) stop()
+          else init?.signal?.addEventListener('abort', stop, { once: true })
+        })
+        return Promise.resolve(new Response(JSON.stringify({
+          translation: '直译：' + (body.source?.text || ''),
+          meaning: '意义分析：原文围绕核心论点展开，并说明了相关关系。',
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
       if (url.includes('/api/sense')) {
         const body = init && init.body ? JSON.parse(init.body) : {}
         const slow = (body.task === 'lookup' && body.term === 'PAPERLIGHT-SLOW-LOOKUP-9F3A')
@@ -1229,6 +1286,100 @@ export async function runSmokeTest({ window, projectRoot }) {
     await evaluate(wc, `document.querySelector('.query-go').click(); true`)
     record('explicitly querying selected Markdown text requests the contextual sense', true)
     await waitFor(wc, `document.querySelector('.sense-meaning')?.textContent === '众多的、大量的'`, { label: 'markdown sense card' })
+
+    const markdownQueryEvidence = await evaluate(wc, `(() => {
+      const body = window.__senseLookupRequests?.at(-1) || null
+      return {
+        requestCount: window.__senseLookupRequests?.length || 0,
+        sentence: body?.isSentence === true,
+        context: body?.context || '',
+        modules: Array.from(document.querySelectorAll('.query-module-card')).map((item) => item.dataset.module),
+        dictionaryLinks: Array.from(document.querySelectorAll('[data-testid^="dictionary-"]')).map((link) => link.href),
+      }
+    })()`)
+    record('a selected Markdown sentence gets syntax and usage in one default model request',
+      markdownQueryEvidence.requestCount === 1 && markdownQueryEvidence.sentence
+        && markdownQueryEvidence.modules.includes('syntax') && markdownQueryEvidence.modules.includes('usage'), JSON.stringify(markdownQueryEvidence))
+    record('query links open direct Oxford and Collins official entries',
+      markdownQueryEvidence.dictionaryLinks.some((url) => url.startsWith('https://www.oxfordlearnersdictionaries.com/definition/english/'))
+        && markdownQueryEvidence.dictionaryLinks.some((url) => url.startsWith('https://www.collinsdictionary.com/dictionary/english/')),
+      markdownQueryEvidence.dictionaryLinks.join(' | '))
+
+    await evaluate(wc, `document.querySelector('[data-testid="assistant-mode-analysis"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-selected-button"]')`, { label: 'analysis mode for selected Markdown sentence' })
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-selected-button"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-translation"]')?.textContent.startsWith('直译：')`, { label: 'separate translation result' })
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-meaning"]')?.textContent.includes('意义分析')`, { label: 'separate meaning result' })
+    const parentAnalysis = await evaluate(wc, `({
+      source: document.querySelector('[data-testid="analysis-original"]')?.textContent || '',
+      translation: document.querySelector('[data-testid="analysis-translation"]')?.textContent || '',
+      meaning: document.querySelector('[data-testid="analysis-meaning"]')?.textContent || '',
+      request: window.__analysisRequests?.at(-1) || null,
+      readerPath: document.querySelector('.reader-toolbar-title')?.textContent || '',
+      readerScrollTop: document.querySelector('.reader-scroll')?.scrollTop || 0,
+    })`)
+    record('selected-content analysis sends the selected source and returns separate translation and meaning',
+      parentAnalysis.request?.source?.sourceKind === 'text'
+        && parentAnalysis.request.source.text.includes('These classifications operate')
+        && parentAnalysis.translation.startsWith('直译：') && parentAnalysis.meaning.includes('意义分析'), JSON.stringify(parentAnalysis))
+
+    const nestedSourceSelected = await evaluate(wc, `(() => {
+      const root = document.querySelector('[data-testid="analysis-original"]')
+      if (!root) return false
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+      let node
+      while ((node = walker.nextNode())) {
+        const offset = (node.nodeValue || '').indexOf('broader framework')
+        if (offset < 0) continue
+        const range = document.createRange()
+        range.setStart(node, offset)
+        range.setEnd(node, offset + 'broader framework'.length)
+        const selection = window.getSelection()
+        selection.removeAllRanges()
+        selection.addRange(range)
+        root.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+        return true
+      }
+      return false
+    })()`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-query-selection"]')`, { label: 'nested query action for selected analysis text' })
+    const nestedBefore = await evaluate(wc, `({ calls: window.__queryRequests.length, query: document.querySelector('#query-term')?.value || '' })`)
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-query-selection"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-return-button"]')`, { label: 'nested query view' })
+    const nestedPrefill = await evaluate(wc, `({
+      calls: window.__queryRequests.length,
+      query: document.querySelector('#query-term')?.value || '',
+      context: ${JSON.stringify(parentAnalysis.source)},
+      analysisVisible: !document.querySelector('[data-testid="analysis-panel"]'),
+    })`)
+    record('selecting text in analysis opens a nested query without sending it automatically',
+      nestedSourceSelected && nestedPrefill.calls === nestedBefore.calls && nestedPrefill.query.includes('broader framework'), JSON.stringify(nestedPrefill))
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
+    await waitFor(wc, `window.__queryRequests.length > ${nestedBefore.calls}`, { label: 'explicit nested language query' })
+    await waitFor(wc, `document.querySelector('.sense-meaning') !== null`, { label: 'nested query result' })
+    const nestedContext = await evaluate(wc, `window.__queryRequests.at(-1)?.context || ''`)
+    const nestedAnalysisRequestCount = await evaluate(wc, `window.__analysisRequests.length`)
+    const scrollBeforeReturn = await evaluate(wc, `document.querySelector('.reader-scroll')?.scrollTop || 0`)
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-return-button"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-original"]')?.textContent === ${JSON.stringify(parentAnalysis.source)}`, { label: 'parent analysis restored' })
+    const returnEvidence = await evaluate(wc, `({
+      analysisCalls: window.__analysisRequests.length,
+      translation: document.querySelector('[data-testid="analysis-translation"]')?.textContent || '',
+      meaning: document.querySelector('[data-testid="analysis-meaning"]')?.textContent || '',
+      scrollTop: document.querySelector('.reader-scroll')?.scrollTop || 0,
+      readerPath: document.querySelector('.reader-toolbar-title')?.textContent || '',
+    })`)
+    record('returning from nested query restores the parent analysis and reader position without another request',
+      nestedContext.includes('These classifications operate') && returnEvidence.analysisCalls === nestedAnalysisRequestCount
+        && returnEvidence.translation === parentAnalysis.translation && returnEvidence.meaning === parentAnalysis.meaning
+        && returnEvidence.scrollTop === scrollBeforeReturn && returnEvidence.readerPath === parentAnalysis.readerPath,
+      JSON.stringify(returnEvidence))
+
+    await evaluate(wc, `window.__holdNextAnalysis = true; document.querySelector('[data-testid="analysis-selected-button"]').click(); true`)
+    await waitFor(wc, `document.querySelector('.analysis-command-actions') && document.querySelector('[data-testid="analysis-panel"] .analysis-instruction-actions .text-action')`, { label: 'analysis stop control' })
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-panel"] .analysis-instruction-actions .text-action').click(); true`)
+    await waitFor(wc, `window.__analysisAbortObserved && !document.querySelector('.analysis-panel .loading-copy')`, { label: 'analysis cancellation settles' })
+    record('stopping passage analysis aborts its request and restores the analysis controls', true)
     await screenshot(window, artifacts, '13-markdown.png')
 
     await installSenseStub(wc, { sense: {
@@ -1777,6 +1928,104 @@ export async function runSmokeTest({ window, projectRoot }) {
     }
     record('PDF recognition writes one Markdown expression record', expressionFiles.length === 1, expressionFiles.join(', '))
 
+    // V3 query modules, their local Vault actions, and paragraph-memory matching
+    // are exercised against the temporary smoke Vault selected above.
+    await installSenseStub(wc, stubSense)
+    await installVaultStub(wc)
+    await evaluate(wc, `(() => {
+      document.querySelector('[data-testid="assistant-mode-query"]')?.click()
+      document.querySelector('.right-tabs button')?.click()
+      return true
+    })()`)
+    const pdfQueryReady = await evaluate(wc, `({
+      value: document.querySelector('#query-term')?.value || '',
+      disabled: document.querySelector('.query-go')?.disabled ?? true,
+      selectionMeta: document.querySelector('.query-meta')?.textContent || '',
+    })`)
+    if (!pdfQueryReady.value) await evaluate(wc, `(() => {
+      const input = document.querySelector('#query-term')
+      if (!input) return false
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'stance')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    record('the PDF selection reaches the editable query field before an explicit request',
+      Boolean(pdfQueryReady.value || document.querySelector('#query-term')?.value), JSON.stringify(pdfQueryReady))
+    await evaluate(wc, `document.querySelector('.query-go')?.click(); true`)
+    await sleep(300)
+    let pdfQueryProbe = await evaluate(wc, `({
+      requests: (window.__queryRequests || []).filter((request) => request.task === 'default').length,
+      loading: Boolean(document.querySelector('[aria-label="停止语义查询"]')),
+      error: document.querySelector('.panel-error')?.textContent || '',
+      query: document.querySelector('#query-term')?.value || '',
+      disabled: document.querySelector('.query-go')?.disabled ?? true,
+      mode: document.querySelector('[data-testid="assistant-mode-query"]')?.className || '',
+    })`)
+    if (pdfQueryProbe.requests === 0) {
+      await evaluate(wc, `document.querySelector('#query-term')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); true`)
+      await sleep(300)
+      pdfQueryProbe = await evaluate(wc, `({
+        requests: (window.__queryRequests || []).filter((request) => request.task === 'default').length,
+        loading: Boolean(document.querySelector('[aria-label="停止语义查询"]')),
+        error: document.querySelector('.panel-error')?.textContent || '',
+        query: document.querySelector('#query-term')?.value || '',
+        disabled: document.querySelector('.query-go')?.disabled ?? true,
+        mode: document.querySelector('[data-testid="assistant-mode-query"]')?.className || '',
+      })`)
+    }
+    record('the PDF query button or Enter starts the default language request', pdfQueryProbe.requests > 0, JSON.stringify(pdfQueryProbe))
+    if (pdfQueryProbe.requests === 0) throw new Error(`PDF query did not start: ${JSON.stringify(pdfQueryProbe)}`)
+    await waitFor(wc, `document.querySelector('[data-testid="query-module-usage"]')`, { label: 'default usage module for PDF selection' })
+    const usageModuleCall = await evaluate(wc, `window.__queryRequests?.at(-1) || null`)
+    record('PDF language query sends surrounding source context to the combined default endpoint',
+      usageModuleCall?.task === 'default' && usageModuleCall.context.includes('The authors take a stance on language learning.'), JSON.stringify(usageModuleCall))
+
+    await evaluate(wc, `document.querySelector('[data-testid="save-dictionary-links"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="save-dictionary-links"]')?.disabled`, { label: 'dictionary links saved to the smoke Vault' })
+    await evaluate(wc, `document.querySelector('[data-testid="save-module-usage"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="save-module-usage"]')?.disabled`, { label: 'usage module saved to the smoke Vault' })
+    let v3InboxFiles = readdirSync(join(vaultDir, 'notes', 'inbox')).filter((name) => name.endsWith('.md'))
+    let v3InboxNotes = v3InboxFiles.map((name) => ({ name, markdown: readFileSync(join(vaultDir, 'notes', 'inbox', name), 'utf8') }))
+    record('Oxford and Collins links plus one query module can be saved as separate Vault notes',
+      v3InboxNotes.some((item) => item.markdown.includes('dictionary-links') && item.markdown.includes('oxfordlearnersdictionaries.com') && item.markdown.includes('collinsdictionary.com'))
+        && v3InboxNotes.some((item) => item.markdown.includes('v3-query') && item.markdown.includes('常用于说明数量较多的对象')),
+      v3InboxNotes.map((item) => item.name).join(', '))
+
+    await evaluate(wc, `Array.from(document.querySelectorAll('.query-optional-buttons button')).find((button) => button.textContent.includes('生成场景表达包'))?.click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="query-module-scenario-pack"]')`, { label: 'on-demand scenario expression module' })
+    record('the scenario expression module runs only after the user opens it',
+      (await evaluate(wc, `window.__queryRequests?.at(-1)?.task === 'scenario-pack'`)) === true)
+    await evaluate(wc, `document.querySelector('[data-testid="query-module-usage"] [data-testid="save-expression-0"]')?.click(); true`)
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await sleep(200)
+      expressionFiles = readdirSync(expressionDir).filter((name) => name.endsWith('.md'))
+      if (expressionFiles.length >= 2) break
+    }
+    const generatedExpression = expressionFiles.map((name) => readFileSync(join(expressionDir, name), 'utf8')).find((markdown) => markdown.includes('# in large numbers')) || ''
+    record('an expression suggested by a query module enters the expression pool with AI provenance',
+      Boolean(generatedExpression && generatedExpression.includes('AI 生成候选；此条不是原文摘录。') && generatedExpression.includes('阅读助手 · 用法与搭配')),
+      generatedExpression.slice(0, 700))
+
+    await evaluate(wc, `document.querySelector('[data-testid="assistant-mode-analysis"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-selected-button"]')`, { label: 'analysis mode on the captured PDF phrase' })
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-selected-button"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-translation"]')?.textContent.startsWith('直译：')`, { label: 'PDF selection analysis result' })
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-identify-button"]').click(); true`)
+    await waitFor(wc, `document.querySelector('.analysis-memory-match.expression')`, { label: 'local expression match in analyzed source' })
+    const memoryEvidence = await evaluate(wc, `Array.from(document.querySelectorAll('.analysis-memory-match')).map((mark) => ({ kind: mark.classList.contains('expression') ? 'expression' : 'semantic', text: mark.textContent, title: mark.title }))`)
+    record('analysis identifies the exact source phrase already stored in the local expression pool',
+      memoryEvidence.some((item) => item.kind === 'expression' && item.text === 'The authors take a stance on language learning.'), JSON.stringify(memoryEvidence))
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-save-button"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-save-button"]')?.disabled`, { label: 'complete analysis saved to the smoke Vault' })
+    v3InboxFiles = readdirSync(join(vaultDir, 'notes', 'inbox')).filter((name) => name.endsWith('.md'))
+    v3InboxNotes = v3InboxFiles.map((name) => ({ name, markdown: readFileSync(join(vaultDir, 'notes', 'inbox', name), 'utf8') }))
+    const completeAnalysisNote = v3InboxNotes.find((item) => item.markdown.includes('v3-analysis') && item.markdown.includes('## 阅读来源'))?.markdown || ''
+    record('the full passage analysis saves original, translation, meaning, and material source to Vault',
+      completeAnalysisNote.includes('The authors take a stance on language learning.')
+        && completeAnalysisNote.includes('## 段落直译') && completeAnalysisNote.includes('## 意义分析')
+        && completeAnalysisNote.includes('[[materials/books/book1/book1.pdf]]'), completeAnalysisNote.slice(0, 1000))
+
     await evaluate(wc, `document.querySelector('.input-mark-inline').click(); true`)
     await waitFor(wc, `document.querySelector('.input-marker-composer') !== null`, { label: 'form marker composer' })
     await evaluate(wc, `(() => {
@@ -1835,7 +2084,8 @@ export async function runSmokeTest({ window, projectRoot }) {
     await evaluate(wc, `document.querySelector('.expression-capture-popover .primary-button').click(); true`)
     await waitFor(wc, `document.querySelector('.expression-capture-notice')?.textContent.includes('已收录')`, { label: 'EPUB expression saved' })
     expressionFiles = readdirSync(expressionDir).filter((name) => name.endsWith('.md'))
-    const mergedExpression = expressionFiles.length === 1 ? readFileSync(join(expressionDir, expressionFiles[0]), 'utf8') : ''
+    const mergedExpression = expressionFiles.map((name) => readFileSync(join(expressionDir, name), 'utf8'))
+      .find((markdown) => markdown.includes('# The authors take a stance on language learning.')) || ''
     const hasTwoContexts = (mergedExpression.match(/^### 语境 /gm) || []).length === 2
     record('PDF and EPUB duplicates merge into one expression with two source contexts', epubSelection && hasTwoContexts && mergedExpression.includes('book1.pdf') && mergedExpression.includes('Paperlight-Book.epub'), `files=${expressionFiles.length} contexts=${(mergedExpression.match(/^### 语境 /gm) || []).length}`)
 
