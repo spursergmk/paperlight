@@ -9,6 +9,7 @@ interface SenseCardProps {
   relations?: SenseRelation[]
   onAdd?: () => void
   onJumpToAtom?: (id: string) => void
+  showGuidance?: boolean
 }
 
 function PairList({ title, items }: { title: string; items: Array<{ term: string; note?: string; contrast?: string }> }) {
@@ -42,7 +43,7 @@ function TextList({ title, items }: { title: string; items?: string[] }) {
 }
 
 export default function SenseCard({
-  sense, model, compact = false, added = false, relations = [], onAdd, onJumpToAtom,
+  sense, model, compact = false, added = false, relations = [], onAdd, onJumpToAtom, showGuidance = true,
 }: SenseCardProps) {
   const guidance = sense.guidance
   const morphology = guidance?.morphology
@@ -93,7 +94,7 @@ export default function SenseCard({
         </section>
       )}
 
-      {!compact && guidance && (
+      {!compact && showGuidance && guidance && (
         <>
           <TextList title="使用场景" items={guidance.scenarios} />
           <TextList title="使用建议" items={guidance.advice} />
@@ -120,7 +121,7 @@ export default function SenseCard({
         </>
       )}
 
-      {relations.length > 0 && (
+      {showGuidance && relations.length > 0 && (
         <section className="sense-block">
           <h4><GitBranch size={11} /> 与记录本的联系</h4>
           <ul className="sense-relations">

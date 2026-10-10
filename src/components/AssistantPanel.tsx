@@ -5,14 +5,56 @@ import {
 import SenseCard from './SenseCard'
 import NotebookPanel from './NotebookPanel'
 import ChatPanel from './ChatPanel'
+import AnalysisPanel from './AnalysisPanel'
+import QueryModulesPanel from './QueryModulesPanel'
 import type {
-  ChatMessage, NotebookNote, SenseAtom, SensePayload, SenseSummary, TextSelection,
+  ChatMessage, ExistingLanguageMatch, LanguageQueryBundle, NotebookNote, OptionalQueryTask, QueryModuleResult,
+  ReaderAnalysisResult, SenseAtom, SensePayload, SenseSummary, TextSelection,
 } from '../types'
 import type { SenseRelation } from '../types'
 
 export type AssistantTab = 'sense' | 'notebook' | 'chat'
+export type AssistantMode = 'query' | 'analysis'
 
 export default function AssistantPanel({
+  mode,
+  onMode,
+  analysisResult,
+  analysisSelection,
+  analysisInstruction,
+  analysisLoading,
+  analysisError,
+  analysisMatches,
+  onAnalysisInstruction,
+  onAnalyzeSelection,
+  onAnalyzeCurrent,
+  onRunAnalysisInstruction,
+  onCancelAnalysis,
+  onAnalysisSourceSelection,
+  onStartNestedQuery,
+  onIdentifyMemory,
+  onSaveAnalysis,
+  analysisSaving,
+  analysisSaved,
+  onRetryAnalysis,
+  analysisScopeLabel,
+  canAnalyzeCurrent,
+  nestedAnalysis,
+  onReturnToAnalysis,
+  queryStatus,
+  queryExplanation,
+  expandedContextAvailable,
+  onRetryExpandedContext,
+  queryModules,
+  optionalModuleLoading,
+  onOptionalModule,
+  onCancelOptionalModule,
+  onSaveQueryModule,
+  onSaveDictionaryLinks,
+  dictionaryLinksSaved,
+  onSaveQueryExpression,
+  savedQueryModuleKeys,
+  savedQueryExpressionKeys,
   tab,
   onTab,
   wide,
@@ -76,6 +118,44 @@ export default function AssistantPanel({
   onSaveNoteToVault,
   vaultTarget,
 }: {
+  mode: AssistantMode
+  onMode: (mode: AssistantMode) => void
+  analysisResult: ReaderAnalysisResult | null
+  analysisSelection: TextSelection | null
+  analysisInstruction: string
+  analysisLoading: boolean
+  analysisError: string
+  analysisMatches: ExistingLanguageMatch[]
+  onAnalysisInstruction: (value: string) => void
+  onAnalyzeSelection: () => void
+  onAnalyzeCurrent: () => void
+  onRunAnalysisInstruction: () => void
+  onCancelAnalysis: () => void
+  onAnalysisSourceSelection: () => void
+  onStartNestedQuery: () => void
+  onIdentifyMemory: () => void
+  onSaveAnalysis: () => void
+  analysisSaving: boolean
+  analysisSaved: boolean
+  onRetryAnalysis: () => void
+  analysisScopeLabel: string
+  canAnalyzeCurrent: boolean
+  nestedAnalysis: boolean
+  onReturnToAnalysis: () => void
+  queryStatus: 'idle' | LanguageQueryBundle['status']
+  queryExplanation: string
+  expandedContextAvailable: boolean
+  onRetryExpandedContext: () => void
+  queryModules: QueryModuleResult[]
+  optionalModuleLoading: boolean
+  onOptionalModule: (task: OptionalQueryTask) => void
+  onCancelOptionalModule: () => void
+  onSaveQueryModule: (module: QueryModuleResult) => void
+  onSaveDictionaryLinks: () => void
+  dictionaryLinksSaved: boolean
+  onSaveQueryExpression: (expression: NonNullable<QueryModuleResult['expressions']>[number], module: QueryModuleResult) => void
+  savedQueryModuleKeys: Set<string>
+  savedQueryExpressionKeys: Set<string>
   tab: AssistantTab
   onTab: (tab: AssistantTab) => void
   wide: boolean
@@ -165,6 +245,36 @@ export default function AssistantPanel({
         </div>
       </div>
 
+      <div className="assistant-activity-switch" role="tablist" aria-label="阅读助手活动">
+        <button type="button" className={mode === 'query' ? 'selected' : ''} onClick={() => onMode('query')} data-testid="assistant-mode-query"><Languages size={13} /> 语言查询</button>
+        <button type="button" className={mode === 'analysis' ? 'selected' : ''} onClick={() => onMode('analysis')} data-testid="assistant-mode-analysis"><BookOpen size={13} /> 内容分析</button>
+      </div>
+
+      {mode === 'analysis' ? (
+        <AnalysisPanel
+          readerSelection={selection}
+          selection={analysisSelection}
+          result={analysisResult}
+          instruction={analysisInstruction}
+          loading={analysisLoading}
+          error={analysisError}
+          matches={analysisMatches}
+          onInstructionChange={onAnalysisInstruction}
+          onAnalyzeSelection={onAnalyzeSelection}
+          onAnalyzeCurrent={onAnalyzeCurrent}
+          onRunInstruction={onRunAnalysisInstruction}
+          onCancel={onCancelAnalysis}
+          onSourceSelection={onAnalysisSourceSelection}
+          onStartNestedQuery={onStartNestedQuery}
+          onIdentifyMemory={onIdentifyMemory}
+          onSave={onSaveAnalysis}
+          saving={analysisSaving}
+          saved={analysisSaved}
+          onRetry={onRetryAnalysis}
+          currentScopeLabel={analysisScopeLabel}
+          canAnalyzeCurrent={canAnalyzeCurrent}
+        />
+      ) : <>
       <div className="right-tabs">
         <button type="button" className={tab === 'sense' ? 'selected' : ''} onClick={() => onTab('sense')}><Languages size={14} /> 语义</button>
         <button type="button" className={tab === 'notebook' ? 'selected' : ''} onClick={() => onTab('notebook')}>
@@ -177,8 +287,9 @@ export default function AssistantPanel({
 
       {tab === 'sense' && (
         <div className="translation-panel">
+          {nestedAnalysis && <button type="button" className="analysis-return-button" onClick={onReturnToAnalysis} data-testid="analysis-return-button">← 返回段落分析</button>}
           <div className="query-row">
-            <label className="field-label" htmlFor="query-term">查询词（可键盘修改）</label>
+            <label className="field-label" htmlFor="query-term">查询内容（可键盘修改）</label>
             <div className="query-input-wrap">
               <input
                 id="query-term"
@@ -200,10 +311,11 @@ export default function AssistantPanel({
                 查询
               </button>
             </div>
-            {selection && <span className="query-meta">来自「{selection.documentName || '当前文档'}」第 {selection.pageNumber} 页的选区 · 点击查询或按 Enter 开始</span>}
+            {selection && <span className="query-meta">来自「{selection.documentName || '当前文档'}」{selection.locationLabel || `第 ${selection.pageNumber} 页/章`} 的选区 · 点击查询或按 Enter 开始</span>}
+            {selection?.contextText && <span className="query-context-meta">默认上下文包含选中行上下各 5 个原文单位；不受屏幕视觉换行影响。</span>}
           </div>
 
-          {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在结合上下文判断语义… <button type="button" className="text-action" aria-label="停止语义查询" onClick={onCancelQuery}><Square size={12} /> 停止</button></div>}
+          {senseLoading && <div className="loading-copy"><span className="mini-spinner" /> 正在一次整理语境语义、句法与用法… <button type="button" className="text-action" aria-label="停止语义查询" onClick={onCancelQuery}><Square size={12} /> 停止</button></div>}
 
           {senseError && !senseLoading && (
             <div className="panel-error">
@@ -240,6 +352,7 @@ export default function AssistantPanel({
               <SenseCard
                 sense={sense}
                 model={model}
+                showGuidance={false}
                 added={senseInNotebook}
                 relations={relations}
                 onAdd={onAddSense}
@@ -319,6 +432,24 @@ export default function AssistantPanel({
             </>
           )}
 
+          {queryTerm.trim() && <QueryModulesPanel
+            term={queryTerm}
+            status={queryStatus}
+            explanation={queryExplanation}
+            expandedContextAvailable={expandedContextAvailable}
+            onRetryExpanded={onRetryExpandedContext}
+            modules={queryModules}
+            optionalLoading={optionalModuleLoading}
+            onOptionalModule={onOptionalModule}
+            onCancelOptional={onCancelOptionalModule}
+            onSaveModule={onSaveQueryModule}
+            onSaveDictionaries={onSaveDictionaryLinks}
+            dictionariesSaved={dictionaryLinksSaved}
+            onSaveExpression={onSaveQueryExpression}
+            savedModuleKeys={savedQueryModuleKeys}
+            savedExpressionKeys={savedQueryExpressionKeys}
+          />}
+
           {!sense && !senseLoading && !senseError && (
             <div className="translation-empty">
               <div><Languages size={20} /></div>
@@ -360,6 +491,7 @@ export default function AssistantPanel({
         vaultBusy={vaultBusy}
         onOpenNotebook={() => onTab('notebook')}
       />}
+      </>}
     </aside>
   )
 }

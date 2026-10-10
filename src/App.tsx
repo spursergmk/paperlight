@@ -5,7 +5,7 @@ import {
   PanelRightOpen, Plus, RotateCcw, Settings2, Trash2, X,
 } from 'lucide-react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
-import AssistantPanel, { type AssistantTab } from './components/AssistantPanel'
+import AssistantPanel, { type AssistantMode, type AssistantTab } from './components/AssistantPanel'
 import ChatSpace from './components/ChatSpace'
 import EpubReader from './components/EpubReader'
 import FileExplorer from './components/FileExplorer'
@@ -32,7 +32,13 @@ import {
 import { openEpub, type EpubBook, type EpubOutlineItem } from './lib/epub'
 import { displayNameForPath, fileSystem } from './lib/fsaccess'
 import { isAbortError } from './lib/abort'
+import { analyzePassage, queryLanguage, queryOptionalModule } from './lib/assistantAI'
+import { dictionaryEntryUrl } from './lib/dictionaries'
 import { markerRangeInElement } from './lib/markers'
+import {
+  contextFromBlocks, contextFromLines, contextFromOffset, DEFAULT_CONTEXT_LINES, EXPANDED_CONTEXT_LINES,
+  findStoredLanguageMatches, pdfTextLines, textForMarkdownBlock,
+} from './lib/queryContext'
 import {
   outlineFromBlocks, parseTextDocument, type MarkdownBlock, type TextOutlineItem,
 } from './lib/textdoc'
@@ -43,7 +49,7 @@ import {
   flushState, loadState, loadStateSync, saveState,
   type PersistedState, type ReaderTabState, type RecentFile,
 } from './lib/persist'
-import { askSense, expandSenses, lookupSense, sentenceAround, termFromSelection } from './lib/sense'
+import { askSense, expandSenses, termFromSelection } from './lib/sense'
 import {
   confirmSemanticMerge, createNote, mergeSemanticAtom, possibleSemanticMergeCandidates, relateSense, semanticRecordForId,
   selectionMatchesSemanticTerm, senseKeyOf, toAtom,
@@ -58,8 +64,10 @@ import {
 } from './lib/translation'
 import type { ApiConfigStatus } from './lib/translation'
 import type {
-  AppSpace, ChatMessage, ChatThread, NoteViewMode, NotebookNote, SenseAtom, SensePayload, SenseSummary,
-  ExpressionContext, InputMarker, InputMarkerPurpose, InputMarkerVisualStyle, TextSelection, TranslateMode,
+  AppSpace, ChatMessage, ChatThread, ExistingLanguageMatch, NoteViewMode, NotebookNote,
+  OptionalQueryTask, QueryModuleResult, QueryLookupStatus, ReaderAnalysisResult, ReaderAnalysisSource,
+  SenseAtom, SensePayload, SenseSummary, ExpressionContext, InputMarker, InputMarkerPurpose,
+  InputMarkerVisualStyle, TextSelection, TranslateMode,
 } from './types'
 
 type LeftTab = 'files' | 'pages' | 'outline'
@@ -95,6 +103,36 @@ const API_PRESETS: Array<{ label: string; baseUrl: string; model?: string }> = [
 
 function tidyText(value: string) {
   return value.replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim()
+}
+
+function stablePdfLines(textLayer: HTMLElement): Array<{ text: string; top: number; bottom: number }> {
+  const scale = Number.parseFloat(textLayer.style.getPropertyValue('--scale-factor')) || 1
+  const tolerance = Math.max(1.5, scale * 0.75)
+  const spans = Array.from(textLayer.querySelectorAll<HTMLElement>('span')).map((element) => {
+    const rect = element.getBoundingClientRect()
+    return { text: element.textContent || '', top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }
+  }).filter((item) => item.text.trim() && item.bottom > item.top)
+    .sort((a, b) => a.top - b.top || a.left - b.left)
+  const groups: Array<{ top: number; bottom: number; spans: typeof spans }> = []
+  for (const span of spans) {
+    const group = groups.find((item) => Math.abs(item.top - span.top) <= tolerance)
+    if (group) {
+      group.bottom = Math.max(group.bottom, span.bottom)
+      group.spans.push(span)
+    } else groups.push({ top: span.top, bottom: span.bottom, spans: [span] })
+  }
+  return groups.sort((a, b) => a.top - b.top).map((group) => {
+    const ordered = group.spans.sort((a, b) => a.left - b.left)
+    let text = ''
+    let previousRight: number | null = null
+    for (const span of ordered) {
+      const part = span.text.replace(/[\u200b\ufeff]/g, '')
+      if (previousRight !== null && span.left - previousRight > tolerance && text && !/\s$/u.test(text)) text += ' '
+      text += part
+      previousRight = span.right
+    }
+    return { text: tidyText(text), top: group.top, bottom: group.bottom }
+  }).filter((line) => line.text)
 }
 
 function newMessage(role: ChatMessage['role'], content: string): ChatMessage {
@@ -286,6 +324,7 @@ function App() {
   const automaticPdfReloads = useRef(new Map<string, number>())
   const [leftTab, setLeftTab] = useState<LeftTab>('files')
   const [rightTab, setRightTab] = useState<AssistantTab>('sense')
+  const [assistantMode, setAssistantMode] = useState<AssistantMode>('query')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [viewportWidth, setViewportWidth] = useState(() => (typeof window === 'undefined' ? 1440 : window.innerWidth))
@@ -307,6 +346,23 @@ function App() {
   const [senseAnswerId, setSenseAnswerId] = useState<string | null>(null)
   const [senseLoading, setSenseLoading] = useState(false)
   const [senseError, setSenseError] = useState('')
+  const [queryStatus, setQueryStatus] = useState<'idle' | QueryLookupStatus>('idle')
+  const [queryExplanation, setQueryExplanation] = useState('')
+  const [queryModules, setQueryModules] = useState<QueryModuleResult[]>([])
+  const [expandedRetryUsed, setExpandedRetryUsed] = useState(false)
+  const [queryAnswerId, setQueryAnswerId] = useState<string | null>(null)
+  const [savedQueryModuleKeys, setSavedQueryModuleKeys] = useState<Set<string>>(new Set())
+  const [savedQueryExpressionKeys, setSavedQueryExpressionKeys] = useState<Set<string>>(new Set())
+  const [dictionaryLinksSaved, setDictionaryLinksSaved] = useState(false)
+  const [optionalModuleLoading, setOptionalModuleLoading] = useState(false)
+  const [analysisInstruction, setAnalysisInstruction] = useState('')
+  const [analysisResult, setAnalysisResult] = useState<ReaderAnalysisResult | null>(null)
+  const [analysisSelection, setAnalysisSelection] = useState<TextSelection | null>(null)
+  const [analysisLoading, setAnalysisLoading] = useState(false)
+  const [analysisError, setAnalysisError] = useState('')
+  const [analysisMatches, setAnalysisMatches] = useState<ExistingLanguageMatch[]>([])
+  const [nestedAnalysis, setNestedAnalysis] = useState(false)
+  const [analysisSaving, setAnalysisSaving] = useState(false)
   const [allSenses, setAllSenses] = useState<SenseSummary[] | null>(null)
   const [expanding, setExpanding] = useState(false)
   const [pendingSemanticCapture, setPendingSemanticCapture] = useState<{
@@ -363,6 +419,10 @@ function App() {
   const senseRequestRef = useRef(0)
   const translationControllerRef = useRef<AbortController | null>(null)
   const senseControllerRef = useRef<AbortController | null>(null)
+  const optionalQueryControllerRef = useRef<AbortController | null>(null)
+  const analysisControllerRef = useRef<AbortController | null>(null)
+  const pdfTextCacheRef = useRef(new Map<string, Promise<string>>())
+  const analysisRetryRef = useRef<{ source: ReaderAnalysisSource; instruction: string; scopeLabel: string } | null>(null)
   const expandControllerRef = useRef<AbortController | null>(null)
   const readerChatControllerRef = useRef<AbortController | null>(null)
   const completeNoteControllerRef = useRef<AbortController | null>(null)
@@ -373,6 +433,8 @@ function App() {
   useEffect(() => () => {
     translationControllerRef.current?.abort()
     senseControllerRef.current?.abort()
+    optionalQueryControllerRef.current?.abort()
+    analysisControllerRef.current?.abort()
     expandControllerRef.current?.abort()
     readerChatControllerRef.current?.abort()
     completeNoteControllerRef.current?.abort()
@@ -715,21 +777,23 @@ function App() {
   const [vaultActionBusy, setVaultActionBusy] = useState(false)
   const [vaultActionMessage, setVaultActionMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
 
-  const runVaultAction = useCallback(async (action: () => Promise<string>, successText: (path: string) => string) => {
+  const runVaultAction = useCallback(async (action: () => Promise<string>, successText: (path: string) => string, openSavedNote = true): Promise<string | null> => {
     if (!vaultRef.current.ready) {
       setVaultActionMessage({ kind: 'error', text: '先在笔记空间里选择一个 vault 文件夹。' })
-      return
+      return null
     }
     setVaultActionBusy(true)
     setVaultActionMessage(null)
     try {
       const path = await action()
       setVaultActionMessage({ kind: 'success', text: successText(path) })
-      openNoteInNotesSpace(path)
+      if (openSavedNote) openNoteInNotesSpace(path)
+      return path
     } catch (error) {
       setVaultActionMessage(isAbortError(error)
         ? { kind: 'success', text: '已停止生成，未保存笔记。' }
         : { kind: 'error', text: error instanceof Error ? error.message : '写入 vault 失败。' })
+      return null
     } finally {
       setVaultActionBusy(false)
     }
@@ -1402,30 +1466,48 @@ function App() {
 
   const cancelTranslation = useCallback(() => translationControllerRef.current?.abort(), [])
 
-  const runSenseLookup = useCallback(async (term: string, context: string) => {
+  const runSenseLookup = useCallback(async (term: string, context: string, expandedRetry = false) => {
     const cleaned = term.trim()
     if (!cleaned) return
     setPendingSemanticCapture(null)
     const requestId = ++senseRequestRef.current
     senseControllerRef.current?.abort()
+    optionalQueryControllerRef.current?.abort()
+    optionalQueryControllerRef.current = null
+    setOptionalModuleLoading(false)
     const controller = new AbortController()
     senseControllerRef.current = controller
     lastContextRef.current = context
-    setSenseAnswerId(null)
+    setSenseAnswerId(`reader-answer:${requestId}`)
+    setQueryAnswerId(`reader-query:${requestId}`)
     setSenseLoading(true)
     setSenseError('')
     setAllSenses(null)
     setChatError('')
+    setQueryStatus('idle')
+    setQueryExplanation('')
+    setQueryModules([])
+    setSavedQueryModuleKeys(new Set())
+    setSavedQueryExpressionKeys(new Set())
+    setDictionaryLinksSaved(false)
+    setExpandedRetryUsed(expandedRetry)
+    setAssistantMode('query')
     try {
-      const result = await lookupSense(cleaned, context, model, controller.signal)
+      const selectionIsQueryTarget = Boolean(selection && selection.documentPath && selection.documentPath === activePath && termFromSelection(selection.text) === cleaned)
+      const syntaxTarget = selectionIsQueryTarget && selection ? selection.text : cleaned
+      const words = syntaxTarget.split(/\s+/u).filter(Boolean)
+      const isSentence = /[.!?。！？;]/u.test(syntaxTarget) || words.length >= 6
+      const result = await queryLanguage(cleaned, context, isSentence, model, controller.signal)
       if (requestId !== senseRequestRef.current) return
-      setSense({
-        ...result,
-        term: result.term || cleaned,
-        lemma: result.lemma || cleaned,
-        examples: Array.isArray(result.examples) ? result.examples : [],
-      })
-      setSenseAnswerId(`reader-answer:${requestId}`)
+      setQueryStatus(result.status)
+      setQueryExplanation(result.explanation)
+      setQueryModules(result.modules)
+      setSense(result.sense ? {
+        ...result.sense,
+        term: result.sense.term || cleaned,
+        lemma: result.sense.lemma || cleaned,
+        examples: Array.isArray(result.sense.examples) ? result.sense.examples : [],
+      } : null)
       setRightTab('sense')
     } catch (error) {
       if (requestId === senseRequestRef.current && !isAbortError(error)) {
@@ -1437,9 +1519,485 @@ function App() {
         setSenseLoading(false)
       }
     }
+  }, [activePath, model, selection])
+
+  const cancelSenseLookup = useCallback(() => {
+    senseControllerRef.current?.abort()
+    optionalQueryControllerRef.current?.abort()
+  }, [])
+
+  const loadOptionalQueryModule = useCallback(async (task: OptionalQueryTask) => {
+    const term = queryTerm.trim()
+    if (!term || optionalModuleLoading) return
+    optionalQueryControllerRef.current?.abort()
+    const controller = new AbortController()
+    optionalQueryControllerRef.current = controller
+    setOptionalModuleLoading(true)
+    setSenseError('')
+    try {
+      const result = await queryOptionalModule(task, term, lastContextRef.current, model, controller.signal)
+      if (optionalQueryControllerRef.current !== controller) return
+      setQueryModules((current) => [...current.filter((module) => module.key !== result.key), result])
+    } catch (error) {
+      if (!isAbortError(error)) setSenseError(error instanceof Error ? error.message : '查询模块失败。')
+    } finally {
+      if (optionalQueryControllerRef.current === controller) {
+        optionalQueryControllerRef.current = null
+        setOptionalModuleLoading(false)
+      }
+    }
+  }, [model, optionalModuleLoading, queryTerm])
+
+  const retryExpandedContext = useCallback(() => {
+    const expanded = selection?.expandedContextText
+    if (!expanded || expandedRetryUsed) return
+    setExpandedRetryUsed(true)
+    void runSenseLookup(queryTerm, expanded, true)
+  }, [expandedRetryUsed, queryTerm, runSenseLookup, selection?.expandedContextText])
+
+  const readPdfPageText = useCallback(async (pdf: PDFDocumentProxy, pageNumber: number): Promise<string> => {
+    const key = `${activePath || 'pdf'}#${pageNumber}`
+    const cached = pdfTextCacheRef.current.get(key)
+    if (cached) return cached
+    const pending = pdf.getPage(pageNumber).then(async (page) => {
+      const content = await page.getTextContent()
+      return pdfTextLines(content.items as Array<{ str?: unknown; hasEOL?: unknown }>).join('\n').trim()
+    }).catch((error) => {
+      pdfTextCacheRef.current.delete(key)
+      throw error
+    })
+    pdfTextCacheRef.current.set(key, pending)
+    while (pdfTextCacheRef.current.size > 24) {
+      const oldest = pdfTextCacheRef.current.keys().next().value
+      if (oldest === undefined) break
+      pdfTextCacheRef.current.delete(oldest)
+    }
+    return pending
+  }, [activePath])
+
+  const textFlowPosition = useCallback(() => {
+    const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+    if (!scroller) return 0
+    const area = scroller.getBoundingClientRect()
+    const probeY = area.top + Math.max(60, Math.min(scroller.clientHeight * 0.38, scroller.clientHeight - 40))
+    const candidates = Array.from(scroller.querySelectorAll<HTMLElement>('[id^="flow-block-"]'))
+    const visible = candidates.filter((element) => {
+      const rect = element.getBoundingClientRect()
+      return rect.bottom >= area.top && rect.top <= area.bottom
+    })
+    const target = visible.find((element) => {
+      const rect = element.getBoundingClientRect()
+      return rect.top <= probeY && rect.bottom >= probeY
+    }) || visible.reduce<HTMLElement | null>((best, element) => {
+      if (!best) return element
+      return Math.abs(element.getBoundingClientRect().top - probeY) < Math.abs(best.getBoundingClientRect().top - probeY) ? element : best
+    }, null)
+    return Number(target?.id.match(/^flow-block-(\d+)$/)?.[1] || 0)
+  }, [])
+
+  const buildCurrentAnalysisSource = useCallback(async (requestedInstruction = ''): Promise<{ source: ReaderAnalysisSource; scopeLabel: string }> => {
+    if (!activeDoc || activeDoc.status !== 'ready' || !activePath || !activeTab) throw new Error('请先打开一份可读取的材料。')
+    const pageRequest = requestedInstruction.match(/(?:第\s*(\d+)\s*页|page\s*(\d+))/iu)
+    const chapterRequest = requestedInstruction.match(/(?:第\s*(\d+)\s*章|chapter\s*(\d+))/iu)
+    const asksForWholeBook = /\b(full book|whole document|entire document)\b|全文|整本/iu.test(requestedInstruction)
+    if (pageRequest && activeDoc.kind !== 'pdf') throw new Error('EPUB、TXT 和 Markdown 没有稳定页码；请改为当前章节、当前阅读位置或选区。')
+    if (chapterRequest && activeDoc.kind === 'pdf') throw new Error('当前 PDF 没有可用章节文本映射；请指定页码或分析选区。')
+    if (asksForWholeBook && activeDoc.kind !== 'text') throw new Error('当前只读取到 PDF 当前页或 EPUB 当前章节；为避免声称分析未读取的全文，请按页或章节分析。')
+    const requestedPage = Number(pageRequest?.[1] || pageRequest?.[2] || activeTab.pageNumber || 1)
+    if (activeDoc.kind === 'pdf') {
+      if (!activeDoc.pdf) throw new Error('当前 PDF 还没有可读取的页面。')
+      if (!Number.isSafeInteger(requestedPage) || requestedPage < 1 || requestedPage > activeDoc.pageCount) throw new Error(`PDF 页码必须在 1 到 ${activeDoc.pageCount} 之间。`)
+      const text = await readPdfPageText(activeDoc.pdf, requestedPage)
+      return {
+        source: { text, sourceKind: 'pdf', sourcePath: activePath, sourceName: activeTab.name, pageNumber: requestedPage, locationLabel: `第 ${requestedPage} 页` },
+        scopeLabel: `PDF 第 ${requestedPage} 页`,
+      }
+    }
+
+    if (activeDoc.kind === 'epub' && activeDoc.epub) {
+      const chapterIndex = chapterRequest
+        ? Number(chapterRequest[1] || chapterRequest[2]) - 1
+        : (activeTab.chapterIndex ?? 0)
+      const chapter = activeDoc.epub.chapters[chapterIndex]
+      if (!chapter) throw new Error(`没有找到第 ${chapterIndex + 1} 章；没有取得其他章节内容。`)
+      let text = ''
+      if (chapterIndex === (activeTab.chapterIndex ?? 0)) {
+        const body = document.querySelector<HTMLElement>('.epub-body')
+        const blocks = body ? Array.from(body.querySelectorAll<HTMLElement>('[data-paperlight-block-index]')) : []
+        text = blocks.length
+          ? blocks.map((block) => (block.innerText || block.textContent || '').trim()).filter(Boolean).join('\n')
+          : (body?.innerText || body?.textContent || '')
+      } else {
+        const parsed = new DOMParser().parseFromString(chapter.html, 'text/html')
+        parsed.querySelectorAll('script, style, noscript').forEach((element) => element.remove())
+        const blocks = Array.from(parsed.body.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,dt,dd'))
+        text = blocks.map((block) => (block.textContent || '').trim()).filter(Boolean).join('\n')
+          || parsed.body.textContent || ''
+      }
+      text = text.trim()
+      return {
+        source: { text, sourceKind: 'epub', sourcePath: activePath, sourceName: activeTab.name, pageNumber: chapterIndex + 1, locationLabel: chapter.title },
+        scopeLabel: `EPUB 第 ${chapterIndex + 1} 章 · ${chapter.title}`,
+      }
+    }
+
+    if (activeDoc.kind === 'text') {
+      if (asksForWholeBook) {
+        const text = activeDoc.blocks.map(textForMarkdownBlock).filter(Boolean).join('\n\n')
+        if (text.length > 20_000) throw new Error(`全文约 ${text.length.toLocaleString()} 字符，超过单次分析上限；请按章节或阅读位置拆分。`)
+        return {
+          source: { text, sourceKind: 'text', sourcePath: activePath, sourceName: activeTab.name, pageNumber: 1, locationLabel: '全文' },
+          scopeLabel: `${activeTab.name} · 全文`,
+        }
+      }
+      const current = textFlowPosition()
+      const headings = activeDoc.flowOutline.filter((item): item is TextOutlineItem => 'block' in item)
+      const chapterRequest = requestedInstruction.match(/(?:第\s*(\d+)\s*章|chapter\s*(\d+))/iu)
+      let start = 0
+      let end = activeDoc.blocks.length
+      let label = flowLocation || '当前阅读位置'
+      if (chapterRequest) {
+        const ordinal = Number(chapterRequest[1] || chapterRequest[2])
+        const orderedHeadings = headings.filter((item) => item.level <= 2)
+        const heading = orderedHeadings[ordinal - 1]
+        if (!heading) throw new Error(`没有找到第 ${ordinal} 章的标题，未发送其他范围的内容。`)
+        start = heading.block
+        label = heading.title
+        end = headings.find((item) => item.block > start && item.level <= heading.level)?.block ?? activeDoc.blocks.length
+      } else {
+        const currentHeading = [...headings].reverse().find((item) => item.block <= current)
+        if (currentHeading) {
+          start = currentHeading.block
+          label = currentHeading.title
+          end = headings.find((item) => item.block > start && item.level <= currentHeading.level)?.block ?? activeDoc.blocks.length
+        } else {
+          start = Math.max(0, current - DEFAULT_CONTEXT_LINES)
+          end = Math.min(activeDoc.blocks.length, current + DEFAULT_CONTEXT_LINES + 1)
+        }
+      }
+      const text = activeDoc.blocks.slice(start, end).map(textForMarkdownBlock).filter(Boolean).join('\n\n').trim()
+      return {
+        source: { text, sourceKind: 'text', sourcePath: activePath, sourceName: activeTab.name, pageNumber: 1, blockIndex: current, locationLabel: label },
+        scopeLabel: `文本 · ${label}`,
+      }
+    }
+    throw new Error('当前文档格式暂不支持内容分析。')
+  }, [activeDoc, activePath, activeTab, flowLocation, readPdfPageText, textFlowPosition])
+
+  const executeAnalysis = useCallback(async (source: ReaderAnalysisSource, instruction: string, scopeLabel: string) => {
+    const clean = source.text.trim()
+    if (!clean) {
+      setAnalysisError('这个范围没有可读取的文字。扫描版 PDF 目前不能做文字分析。')
+      return
+    }
+    if (clean.length > 20_000) {
+      setAnalysisError(`当前范围有 ${clean.length.toLocaleString()} 个字符，超过单次分析上限；请缩小选区。`)
+      return
+    }
+    analysisControllerRef.current?.abort()
+    const controller = new AbortController()
+    analysisControllerRef.current = controller
+    const id = `reader-analysis:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    analysisRetryRef.current = { source: { ...source, text: clean }, instruction, scopeLabel }
+    setAnalysisLoading(true)
+    setAnalysisError('')
+    setAnalysisMatches([])
+    setAnalysisSelection(null)
+    setNestedAnalysis(false)
+    setAssistantMode('analysis')
+    setState((current) => ({ ...current, layout: { ...current.layout, rightOpen: true } }))
+    try {
+      const output = await analyzePassage({ ...source, text: clean }, instruction, scopeLabel, model, controller.signal)
+      if (analysisControllerRef.current !== controller) return
+      setAnalysisResult({ id, source: { ...source, text: clean }, instruction, scopeLabel, ...output })
+    } catch (error) {
+      if (!isAbortError(error)) setAnalysisError(error instanceof Error ? error.message : '段落分析失败。')
+    } finally {
+      if (analysisControllerRef.current === controller) {
+        analysisControllerRef.current = null
+        setAnalysisLoading(false)
+      }
+    }
   }, [model])
 
-  const cancelSenseLookup = useCallback(() => senseControllerRef.current?.abort(), [])
+  const analyzeReaderSelection = useCallback(() => {
+    if (!selection) return
+    const kind = activeDoc?.kind === 'pdf' ? 'pdf' : activeDoc?.kind === 'epub' ? 'epub' : 'text'
+    const source: ReaderAnalysisSource = {
+      text: selection.text,
+      sourceKind: kind,
+      sourcePath: selection.documentPath,
+      sourceName: selection.documentName,
+      pageNumber: selection.pageNumber,
+      blockIndex: selection.blockIndex,
+      locationLabel: selection.locationLabel,
+    }
+    void executeAnalysis(source, analysisInstruction || '翻译这段原文，并解释它的意义。', `${selection.documentName || '材料'} · ${selection.locationLabel || `第 ${selection.pageNumber} 页/章`} 选区`)
+  }, [activeDoc?.kind, analysisInstruction, executeAnalysis, selection])
+
+  const analyzeCurrentScope = useCallback(() => {
+    void buildCurrentAnalysisSource().then(({ source, scopeLabel }) => {
+      void executeAnalysis(source, analysisInstruction || '翻译这段原文，并解释它的意义。', scopeLabel)
+    }).catch((error) => setAnalysisError(error instanceof Error ? error.message : '无法读取当前范围。'))
+  }, [analysisInstruction, buildCurrentAnalysisSource, executeAnalysis])
+
+  const runAnalysisInstruction = useCallback(() => {
+    const instruction = analysisInstruction.trim() || '分析当前阅读位置。'
+    const asksForSelection = /选中|选定|所选|selection|selected/iu.test(instruction)
+    if (asksForSelection && !selection) {
+      setAnalysisError('这条指令需要先在阅读器中选中原文。')
+      return
+    }
+    if (asksForSelection && selection) {
+      if (selection.documentPath && selection.documentPath !== activePath) {
+        setAnalysisError('当前选区来自另一份材料；请在当前材料中重新选择原文。')
+        return
+      }
+      const kind = activeDoc?.kind === 'pdf' ? 'pdf' : activeDoc?.kind === 'epub' ? 'epub' : 'text'
+      const source: ReaderAnalysisSource = {
+        text: selection.text, sourceKind: kind, sourcePath: selection.documentPath,
+        sourceName: selection.documentName, pageNumber: selection.pageNumber,
+        blockIndex: selection.blockIndex, locationLabel: selection.locationLabel,
+      }
+      void executeAnalysis(source, instruction, `${selection.documentName || '材料'} · 选区`)
+      return
+    }
+    void buildCurrentAnalysisSource(instruction).then(({ source, scopeLabel }) => {
+      void executeAnalysis(source, instruction, scopeLabel)
+    }).catch((error) => setAnalysisError(error instanceof Error ? error.message : '无法识别当前可读取范围。'))
+  }, [activeDoc?.kind, analysisInstruction, buildCurrentAnalysisSource, executeAnalysis, selection])
+
+  const cancelAnalysis = useCallback(() => analysisControllerRef.current?.abort(), [])
+  const retryAnalysis = useCallback(() => {
+    const previous = analysisRetryRef.current
+    if (previous) void executeAnalysis(previous.source, previous.instruction, previous.scopeLabel)
+  }, [executeAnalysis])
+
+  const selectAnalysisSource = useCallback(() => {
+    const analysis = analysisResult
+    const browserSelection = window.getSelection()
+    const text = tidyText(browserSelection?.toString() || '')
+    const root = document.querySelector<HTMLElement>('[data-testid="analysis-original"]')
+    if (!analysis || !browserSelection || browserSelection.rangeCount === 0 || !root || text.length < 2) return
+    const range = browserSelection.getRangeAt(0)
+    if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return
+    const prefix = range.cloneRange()
+    prefix.selectNodeContents(root)
+    prefix.setEnd(range.startContainer, range.startOffset)
+    const start = prefix.toString().length
+    const index = analysis.source.text.indexOf(text, start)
+    const actualIndex = index >= 0 ? index : start
+    const normal = contextFromOffset(analysis.source.text, text, actualIndex, DEFAULT_CONTEXT_LINES, DEFAULT_CONTEXT_LINES)
+    const expanded = contextFromOffset(analysis.source.text, text, actualIndex, EXPANDED_CONTEXT_LINES, EXPANDED_CONTEXT_LINES)
+    const next: TextSelection = {
+      text,
+      before: analysis.source.text.slice(Math.max(0, actualIndex - 500), actualIndex),
+      after: analysis.source.text.slice(actualIndex + text.length, actualIndex + text.length + 500),
+      contextText: normal.text,
+      expandedContextText: expanded.text,
+      pageNumber: analysis.source.pageNumber,
+      startOffset: actualIndex,
+      endOffset: actualIndex + text.length,
+      blockIndex: analysis.source.blockIndex,
+      locationLabel: analysis.source.locationLabel || analysis.scopeLabel,
+      documentName: analysis.source.sourceName,
+      documentPath: analysis.source.sourcePath,
+    }
+    setAnalysisSelection(next)
+    setQueryTerm(termFromSelection(text))
+  }, [analysisResult])
+
+  const startNestedQuery = useCallback(() => {
+    if (!analysisSelection) return
+    senseControllerRef.current?.abort()
+    optionalQueryControllerRef.current?.abort()
+    senseRequestRef.current += 1
+    setSelection(analysisSelection)
+    setQueryTerm(termFromSelection(analysisSelection.text))
+    lastContextRef.current = analysisSelection.contextText || ''
+    setSense(null)
+    setSenseAnswerId(null)
+    setQueryAnswerId(null)
+    setSenseError('')
+    setQueryStatus('idle')
+    setQueryExplanation('')
+    setQueryModules([])
+    setSavedQueryModuleKeys(new Set())
+    setSavedQueryExpressionKeys(new Set())
+    setExpandedRetryUsed(false)
+    setNestedAnalysis(true)
+    setRightTab('sense')
+    setAssistantMode('query')
+    setState((current) => ({ ...current, layout: { ...current.layout, rightOpen: true } }))
+    window.setTimeout(() => document.querySelector<HTMLInputElement>('#query-term')?.focus(), 0)
+  }, [analysisSelection])
+
+  const returnToAnalysis = useCallback(() => {
+    setAssistantMode('analysis')
+    setNestedAnalysis(false)
+  }, [])
+
+  const saveAssistantMarkdown = useCallback((input: {
+    answerId: string
+    title: string
+    markdown: string
+    question: string
+    source?: ReaderAnalysisSource | TextSelection | null
+    tags?: string[]
+  }) => {
+    const source = input.source
+    const root = vaultRef.current.root?.replace(/\\/g, '/').replace(/\/+$/, '')
+    const rawSourcePath = source && 'sourcePath' in source
+      ? source.sourcePath
+      : source && 'documentPath' in source ? source.documentPath : undefined
+    const sourcePath = rawSourcePath?.replace(/\\/g, '/') || ''
+    const vaultRelative = root && sourcePath.startsWith(`${root}/`) ? sourcePath.slice(root.length + 1) : ''
+    const materialPath = vaultRelative.startsWith('materials/') ? vaultRelative : undefined
+    return vaultRef.current.saveReaderAnswer({
+      answerId: input.answerId,
+      title: input.title,
+      markdown: input.markdown,
+      date: localDateKey(),
+      question: input.question,
+      sourcePath: materialPath,
+      sourceName: (source && 'sourceName' in source ? source.sourceName
+        : source && 'documentName' in source ? source.documentName : undefined) || activeTab?.name || undefined,
+      locationLabel: source?.locationLabel || flowLocation || (activeTab ? `第 ${activeTab.pageNumber} 页/章` : undefined),
+      quote: 'text' in (source || {}) && typeof source?.text === 'string' ? source.text.slice(0, 2_000) : undefined,
+      tags: input.tags,
+    })
+  }, [activeTab, flowLocation])
+
+  const saveQueryModule = useCallback((module: QueryModuleResult) => {
+    const currentAnswerId = queryAnswerId || `reader-query:${Date.now()}`
+    if (!queryAnswerId) setQueryAnswerId(currentAnswerId)
+    const title = `${queryTerm.trim() || '语言查询'} · ${module.title}`
+    const expressions = module.expressions?.length
+      ? `\n\n## 可收录表达\n\n${module.expressions.map((item) => `- **${item.expression}**${item.meaning ? `：${item.meaning}` : ''}${item.usageScenario ? `（${item.usageScenario}）` : ''}`).join('\n')}`
+      : ''
+    const selectedSource = selection || null
+    void runVaultAction(
+      () => saveAssistantMarkdown({
+        answerId: `${currentAnswerId}:${module.key}`,
+        title,
+        markdown: `${module.markdown}${expressions}`.trim(),
+        question: `阅读助手 · ${module.title} · ${queryTerm}`,
+        source: selectedSource,
+        tags: ['v3-query', module.key],
+      }),
+      (path) => `「${module.title}」已保存：${path}`,
+      false,
+    ).then((path) => {
+      if (path) setSavedQueryModuleKeys((current) => new Set(current).add(module.key))
+    })
+  }, [queryAnswerId, queryTerm, runVaultAction, saveAssistantMarkdown, selection])
+
+  const saveDictionaryLinks = useCallback(() => {
+    const term = queryTerm.trim()
+    if (!term) return
+    const oxford = dictionaryEntryUrl('oxford', term)
+    const collins = dictionaryEntryUrl('collins', term)
+    const markdown = [
+      `- [Oxford Advanced Learner's Dictionary · ${term}](${oxford})`,
+      `- [Collins COBUILD · ${term}](${collins})`,
+      '',
+      '词典正文保留在官方站点；此处只保存查询入口。',
+    ].join('\n')
+    const selectedSource = selection || null
+    void runVaultAction(
+      () => saveAssistantMarkdown({
+        answerId: `reader-query:${queryTerm.trim().toLocaleLowerCase()}:dictionary`,
+        title: `${term} · 词典入口`,
+        markdown,
+        question: `官方词典入口 · ${term}`,
+        source: selectedSource,
+        tags: ['v3-query', 'dictionary-links'],
+      }),
+      (path) => `词典入口已保存：${path}`,
+      false,
+    ).then((path) => { if (path) setDictionaryLinksSaved(true) })
+  }, [queryTerm, runVaultAction, saveAssistantMarkdown, selection])
+
+  const saveQueryExpression = useCallback(async (expression: { expression: string; meaning: string; usageScenario: string }, module: QueryModuleResult) => {
+    const key = `${module.key}:${expression.expression.toLocaleLowerCase()}`
+    if (savedQueryExpressionKeys.has(key)) return
+    if (!vaultApi.ready) {
+      setVaultActionMessage({ kind: 'error', text: '先在笔记空间里选择一个 vault 文件夹。' })
+      return
+    }
+    setVaultActionBusy(true)
+    setVaultActionMessage(null)
+    try {
+      const source = analysisSelection || selection
+      const record = await vaultRef.current.captureExpression({
+        expression: expression.expression,
+        meaning: expression.meaning,
+        note: `阅读助手 · ${module.title}`,
+        cognitivePath: 'exploration',
+        context: {
+          sourceKind: 'ai_exploration',
+          sourcePath: source?.documentPath,
+          sourceName: `阅读助手 · ${module.title}`,
+          locationLabel: source?.locationLabel,
+          usageScenario: expression.usageScenario,
+          generated: true,
+        },
+      })
+      setSavedQueryExpressionKeys((current) => new Set(current).add(key))
+      setExpressionCaptureNotice(`已收录 AI 建议「${record.expression}」；它会标记为生成候选。`)
+      window.setTimeout(() => setExpressionCaptureNotice(''), 4000)
+    } catch (error) {
+      setVaultActionMessage({ kind: 'error', text: error instanceof Error ? error.message : '表达收录失败。' })
+    } finally {
+      setVaultActionBusy(false)
+    }
+  }, [analysisSelection, savedQueryExpressionKeys, selection, vaultApi.ready])
+
+  const saveAnalysisResult = useCallback(() => {
+    if (!analysisResult || analysisResult.saved) return
+    const source = analysisResult.source
+    const quote = source.text.split(/\r?\n/u).map((line) => `> ${line}`).join('\n')
+    const markdown = [
+      '## 原文', '', quote, '', '## 段落直译', '', analysisResult.translation,
+      '', '## 意义分析', '', analysisResult.meaning,
+    ].join('\n')
+    setAnalysisSaving(true)
+    void runVaultAction(
+      () => saveAssistantMarkdown({
+        answerId: analysisResult.id,
+        title: `段落分析 · ${source.sourceName || analysisResult.scopeLabel}`,
+        markdown,
+        question: analysisResult.instruction || '翻译并解释阅读材料。',
+        source,
+        tags: ['v3-analysis'],
+      }),
+      (path) => `段落分析已保存：${path}`,
+      false,
+    ).then((path) => {
+      if (path) setAnalysisResult((current) => current?.id === analysisResult.id ? { ...current, saved: true } : current)
+    }).finally(() => setAnalysisSaving(false))
+  }, [analysisResult, runVaultAction, saveAssistantMarkdown])
+
+  const identifyExistingLanguage = useCallback(() => {
+    if (!analysisResult) return
+    const entries: Array<{ kind: ExistingLanguageMatch['kind']; text: string; meaning: string }> = []
+    const known = new Set<string>()
+    for (const atom of atoms) {
+      for (const term of [atom.term, atom.lemma]) {
+        const key = `semantic:${term.trim().toLocaleLowerCase()}`
+        if (!term.trim() || known.has(key)) continue
+        known.add(key)
+        entries.push({ kind: 'semantic', text: term, meaning: atom.contextualMeaning })
+      }
+    }
+    for (const record of vaultApi.expressions.slice(0, 2_000)) {
+      const key = `expression:${record.expression.trim().toLocaleLowerCase()}`
+      if (!record.expression.trim() || known.has(key)) continue
+      known.add(key)
+      entries.push({ kind: 'expression', text: record.expression, meaning: record.meaning })
+    }
+    setAnalysisMatches(findStoredLanguageMatches(analysisResult.source.text, entries))
+  }, [analysisResult, atoms, vaultApi.expressions])
 
   const captureSelectedExpression = useCallback((event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) => {
     const target = event.target instanceof HTMLElement ? event.target : null
@@ -1822,17 +2380,56 @@ function App() {
     // expose their selectable content under [data-page-number].
     const pageElement = startNode?.closest<HTMLElement>('[data-page-number]')
     if (!pageElement) return
-    const pageLayer = pageElement.querySelector('.textLayer') || pageElement
+    const pageLayer = pageElement.querySelector<HTMLElement>('.textLayer') || pageElement
     const pageText = tidyText(pageLayer.textContent || '')
     const index = pageText.indexOf(text)
     const blockElement = startNode?.closest<HTMLElement>('[id^="flow-block-"], [data-paperlight-block-index]')
     const blockIndexText = blockElement?.id.match(/^flow-block-(\d+)$/)?.[1]
       ?? blockElement?.dataset.paperlightBlockIndex
+    const endNode = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement
+    const endBlockElement = endNode?.closest<HTMLElement>('[id^="flow-block-"], [data-paperlight-block-index]')
+    const endBlockIndexText = endBlockElement?.id.match(/^flow-block-(\d+)$/)?.[1]
+      ?? endBlockElement?.dataset.paperlightBlockIndex
+    let normalContext = contextFromOffset(pageText, text, index, DEFAULT_CONTEXT_LINES, DEFAULT_CONTEXT_LINES)
+    let expandedContext = contextFromOffset(pageText, text, index, EXPANDED_CONTEXT_LINES, EXPANDED_CONTEXT_LINES)
+    if (activeDoc?.kind === 'pdf') {
+      const lines = stablePdfLines(pageLayer)
+      if (lines.length > 0) {
+        const rects = Array.from(range.getClientRects())
+        const startY = rects[0]?.top ?? range.getBoundingClientRect().top
+        const endY = rects.at(-1)?.bottom ?? range.getBoundingClientRect().bottom
+        const nearest = (y: number) => lines.reduce((best, item, itemIndex) => (
+          Math.abs(item.top - y) < Math.abs(lines[best].top - y) ? itemIndex : best
+        ), 0)
+        const firstLine = nearest(startY)
+        const lastLine = Math.max(firstLine, nearest(endY))
+        const sourceLines = lines.map((line) => line.text)
+        normalContext = contextFromLines(sourceLines, firstLine, lastLine, DEFAULT_CONTEXT_LINES, DEFAULT_CONTEXT_LINES)
+        expandedContext = contextFromLines(sourceLines, firstLine, lastLine, EXPANDED_CONTEXT_LINES, EXPANDED_CONTEXT_LINES)
+      }
+    } else if (activeDoc?.kind === 'text' && activeDoc.blocks.length > 0 && blockIndexText !== undefined) {
+      const sourceLines = activeDoc.blocks.map(textForMarkdownBlock)
+      const firstBlock = Math.max(0, Number(blockIndexText))
+      const lastBlock = Math.max(firstBlock, Number(endBlockIndexText ?? blockIndexText))
+      normalContext = contextFromBlocks(sourceLines, firstBlock, lastBlock, DEFAULT_CONTEXT_LINES, DEFAULT_CONTEXT_LINES)
+      expandedContext = contextFromBlocks(sourceLines, firstBlock, lastBlock, EXPANDED_CONTEXT_LINES, EXPANDED_CONTEXT_LINES)
+    } else if (activeDoc?.kind === 'epub') {
+      const epubBlocks = Array.from(pageElement.querySelectorAll<HTMLElement>('[data-paperlight-block-index]'))
+      const firstBlock = Number(blockIndexText)
+      const lastBlock = Number(endBlockIndexText ?? blockIndexText)
+      if (epubBlocks.length > 0 && Number.isSafeInteger(firstBlock) && Number.isSafeInteger(lastBlock)) {
+        const sourceLines = epubBlocks.map((element) => element.innerText || element.textContent || '')
+        normalContext = contextFromBlocks(sourceLines, firstBlock, Math.max(firstBlock, lastBlock), DEFAULT_CONTEXT_LINES, DEFAULT_CONTEXT_LINES)
+        expandedContext = contextFromBlocks(sourceLines, firstBlock, Math.max(firstBlock, lastBlock), EXPANDED_CONTEXT_LINES, EXPANDED_CONTEXT_LINES)
+      }
+    }
     const rect = range.getBoundingClientRect()
     const next: TextSelection = {
       text,
       before: index >= 0 ? pageText.slice(Math.max(0, index - 500), index) : '',
       after: index >= 0 ? pageText.slice(index + text.length, index + text.length + 500) : '',
+      contextText: normalContext.text,
+      expandedContextText: expandedContext.text,
       pageNumber: Number(pageElement.dataset.pageNumber || 1),
       startOffset: index >= 0 ? index : undefined,
       endOffset: index >= 0 ? index + text.length : undefined,
@@ -1845,6 +2442,9 @@ function App() {
     setTranslation('')
     setTranslationError('')
     setLayout((current) => ({ ...current, rightOpen: true }))
+    setAssistantMode('query')
+    setNestedAnalysis(false)
+    setAnalysisSelection(null)
     setRightTab('sense')
     setAnchor({
       x: Math.max(174, Math.min(window.innerWidth - 174, rect.left + rect.width / 2)),
@@ -1852,14 +2452,24 @@ function App() {
     })
     const term = termFromSelection(text)
     setQueryTerm(term)
-    lastContextRef.current = sentenceAround(pageText, index, text.length)
+    lastContextRef.current = normalContext.text
+    setExpandedRetryUsed(false)
+    senseControllerRef.current?.abort()
+    optionalQueryControllerRef.current?.abort()
     senseRequestRef.current += 1
     setSenseLoading(false)
     setSense(null)
     setSenseAnswerId(null)
+    setQueryAnswerId(null)
     setSenseError('')
+    setQueryStatus('idle')
+    setQueryExplanation('')
+    setQueryModules([])
+    setSavedQueryModuleKeys(new Set())
+    setSavedQueryExpressionKeys(new Set())
+    setDictionaryLinksSaved(false)
     setAllSenses(null)
-  }, [activePath, activeTab?.name])
+  }, [activeDoc?.blocks, activeDoc?.kind, activePath, activeTab?.name])
 
   const setLayout = useCallback((updater: (current: PersistedState['layout']) => PersistedState['layout']) => {
     setState((prev) => ({ ...prev, layout: updater(prev.layout) }))
@@ -2182,6 +2792,10 @@ function App() {
   const positionIndex = activeDoc?.kind === 'epub'
     ? (activeTab?.chapterIndex ?? 0) + 1
     : (activeTab?.pageNumber ?? 1)
+  const analysisScopeLabel = activeDoc?.kind === 'pdf' ? '当前页'
+    : activeDoc?.kind === 'epub' ? '当前章节'
+      : activeDoc?.kind === 'text' ? '当前阅读位置' : '当前范围'
+  const canAnalyzeCurrent = activeDoc?.status === 'ready'
 
   const navigatePosition = useCallback((delta: number) => {
     if (!activeDoc) return
@@ -2682,6 +3296,44 @@ function App() {
 
         {layout.rightOpen && <div className="right-pane" style={{ width: `${layout.rightWidth}px` }}>
           <AssistantPanel
+            mode={assistantMode}
+            onMode={setAssistantMode}
+            analysisResult={analysisResult}
+            analysisSelection={analysisSelection}
+            analysisInstruction={analysisInstruction}
+            analysisLoading={analysisLoading}
+            analysisError={analysisError}
+            analysisMatches={analysisMatches}
+            onAnalysisInstruction={setAnalysisInstruction}
+            onAnalyzeSelection={analyzeReaderSelection}
+            onAnalyzeCurrent={analyzeCurrentScope}
+            onRunAnalysisInstruction={runAnalysisInstruction}
+            onCancelAnalysis={cancelAnalysis}
+            onAnalysisSourceSelection={selectAnalysisSource}
+            onStartNestedQuery={startNestedQuery}
+            onIdentifyMemory={identifyExistingLanguage}
+            onSaveAnalysis={saveAnalysisResult}
+            analysisSaving={analysisSaving || vaultActionBusy}
+            analysisSaved={Boolean(analysisResult?.saved)}
+            onRetryAnalysis={retryAnalysis}
+            analysisScopeLabel={analysisScopeLabel}
+            canAnalyzeCurrent={canAnalyzeCurrent}
+            nestedAnalysis={nestedAnalysis}
+            onReturnToAnalysis={returnToAnalysis}
+            queryStatus={queryStatus}
+            queryExplanation={queryExplanation}
+            expandedContextAvailable={Boolean(selection?.expandedContextText && selection.expandedContextText !== selection.contextText && !expandedRetryUsed)}
+            onRetryExpandedContext={retryExpandedContext}
+            queryModules={queryModules}
+            optionalModuleLoading={optionalModuleLoading}
+            onOptionalModule={(task) => void loadOptionalQueryModule(task)}
+            onCancelOptionalModule={() => optionalQueryControllerRef.current?.abort()}
+            onSaveQueryModule={saveQueryModule}
+            onSaveDictionaryLinks={saveDictionaryLinks}
+            dictionaryLinksSaved={dictionaryLinksSaved}
+            onSaveQueryExpression={(expression, module) => void saveQueryExpression(expression, module)}
+            savedQueryModuleKeys={savedQueryModuleKeys}
+            savedQueryExpressionKeys={savedQueryExpressionKeys}
             tab={rightTab}
             onTab={setRightTab}
             wide={layout.assistantWide}
