@@ -20,7 +20,9 @@ V2 开发批次在现有开发分支更新版本、记录变更、创建 commit 
 ### 最终验证
 
 - `npm run check`：通过；生产构建成功、114 项单元测试通过、9 个 Node JavaScript 文件语法检查通过。
-- `npm run smoke`：通过；156 项 Electron 桌面检查全部通过，含 PDF 当前段落/当前页、Markdown 与 EPUB 当前段落、指定章节、词语与复杂句查询、Vault 来源跳转和现有工作流。
+- `npm run smoke`：通过；161 项 Electron 桌面检查全部通过，含 PDF 当前段落/当前页、Markdown 与 EPUB 当前段落、指定章节、词语与复杂句查询、按需近义词/背景模块、同页语义与表达本地匹配、嵌套查询、Vault 来源跳转和现有工作流。
+- Smoke 在窗口创建前开始监测 Electron HTTP(S) 请求；启动阶段无非 loopback 请求。Oxford/Collins 外链只检查官方 URL，不在测试中打开。
+- 本地 Paperlight.app：3.0.0-rc.2，macOS universal（x86_64 + arm64）；codesign 严格校验通过，采用 ad-hoc 签名，未公证。
 - Smoke 使用自动生成的临时材料、临时 Vault 和本地 AI stub；没有读取或写入真实用户 Vault，也没有调用真实模型服务。
 - Vite 主 JS chunk 为 673.61 KB，超过 500 KB 建议阈值；本候选没有调整代码拆分。
 - 本候选只推送到 `codex/paperlight-v3` 开发分支；不生成安装包、版本标签或 GitHub Release。

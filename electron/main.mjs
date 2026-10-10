@@ -736,6 +736,22 @@ if (!app.requestSingleInstanceLock()) {
     // Windows groups taskbar entries and notifications by this id.
     if (process.platform === 'win32') app.setAppUserModelId('com.paperlight.reader')
     inheritLocalApiConfig()
+    if (isSmoke) {
+      // Observe startup and workflow requests in the isolated Electron session.
+      // Paperlight's built-in API is loopback-only; any other HTTP(S) request
+      // would mean the desktop app depends on an external runtime resource.
+      globalThis.__paperlightSmokeNetworkAudit = { external: [] }
+      session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+        try {
+          const url = new URL(details.url)
+          if ((url.protocol === 'http:' || url.protocol === 'https:')
+            && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
+            globalThis.__paperlightSmokeNetworkAudit.external.push(details.url)
+          }
+        } catch {}
+        callback({})
+      })
+    }
     if (!devServerUrl) {
       session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
         callback({

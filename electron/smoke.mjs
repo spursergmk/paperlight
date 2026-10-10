@@ -301,6 +301,8 @@ export async function runSmokeTest({ window, projectRoot }) {
   // A local key so the AI code paths really run — every AI endpoint the smoke
   // exercises is intercepted by install*Stub, so nothing leaves this machine.
   process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'sk-paperlight-smoke-stub'
+  const externalRequests = globalThis.__paperlightSmokeNetworkAudit?.external || []
+  record('Electron app startup makes no external HTTP requests', externalRequests.length === 0, JSON.stringify(externalRequests))
   const artifacts = join(projectRoot, 'tests', 'artifacts')
   mkdirSync(artifacts, { recursive: true })
   const library = join(tmpdir(), 'paperlight-smoke-library')
@@ -2143,6 +2145,25 @@ export async function runSmokeTest({ window, projectRoot }) {
       Boolean(await evaluate(wc, `document.querySelector('.sense-meaning')?.textContent && document.querySelector('[data-testid="query-module-usage"]')`)),
       `wordSelected=${pdfWordSelection}; term=${usageModuleCall?.term}; sentence=${usageModuleCall?.isSentence}`)
 
+    const optionalContext = 'The authors take a stance on language learning.'
+    const synonymsStart = await evaluate(wc, 'window.__queryRequests.length')
+    await evaluate(wc, "Array.from(document.querySelectorAll('.query-optional-buttons button')).find((button) => button.textContent.includes('对比近义词'))?.click(); true")
+    await waitFor(wc, 'window.__queryRequests.length > ' + synonymsStart + ' && document.querySelector("[data-testid=query-module-synonyms]")', { label: 'on-demand synonyms module' })
+    const synonymsEvidence = await evaluate(wc, '({ requests: window.__queryRequests.slice(' + synonymsStart + '), text: document.querySelector("[data-testid=query-module-synonyms]")?.textContent || "" })')
+    record('synonym comparison runs on demand with the selected word and its source context',
+      synonymsEvidence.requests.length === 1 && synonymsEvidence.requests[0]?.task === 'synonyms'
+        && synonymsEvidence.requests[0]?.term === 'stance' && synonymsEvidence.requests[0]?.context.includes(optionalContext)
+        && synonymsEvidence.text.includes('in large numbers'), JSON.stringify(synonymsEvidence))
+
+    const backgroundStart = await evaluate(wc, 'window.__queryRequests.length')
+    await evaluate(wc, "Array.from(document.querySelectorAll('.query-optional-buttons button')).find((button) => button.textContent.includes('解释背景知识'))?.click(); true")
+    await waitFor(wc, 'window.__queryRequests.length > ' + backgroundStart + ' && document.querySelector("[data-testid=query-module-background]")', { label: 'on-demand passage background module' })
+    const backgroundEvidence = await evaluate(wc, '({ requests: window.__queryRequests.slice(' + backgroundStart + '), text: document.querySelector("[data-testid=query-module-background]")?.textContent || "" })')
+    record('passage background explanation runs only on demand and receives the selected passage',
+      backgroundEvidence.requests.length === 1 && backgroundEvidence.requests[0]?.task === 'background'
+        && backgroundEvidence.requests[0]?.term === 'stance' && backgroundEvidence.requests[0]?.context.includes(optionalContext)
+        && backgroundEvidence.text.includes('当前原文相关'), JSON.stringify(backgroundEvidence))
+
     const pdfPhraseRestored = await selectPhrase('.textLayer', 'The authors take a stance on language learning.')
     await waitFor(wc, `document.querySelector('#query-term')?.value === 'The authors take a'`, { label: 'restore full PDF source selection before analysis' })
     await evaluate(wc, `document.querySelector('[data-testid="assistant-mode-analysis"]').click(); true`)
@@ -2213,6 +2234,32 @@ export async function runSmokeTest({ window, projectRoot }) {
       if (expressionFiles.length >= 2) break
     }
     const generatedExpression = expressionFiles.map((name) => readFileSync(join(expressionDir, name), 'utf8')).find((markdown) => markdown.includes('# in large numbers')) || ''
+    await installSenseStub(wc, { sense: {
+      term: 'classifications', lemma: 'classification', partOfSpeech: 'noun', senseId: 'groupings',
+      contextualMeaning: '分类方式', definition: 'ways of arranging things into groups',
+      contextSentence: 'These classifications operate within a broader framework of knowledge.',
+      examples: [], guidance: { scenarios: [], advice: [], frequency: '', alternatives: [], synonyms: [], antonyms: [], morphology: { root: '', prefix: '', suffix: '', note: '' } },
+    } })
+    const classificationSelected = await selectPhrase('.textLayer', 'classifications')
+    await waitFor(wc, 'document.querySelector("#query-term")?.value === "classifications"', { label: 'select a known semantic term from the PDF passage' })
+    await evaluate(wc, "document.querySelector('.query-go')?.click(); true")
+    await waitFor(wc, 'document.querySelector(".sense-meaning")?.textContent === "分类方式"', { label: 'classification semantic result' })
+    await evaluate(wc, "document.querySelector('.sense-add')?.click(); true")
+    await waitFor(wc, 'document.querySelector(".sense-add.added")', { label: 'classification semantic saved in the local notebook' })
+    await evaluate(wc, "Array.from(document.querySelectorAll('.vault-action-row .vault-button')).find((button) => button.textContent.includes('语义存入 vault'))?.click(); true")
+    await waitFor(wc, 'document.querySelector(".notes-space")', { label: 'classification semantic saved to the temporary Vault' })
+    const classificationNotePath = join(vaultDir, 'notes', 'books', 'book1', 'classification--groupings.md')
+    let classificationNoteSaved = false
+    for (let attempt = 0; attempt < 20 && !classificationNoteSaved; attempt += 1) {
+      classificationNoteSaved = existsSync(classificationNotePath)
+      if (!classificationNoteSaved) await sleep(200)
+    }
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, 'document.querySelector(".reader-toolbar-title")?.textContent.includes("book1.pdf")', { label: 'return to PDF after saving local semantic' })
+    await waitFor(wc, 'Array.from(document.querySelectorAll(".textLayer span")).some((span) => span.textContent.includes("The authors take a stance on language learning."))', { label: 'PDF text layer after saving local semantic' })
+    const fullPhraseReselected = await selectPhrase('.textLayer', 'The authors take a stance on language learning.')
+    await waitFor(wc, 'document.querySelector("#query-term")?.value === "The authors take a"', { label: 'restore selected source phrase after saving a local semantic' })
+    record('a passage semantic is saved as a local record in the temporary Vault', classificationSelected && classificationNoteSaved && fullPhraseReselected)
     record('an expression suggested by a query module enters the expression pool with AI provenance',
       Boolean(generatedExpression && generatedExpression.includes('AI 生成候选；此条不是原文摘录。') && generatedExpression.includes('阅读助手 · 用法与搭配')),
       generatedExpression.slice(0, 700))
@@ -2226,6 +2273,14 @@ export async function runSmokeTest({ window, projectRoot }) {
     const memoryEvidence = await evaluate(wc, `Array.from(document.querySelectorAll('.analysis-memory-match')).map((mark) => ({ kind: mark.classList.contains('expression') ? 'expression' : 'semantic', text: mark.textContent, title: mark.title }))`)
     record('analysis identifies the exact source phrase already stored in the local expression pool',
       memoryEvidence.some((item) => item.kind === 'expression' && item.text === 'The authors take a stance on language learning.'), JSON.stringify(memoryEvidence))
+    await evaluate(wc, "document.querySelector('[data-testid=\"analysis-current-button\"]').click(); true")
+    await waitFor(wc, 'document.querySelector("[data-testid=analysis-translation]") && document.querySelector("[data-testid=analysis-original]")?.textContent.includes("These classifications")', { label: 'analyze current PDF page containing both saved language items' })
+    await evaluate(wc, "document.querySelector('[data-testid=\"analysis-identify-button\"]').click(); true")
+    await waitFor(wc, 'document.querySelector(".analysis-memory-match.semantic") && document.querySelector(".analysis-memory-match.expression")', { label: 'local semantic and expression matches in one analyzed page' })
+    const bothMemoryEvidence = await evaluate(wc, 'Array.from(document.querySelectorAll(".analysis-memory-match")).map((mark) => ({ kind: mark.classList.contains("expression") ? "expression" : "semantic", text: mark.textContent, title: mark.title }))')
+    record('analysis marks exact semantic-library and expression-pool matches from local data on the same PDF page',
+      bothMemoryEvidence.some((item) => item.kind === 'semantic' && item.text === 'classifications')
+        && bothMemoryEvidence.some((item) => item.kind === 'expression' && item.text === 'The authors take a stance on language learning.'), JSON.stringify(bothMemoryEvidence))
     await evaluate(wc, `document.querySelector('[data-testid="analysis-save-button"]').click(); true`)
     await waitFor(wc, `document.querySelector('[data-testid="analysis-save-button"]')?.disabled`, { label: 'complete analysis saved to the smoke Vault' })
     v3InboxFiles = readdirSync(join(vaultDir, 'notes', 'inbox')).filter((name) => name.endsWith('.md'))
@@ -2235,6 +2290,16 @@ export async function runSmokeTest({ window, projectRoot }) {
       completeAnalysisNote.includes('The authors take a stance on language learning.')
         && completeAnalysisNote.includes('## 段落直译') && completeAnalysisNote.includes('## 意义分析')
         && completeAnalysisNote.includes('[[materials/books/book1/book1.pdf]]'), completeAnalysisNote.slice(0, 1000))
+    wc.send('app:command', 'space-notes')
+    await waitFor(wc, 'document.querySelector(".notes-space") !== null', { label: 'restore the research note workspace after the PDF semantic test' })
+    await waitFor(wc, 'Array.from(document.querySelectorAll(".note-tab")).some((tab) => tab.title === ' + JSON.stringify(researchPath) + ')', { label: 'research note tab available after semantic save' })
+    await evaluate(wc, 'Array.from(document.querySelectorAll(".note-tab")).find((tab) => tab.title === ' + JSON.stringify(researchPath) + ')?.click(); true')
+    await waitFor(wc, 'document.querySelector(".note-toolbar-path-text")?.textContent === ' + JSON.stringify(researchPath), { label: 'research note restored after semantic save' })
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, 'document.querySelector(".reader-toolbar") !== null', { label: 'return to reader after restoring research note' })
+    await waitFor(wc, 'Array.from(document.querySelectorAll(".textLayer span")).some((span) => span.textContent.includes("The authors take a stance on language learning."))', { label: 'PDF text layer restored for marker regression' })
+    await selectPhrase('.textLayer', 'The authors take a stance on language learning.')
+    await waitFor(wc, 'document.querySelector(".input-mark-inline") !== null', { label: 'reader controls restored after switching back from notes' })
 
     await evaluate(wc, `document.querySelector('.input-mark-inline').click(); true`)
     await waitFor(wc, `document.querySelector('.input-marker-composer') !== null`, { label: 'form marker composer' })
@@ -2778,9 +2843,10 @@ export async function runSmokeTest({ window, projectRoot }) {
       storedAtom?.notePath === 'notes/books/book1/numerous--many.md',
       JSON.stringify(storedAtom),
     )
+    const dailySenses = (dailyContent.match(/^senses: \[(.*)\]$/m) || [])[1] || ''
     record(
       "the day's note carries its senses so links resolve",
-      /^senses: \[numerous\|adjective\|many\]/m.test(dailyContent),
+      dailySenses.includes('classification|noun|groupings') && dailySenses.includes('numerous|adjective|many'),
       (dailyContent.match(/^senses: .*$/m) || ['missing'])[0],
     )
 
