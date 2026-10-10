@@ -12,6 +12,8 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>()
+const releasedDocuments = new Set<Promise<PDFDocumentProxy>>()
+let teardownQueue: Promise<void> = Promise.resolve()
 
 // Per-page geometry learned while rendering. Keeping it per document key means
 // switching tabs (which remounts the page stack) or restoring a session does not
@@ -51,7 +53,11 @@ export function acquireDocument(
     return existing.promise
   }
   const entry: CacheEntry = { refs: 1, promise: null as unknown as Promise<PDFDocumentProxy> }
-  entry.promise = loader((ratio) => onProgress?.(ratio)).then((bytes) => openPdf(bytes, onProgress))
+  // Capture the teardown barrier now. A PDF released after this acquire must
+  // not retroactively make this document wait for its own destruction.
+  const priorTeardowns = teardownQueue
+  entry.promise = loader((ratio) => onProgress?.(ratio)).then((bytes) =>
+    priorTeardowns.then(() => openPdf(bytes, onProgress)))
   entry.promise.catch(() => {
     // A failed load must not poison the cache.
     if (cache.get(key) === entry) cache.delete(key)
@@ -60,24 +66,26 @@ export function acquireDocument(
   return entry.promise
 }
 
-function closeDocument(pdf: PDFDocumentProxy): void {
-  // pdf.js v6 shares worker-level and static state (font metrics, text-layer
-  // canvases) and `loadingTask.destroy()` terminates the worker itself, so any
-  // per-document teardown while other documents are open risks breaking them —
-  // `cleanup()` can even reject with "page is currently rendering". Therefore:
-  // closing a tab just drops our reference, and the worker is fully torn down
-  // when the last document closes, which reclaims everything at once.
-  if (cache.size > 0) return
-  void pdf.loadingTask?.destroy().catch(() => undefined)
-}
-
 export function releaseDocument(key: string): void {
   const entry = cache.get(key)
   if (!entry) return
   entry.refs -= 1
   if (entry.refs > 0) return
   cache.delete(key)
-  void entry.promise.then(closeDocument).catch(() => undefined)
+  // pdf.js v6 shares worker-level and static state (font metrics, text-layer
+  // canvases), and cleanup can reject while a page is rendering. Keep closed
+  // documents pending until every open PDF has released its reference, then
+  // destroy their workers as one serialized batch. New loads wait for that
+  // batch so worker teardown cannot race the next document's first render.
+  releasedDocuments.add(entry.promise)
+  if (cache.size > 0) return
+
+  const idleDocuments = [...releasedDocuments]
+  releasedDocuments.clear()
+  teardownQueue = teardownQueue.then(async () => {
+    const documents = await Promise.all(idleDocuments.map((promise) => promise.catch(() => null)))
+    await Promise.all(documents.map((document) => document?.loadingTask?.destroy().catch(() => undefined)))
+  })
 }
 
 export interface DocumentOutlineItem {

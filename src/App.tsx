@@ -1595,11 +1595,106 @@ function App() {
     return Number(target?.id.match(/^flow-block-(\d+)$/)?.[1] || 0)
   }, [])
 
+  const flowParagraphAtViewport = useCallback((selector: string) => {
+    const scroller = document.querySelector<HTMLElement>('.reader-scroll.flow-scroll')
+    if (!scroller) return null
+    const area = scroller.getBoundingClientRect()
+    const probeY = area.top + Math.max(60, Math.min(scroller.clientHeight * 0.38, scroller.clientHeight - 40))
+    const candidates = Array.from(scroller.querySelectorAll<HTMLElement>(selector)).filter((element) => {
+      const rect = element.getBoundingClientRect()
+      return rect.height > 0 && rect.bottom >= area.top && rect.top <= area.bottom
+    })
+    const target = candidates.find((element) => {
+      const rect = element.getBoundingClientRect()
+      return rect.top <= probeY && rect.bottom >= probeY
+    }) || candidates.reduce<HTMLElement | null>((best, element) => {
+      if (!best) return element
+      const distance = (candidate: HTMLElement) => {
+        const rect = candidate.getBoundingClientRect()
+        return Math.abs((rect.top + rect.bottom) / 2 - probeY)
+      }
+      return distance(element) < distance(best) ? element : best
+    }, null)
+    return target
+  }, [])
+
+  const currentPdfParagraph = useCallback((pageNumber: number) => {
+    const page = document.querySelector<HTMLElement>(`.pdf-page-shell[data-page-number="${pageNumber}"]`)
+    const scroller = page?.closest<HTMLElement>('.reader-scroll')
+    const textLayer = page?.querySelector<HTMLElement>('.textLayer')
+    if (!page || !scroller || !textLayer) throw new Error('PDF 当前页的文字层尚未就绪；请稍候，或直接选中段落分析。')
+
+    const fragments = Array.from(textLayer.querySelectorAll<HTMLElement>('span')).flatMap((span) => {
+      const text = span.textContent || ''
+      const rect = span.getBoundingClientRect()
+      return text.trim() && rect.width > 0 && rect.height > 0
+        ? [{ text, top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, height: rect.height }]
+        : []
+    }).sort((a, b) => a.top - b.top || a.left - b.left)
+    if (fragments.length === 0) throw new Error('PDF 当前页没有可读取的文字层；扫描版 PDF 请改为选区分析。')
+
+    // PDF has no paragraph markup. Reconstruct visual lines from text-layer
+    // spans, then use vertical whitespace to avoid sending the entire page.
+    const lines: Array<{ top: number; bottom: number; height: number; fragments: typeof fragments }> = []
+    for (const fragment of fragments) {
+      const line = lines.find((candidate) => Math.abs(candidate.top - fragment.top) <= Math.max(2, fragment.height * 0.18))
+      if (line) {
+        line.top = Math.min(line.top, fragment.top)
+        line.bottom = Math.max(line.bottom, fragment.bottom)
+        line.height = Math.max(line.height, fragment.height)
+        line.fragments.push(fragment)
+      } else {
+        lines.push({ top: fragment.top, bottom: fragment.bottom, height: fragment.height, fragments: [fragment] })
+      }
+    }
+    lines.sort((a, b) => a.top - b.top)
+    const lineText = (line: typeof lines[number]) => {
+      const ordered = [...line.fragments].sort((a, b) => a.left - b.left)
+      let value = ''
+      let previousRight: number | null = null
+      for (const fragment of ordered) {
+        const next = fragment.text.trim()
+        if (!next) continue
+        const hasGap = previousRight !== null && fragment.left - previousRight > Math.max(1, fragment.height * 0.12)
+        if (value && hasGap && !/\s$/u.test(value) && !/^\s/u.test(next)) value += ' '
+        value += next
+        previousRight = fragment.right
+      }
+      return value.trim()
+    }
+    const medianHeight = [...lines.map((line) => line.height)].sort((a, b) => a - b)[Math.floor(lines.length / 2)] || 12
+    const paragraphGap = Math.max(4, medianHeight * 1.55)
+    const paragraphs: Array<typeof lines> = []
+    for (const line of lines) {
+      const previous = paragraphs.at(-1)?.at(-1)
+      if (!previous || line.top - previous.top > paragraphGap) paragraphs.push([line])
+      else paragraphs.at(-1)?.push(line)
+    }
+
+    const scrollerRect = scroller.getBoundingClientRect()
+    const probeY = scrollerRect.top + Math.max(60, Math.min(scroller.clientHeight * 0.38, scroller.clientHeight - 40))
+    let best: typeof paragraphs[number] | null = null
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const paragraph of paragraphs) {
+      const top = paragraph[0]?.top ?? 0
+      const bottom = paragraph.at(-1)?.bottom ?? top
+      const distance = probeY < top ? top - probeY : probeY > bottom ? probeY - bottom : 0
+      if (distance < bestDistance) {
+        best = paragraph
+        bestDistance = distance
+      }
+    }
+    const text = best?.map(lineText).filter(Boolean).join(' ').trim() || ''
+    if (!text) throw new Error('没有识别到阅读位置附近的 PDF 段落；请直接选中段落分析。')
+    return text
+  }, [])
+
   const buildCurrentAnalysisSource = useCallback(async (requestedInstruction = ''): Promise<{ source: ReaderAnalysisSource; scopeLabel: string }> => {
     if (!activeDoc || activeDoc.status !== 'ready' || !activePath || !activeTab) throw new Error('请先打开一份可读取的材料。')
     const pageRequest = requestedInstruction.match(/(?:第\s*(\d+)\s*页|page\s*(\d+))/iu)
     const chapterRequest = requestedInstruction.match(/(?:第\s*(\d+)\s*章|chapter\s*(\d+))/iu)
     const asksForWholeBook = /\b(full book|whole document|entire document)\b|全文|整本/iu.test(requestedInstruction)
+    const asksForCurrentParagraph = /当前段落|current paragraph/iu.test(requestedInstruction)
     if (pageRequest && activeDoc.kind !== 'pdf') throw new Error('EPUB、TXT 和 Markdown 没有稳定页码；请改为当前章节、当前阅读位置或选区。')
     if (chapterRequest && activeDoc.kind === 'pdf') throw new Error('当前 PDF 没有可用章节文本映射；请指定页码或分析选区。')
     if (asksForWholeBook && activeDoc.kind !== 'text') throw new Error('当前只读取到 PDF 当前页或 EPUB 当前章节；为避免声称分析未读取的全文，请按页或章节分析。')
@@ -1607,6 +1702,13 @@ function App() {
     if (activeDoc.kind === 'pdf') {
       if (!activeDoc.pdf) throw new Error('当前 PDF 还没有可读取的页面。')
       if (!Number.isSafeInteger(requestedPage) || requestedPage < 1 || requestedPage > activeDoc.pageCount) throw new Error(`PDF 页码必须在 1 到 ${activeDoc.pageCount} 之间。`)
+      if (asksForCurrentParagraph) {
+        const text = currentPdfParagraph(requestedPage)
+        return {
+          source: { text, sourceKind: 'pdf', sourcePath: activePath, sourceName: activeTab.name, pageNumber: requestedPage, locationLabel: `第 ${requestedPage} 页 · 当前段落` },
+          scopeLabel: `PDF 第 ${requestedPage} 页 · 当前段落`,
+        }
+      }
       const text = await readPdfPageText(activeDoc.pdf, requestedPage)
       return {
         source: { text, sourceKind: 'pdf', sourcePath: activePath, sourceName: activeTab.name, pageNumber: requestedPage, locationLabel: `第 ${requestedPage} 页` },
@@ -1623,6 +1725,16 @@ function App() {
       let text = ''
       if (chapterIndex === (activeTab.chapterIndex ?? 0)) {
         const body = document.querySelector<HTMLElement>('.epub-body')
+        if (asksForCurrentParagraph && !chapterRequest) {
+          const block = flowParagraphAtViewport('.epub-body p[data-paperlight-block-index], .epub-body blockquote[data-paperlight-block-index], .epub-body li[data-paperlight-block-index], .epub-body pre[data-paperlight-block-index], .epub-body dt[data-paperlight-block-index], .epub-body dd[data-paperlight-block-index]')
+          const blockIndex = Number(block?.dataset.paperlightBlockIndex)
+          text = (block?.innerText || block?.textContent || '').trim()
+          if (!text || !Number.isSafeInteger(blockIndex)) throw new Error('没有识别到阅读位置附近的 EPUB 段落；请直接选中段落分析。')
+          return {
+            source: { text, sourceKind: 'epub', sourcePath: activePath, sourceName: activeTab.name, pageNumber: chapterIndex + 1, blockIndex, locationLabel: `${chapter.title} · 当前段落` },
+            scopeLabel: `EPUB 第 ${chapterIndex + 1} 章 · ${chapter.title} · 当前段落`,
+          }
+        }
         const blocks = body ? Array.from(body.querySelectorAll<HTMLElement>('[data-paperlight-block-index]')) : []
         text = blocks.length
           ? blocks.map((block) => (block.innerText || block.textContent || '').trim()).filter(Boolean).join('\n')
@@ -1653,6 +1765,17 @@ function App() {
       const current = textFlowPosition()
       const headings = activeDoc.flowOutline.filter((item): item is TextOutlineItem => 'block' in item)
       const chapterRequest = requestedInstruction.match(/(?:第\s*(\d+)\s*章|chapter\s*(\d+))/iu)
+      if (asksForCurrentParagraph && !chapterRequest) {
+        const blockElement = flowParagraphAtViewport('.flow-page > .flow-paragraph, .flow-page > .flow-quote, .flow-page > .flow-list, .flow-page > .flow-code')
+        const blockIndex = Number(blockElement?.id.match(/^flow-block-(\d+)$/u)?.[1])
+        const block = Number.isSafeInteger(blockIndex) ? activeDoc.blocks[blockIndex] : undefined
+        const text = block ? textForMarkdownBlock(block).trim() : ''
+        if (!text) throw new Error('没有识别到阅读位置附近的文本段落；请直接选中段落分析。')
+        return {
+          source: { text, sourceKind: 'text', sourcePath: activePath, sourceName: activeTab.name, pageNumber: 1, blockIndex, locationLabel: '当前段落' },
+          scopeLabel: `${activeTab.name} · 当前段落`,
+        }
+      }
       let start = 0
       let end = activeDoc.blocks.length
       let label = flowLocation || '当前阅读位置'
@@ -1682,7 +1805,7 @@ function App() {
       }
     }
     throw new Error('当前文档格式暂不支持内容分析。')
-  }, [activeDoc, activePath, activeTab, flowLocation, readPdfPageText, textFlowPosition])
+  }, [activeDoc, activePath, activeTab, currentPdfParagraph, flowLocation, flowParagraphAtViewport, readPdfPageText, textFlowPosition])
 
   const executeAnalysis = useCallback(async (source: ReaderAnalysisSource, instruction: string, scopeLabel: string) => {
     const clean = source.text.trim()

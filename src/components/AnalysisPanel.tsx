@@ -93,7 +93,7 @@ export default function AnalysisPanel({
           {loading
             ? <button type="button" className="text-action" onClick={onCancel}><Square size={12} /> 停止分析</button>
             : <button type="button" className="primary-button" disabled={!canAnalyzeCurrent && !selection} onClick={onRunInstruction} data-testid="analysis-run-button">按指令分析</button>}
-          <span>支持当前 PDF 页、EPUB 章节或文本阅读位置；不会扩展到未提供的全文。</span>
+          <span>支持“当前段落”、PDF 页、EPUB 章节或指定文本范围；仅分析实际读取到的内容。</span>
         </div>
       </section>
 

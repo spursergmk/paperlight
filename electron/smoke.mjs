@@ -7,7 +7,7 @@
 // tests/artifacts/ and the process exits non-zero when a check fails.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { app } from 'electron'
 import { createTestPdf } from '../tests/fixtures/make-pdf.mjs'
@@ -309,9 +309,15 @@ export async function runSmokeTest({ window, projectRoot }) {
   const bigPdf = join(library, 'Foucault-liberal-political-economy.pdf')
   const secondPdf = join(library, 'collection', 'Knowledge-and-Power.pdf')
   const sourcePdfPath = join(library, 'book1.pdf')
+  const targetVaultPath = join(library, 'paperlight-vault')
+  const targetVaultPdf = join(targetVaultPath, 'materials', 'books', 'book1', 'book1.pdf')
   writeFileSync(bigPdf, createTestPdf({ pages: 120, title: 'Foucault and Liberal Political Economy' }))
   writeFileSync(secondPdf, createTestPdf({ pages: 24, title: 'Knowledge and Power' }))
   writeFileSync(sourcePdfPath, createTestPdf({ pages: 4, title: 'Book One' }))
+  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source-reactivation') {
+    mkdirSync(dirname(targetVaultPdf), { recursive: true })
+    writeFileSync(targetVaultPdf, createTestPdf({ pages: 1, title: 'Book One' }))
+  }
   const printedContentsPdfPath = join(library, 'collection', 'Printed-Contents.pdf')
   writeFileSync(printedContentsPdfPath, createTestPdf({
     pages: 4,
@@ -325,6 +331,8 @@ export async function runSmokeTest({ window, projectRoot }) {
     '# Paperlight Markdown Notes',
     '',
     'These classifications operate within a broader framework of knowledge.',
+    '',
+    'Although the source is incomplete, it still reveals how these classifications shape the way readers interpret the argument.',
     '',
     '## Section two',
     '',
@@ -416,6 +424,35 @@ export async function runSmokeTest({ window, projectRoot }) {
   if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source' || process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source-reactivation') {
     try {
       await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'target PDF welcome screen' })
+      if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source-reactivation') {
+        // Recreate the lifecycle that precedes a Vault source jump: several
+        // workers have been active, their tabs close, then a PDF opens after
+        // switching away from and back to the reader.
+        wc.send('app:open-paths', [bigPdf, secondPdf])
+        await waitFor(wc, `document.querySelectorAll('.doc-tab').length >= 2 && document.querySelector('.reader-toolbar-title')?.textContent.includes('Foucault-liberal-political-economy.pdf')`, { label: 'PDF teardown fixtures opened' })
+        await ensureTextLayer(wc, 'first teardown fixture')
+        await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab')).find((tab) => tab.textContent.includes('Knowledge-and-Power.pdf'))?.click(); true`)
+        await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Knowledge-and-Power.pdf')`, { label: 'second teardown fixture active' })
+        await ensureTextLayer(wc, 'second teardown fixture')
+        for (const title of ['Foucault-liberal-political-economy.pdf', 'Knowledge-and-Power.pdf']) {
+          await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab')).find((tab) => tab.textContent.includes(${JSON.stringify(title)}))?.querySelector('.doc-tab-close')?.click(); true`)
+          await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes(${JSON.stringify(title)}))`, { label: `closed teardown fixture ${title}` })
+        }
+        wc.send('app:command', 'space-notes')
+        await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'leave reader before opening Vault PDF' })
+        wc.send('app:set-vault', targetVaultPath)
+        await waitFor(wc, `document.querySelector('.notes-tree-pane h2')?.title === ${JSON.stringify(targetVaultPath)}`, { label: 'focused PDF Vault selected' })
+        await waitFor(wc, `document.querySelector('.notes-tree-pane .vault-node.file.source .vault-node-toggle') !== null`, { label: 'focused Vault PDF is visible' })
+        await evaluate(wc, `document.querySelector('.notes-tree-pane .vault-node.file.source .vault-node-toggle').click(); true`)
+        await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'Vault tree opens the one-page PDF' })
+        const vaultText = await ensureTextLayer(wc, 'target one-page Vault PDF')
+        record('a one-page Vault PDF opened after PDF teardown has selectable text', vaultText.ok, JSON.stringify(vaultText))
+        if (!vaultText.ok) throw new Error(`Vault PDF failed: ${JSON.stringify(vaultText)}`)
+        await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close')?.click(); true`)
+        await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'focused Vault PDF closed' })
+        wc.send('app:command', 'space-reader')
+        record('closed PDF workers can be replaced after leaving and returning to the reader', true)
+      }
       wc.send('app:open-paths', [sourcePdfPath])
       await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'target source PDF opened' })
       if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source-reactivation') {
@@ -1306,6 +1343,31 @@ export async function runSmokeTest({ window, projectRoot }) {
       markdownQueryEvidence.dictionaryLinks.join(' | '))
 
     await evaluate(wc, `document.querySelector('[data-testid="assistant-mode-analysis"]').click(); true`)
+    const expectedMarkdownParagraph = await evaluate(wc, `(() => {
+      const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((item) => item.textContent === 'These classifications operate within a broader framework of knowledge.')
+      paragraph?.scrollIntoView({ block: 'center' })
+      const input = document.querySelector('#analysis-instruction')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(input, '分析当前段落')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      const scroller = document.querySelector('.reader-scroll.flow-scroll')
+      const area = scroller.getBoundingClientRect()
+      const probeY = area.top + Math.max(60, Math.min(scroller.clientHeight * 0.38, scroller.clientHeight - 40))
+      const candidates = Array.from(scroller.querySelectorAll('.flow-page > .flow-paragraph, .flow-page > .flow-quote, .flow-page > .flow-list, .flow-page > .flow-code'))
+        .filter((item) => { const rect = item.getBoundingClientRect(); return rect.height > 0 && rect.bottom >= area.top && rect.top <= area.bottom })
+      const target = candidates.find((item) => { const rect = item.getBoundingClientRect(); return rect.top <= probeY && rect.bottom >= probeY })
+        || candidates.reduce((best, item) => !best || Math.abs((item.getBoundingClientRect().top + item.getBoundingClientRect().bottom) / 2 - probeY) < Math.abs((best.getBoundingClientRect().top + best.getBoundingClientRect().bottom) / 2 - probeY) ? item : best, null)
+      return { visible: Boolean(paragraph && input), expectedText: target?.innerText || target?.textContent || '' }
+    })()`)
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-run-button"]').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="analysis-translation"]')?.textContent.startsWith('直译：')`, { label: 'current Markdown paragraph analysis' })
+    const currentParagraphEvidence = await evaluate(wc, `window.__analysisRequests?.at(-1) || null`)
+    const normaliseParagraph = (text) => String(text || '').replace(/\s+/gu, ' ').trim()
+    record('the current-paragraph instruction sends only the paragraph at the Markdown reading position',
+      currentParagraphEvidence?.source?.text
+        && normaliseParagraph(currentParagraphEvidence.source.text) === normaliseParagraph(expectedMarkdownParagraph.expectedText)
+        && currentParagraphEvidence.scopeLabel?.includes('当前段落'), JSON.stringify({ expected: expectedMarkdownParagraph, actual: currentParagraphEvidence }))
+
     await waitFor(wc, `document.querySelector('[data-testid="analysis-selected-button"]')`, { label: 'analysis mode for selected Markdown sentence' })
     await evaluate(wc, `document.querySelector('[data-testid="analysis-selected-button"]').click(); true`)
     await waitFor(wc, `document.querySelector('[data-testid="analysis-translation"]')?.textContent.startsWith('直译：')`, { label: 'separate translation result' })
@@ -1386,6 +1448,31 @@ export async function runSmokeTest({ window, projectRoot }) {
     await evaluate(wc, `document.querySelector('[data-testid="analysis-panel"] .analysis-instruction-actions .text-action').click(); true`)
     await waitFor(wc, `window.__analysisAbortObserved && !document.querySelector('.analysis-panel .loading-copy')`, { label: 'analysis cancellation settles' })
     record('stopping passage analysis aborts its request and restores the analysis controls', true)
+
+    await evaluate(wc, `document.querySelector('[data-testid="assistant-mode-query"]').click(); true`)
+    await evaluate(wc, `document.querySelector('.right-tabs button')?.click(); true`)
+    await evaluate(wc, `(() => {
+      const sentence = Array.from(document.querySelectorAll('.flow-paragraph')).find((item) => item.textContent?.startsWith('Although the source is incomplete'))
+      if (!sentence) return false
+      sentence.scrollIntoView({ block: 'center' })
+      const range = document.createRange()
+      range.selectNodeContents(sentence)
+      const selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.querySelector('.flow-scroll').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      document.querySelector('main')?.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }))
+      return true
+    })()`)
+    await waitFor(wc, `document.querySelector('#query-term')?.value === 'Although the source is'`, { label: 'complex sentence enters query field' })
+    const queryCountBeforeComplex = await evaluate(wc, `window.__queryRequests.length`)
+    await evaluate(wc, `document.querySelector('.query-go').click(); true`)
+    await waitFor(wc, `document.querySelector('[data-testid="query-module-syntax"]')`, { label: 'default syntax module for complex clause sentence' })
+    const complexQueryEvidence = await evaluate(wc, `({ request: window.__queryRequests?.at(-1) || null, defaultCalls: window.__queryRequests?.slice(${queryCountBeforeComplex}).filter((item) => item.task === 'default').length || 0, syntaxVisible: Boolean(document.querySelector('[data-testid="query-module-syntax"]')) })`)
+    record('a complex sentence with a subordinate clause receives syntax by default in one request',
+      complexQueryEvidence.defaultCalls === 1 && complexQueryEvidence.request?.isSentence === true
+        && complexQueryEvidence.request?.term === 'Although the source is'
+        && complexQueryEvidence.syntaxVisible, JSON.stringify(complexQueryEvidence))
     await screenshot(window, artifacts, '13-markdown.png')
 
     await installSenseStub(wc, { sense: {
@@ -1555,6 +1642,33 @@ export async function runSmokeTest({ window, projectRoot }) {
     record('EPUB markup is sanitized (no scripts, styles or inline CSS)', epubView.scripts === 0 && epubView.styles === 0 && epubView.inlineStyles === 0, JSON.stringify(epubView))
     record('EPUB images resolve to archive blobs and links open externally', String(epubView.image).startsWith('blob:') && epubView.linkTarget === 'https://example.com', `src=${String(epubView.image).slice(0, 24)}… href=${epubView.linkTarget}`)
 
+    await evaluate(wc, `document.querySelector('[data-testid="assistant-mode-analysis"]').click(); true`)
+    const expectedEpubParagraph = await evaluate(wc, `(() => {
+      const paragraph = Array.from(document.querySelectorAll('.epub-body p')).find((item) => item.textContent === 'These classifications operate within a broader framework of knowledge.')
+      paragraph?.scrollIntoView({ block: 'center' })
+      const input = document.querySelector('#analysis-instruction')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(input, '分析当前段落')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      const scroller = document.querySelector('.reader-scroll.flow-scroll')
+      const area = scroller.getBoundingClientRect()
+      const probeY = area.top + Math.max(60, Math.min(scroller.clientHeight * 0.38, scroller.clientHeight - 40))
+      const selector = '.epub-body p[data-paperlight-block-index], .epub-body blockquote[data-paperlight-block-index], .epub-body li[data-paperlight-block-index], .epub-body pre[data-paperlight-block-index], .epub-body dt[data-paperlight-block-index], .epub-body dd[data-paperlight-block-index]'
+      const candidates = Array.from(scroller.querySelectorAll(selector)).filter((item) => { const rect = item.getBoundingClientRect(); return rect.height > 0 && rect.bottom >= area.top && rect.top <= area.bottom })
+      const target = candidates.find((item) => { const rect = item.getBoundingClientRect(); return rect.top <= probeY && rect.bottom >= probeY })
+        || candidates.reduce((best, item) => !best || Math.abs((item.getBoundingClientRect().top + item.getBoundingClientRect().bottom) / 2 - probeY) < Math.abs((best.getBoundingClientRect().top + best.getBoundingClientRect().bottom) / 2 - probeY) ? item : best, null)
+      return { visible: Boolean(paragraph && input), expectedText: target?.innerText || target?.textContent || '' }
+    })()`)
+    const epubParagraphStart = await evaluate(wc, `window.__analysisRequests.length`)
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-run-button"]').click(); true`)
+    await waitFor(wc, `window.__analysisRequests.length > ${epubParagraphStart} && document.querySelector('[data-testid="analysis-translation"]')`, { label: 'current EPUB paragraph analysis' })
+    const epubParagraphEvidence = await evaluate(wc, `window.__analysisRequests?.at(-1) || null`)
+    record('the current-paragraph instruction sends only the EPUB paragraph at the reading position',
+      epubParagraphEvidence?.source?.text
+        && normaliseParagraph(epubParagraphEvidence.source.text) === normaliseParagraph(expectedEpubParagraph.expectedText)
+        && epubParagraphEvidence.source.sourceKind === 'epub'
+        && epubParagraphEvidence.scopeLabel?.includes('当前段落'), JSON.stringify({ expected: expectedEpubParagraph, actual: epubParagraphEvidence }))
+
     await evaluate(wc, `(() => {
       const tab = Array.from(document.querySelectorAll('.sidebar-tabs button')).find((b) => b.textContent.includes('目录'))
       tab.click()
@@ -1584,6 +1698,22 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Beta Chapter'`, { label: 'next chapter' })
     const chapterTwo = await evaluate(wc, `document.querySelector('.page-total')?.textContent || ''`)
     record('EPUB chapter navigation works from the toolbar', chapterTwo.includes('第 2 章'), chapterTwo)
+
+    const specifiedChapterStart = await evaluate(wc, `window.__analysisRequests.length`)
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('#analysis-instruction')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(input, '分析第 1 章')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-run-button"]').click(); true`)
+    await waitFor(wc, `window.__analysisRequests.length > ${specifiedChapterStart} && document.querySelector('[data-testid="analysis-translation"]')`, { label: 'specified EPUB chapter analysis' })
+    const specifiedChapter = await evaluate(wc, `window.__analysisRequests?.at(-1) || null`)
+    record('a specified EPUB chapter instruction analyzes that chapter from another active chapter',
+      specifiedChapter?.source?.pageNumber === 1
+        && specifiedChapter.source.text.includes('Alpha chapter lead-in 1')
+        && specifiedChapter.scopeLabel?.includes('Alpha Chapter'), JSON.stringify(specifiedChapter))
 
     // Selecting inside a chapter feeds the assistant, and the position persists.
     await evaluate(wc, `(() => {
@@ -1615,7 +1745,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     // ------------------------------------------------- notes vault workspace
     const vaultDir = join(library, 'paperlight-vault')
     mkdirSync(join(vaultDir, 'materials', 'books', 'book1'), { recursive: true })
-    writeFileSync(join(vaultDir, 'materials', 'books', 'book1', 'book1.pdf'), createTestPdf({ pages: 4, title: 'Book One' }))
+    writeFileSync(join(vaultDir, 'materials', 'books', 'book1', 'book1.pdf'), createTestPdf({ pages: 1, title: 'Book One' }))
     mkdirSync(join(vaultDir, 'notes', '_inbox'), { recursive: true })
     const legacyInboxFile = join(vaultDir, 'notes', '_inbox', 'Reading-Log.md')
     const originalLegacyInbox = Buffer.from('---\ntitle: Reading Log\nkind: note\n---\n\nvault 里已有的一份笔记：knowledge and power。This note includes numerous language learning terms for the local search test.\n')
@@ -1847,11 +1977,29 @@ export async function runSmokeTest({ window, projectRoot }) {
     record('a free-form Enlightenment research note links a source PDF and a saved note without modifying either source',
       researchLinksSaved && researchSourcesUntouched,
       JSON.stringify({ researchLinksSaved, researchSourcesUntouched, path: researchPath }))
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, `document.querySelector('.reader-toolbar') !== null`, { label: 'reader tabs visible before releasing background PDFs' })
+    // Release earlier PDF tabs before opening the Vault copy. The app keeps
+    // per-document workers alive while references remain, and parallel PDF
+    // workers made this end-to-end path intermittently time out.
+    for (const title of ['Foucault-liberal-political-economy.pdf', 'Knowledge-and-Power.pdf', 'Mixed-Geometry.pdf']) {
+      await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab')).find((tab) => tab.textContent.includes(${JSON.stringify(title)}))?.querySelector('.doc-tab-close')?.click(); true`)
+      await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes(${JSON.stringify(title)}))`, { label: `close completed background PDF ${title}` })
+    }
+    wc.send('app:command', 'space-notes')
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'research note restored before following its source link' })
+    await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes('research-argument-and-evidence.md')`, { label: 'research note remains active' })
+    await waitFor(wc, `Array.from(document.querySelectorAll('.note-sense-list button')).some((button) => button.title === ${JSON.stringify(researchMaterialPath)})`, { label: 'research source link is ready' })
     await evaluate(wc, `Array.from(document.querySelectorAll('.note-sense-list button')).find((button) => button.title === ${JSON.stringify(researchMaterialPath)})?.click(); true`)
-    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'research link returns to original material' })
-    const researchSourcePdfLayer = await ensureTextLayer(wc, 'research-linked source PDF')
-    record('a linked research source opens and renders the original PDF text', researchSourcePdfLayer.ok, JSON.stringify(researchSourcePdfLayer))
-    if (!researchSourcePdfLayer.ok) throw new Error(`research-linked PDF failed: ${JSON.stringify(researchSourcePdfLayer)}`)
+    const expectedResearchPdfPath = join(vaultDir, researchMaterialPath)
+    await waitFor(wc, `document.querySelector('.doc-tab.active')?.title === ${JSON.stringify(expectedResearchPdfPath)}`, { label: 'research link opens the original material path' })
+    record('a linked research source opens the exact original PDF path',
+      (await evaluate(wc, `document.querySelector('.doc-tab.active')?.title || ''`)) === expectedResearchPdfPath,
+      expectedResearchPdfPath)
+    await waitFor(wc, `document.querySelector('.reader-scroll')?.clientWidth > 0 && document.querySelector('.pdf-page-shell .pdf-page')?.getBoundingClientRect().width > 0`, { label: 'linked research PDF has a measurable reader viewport' })
+    const linkedResearchText = await ensureTextLayer(wc, 'linked research source PDF')
+    record('the linked research PDF renders selectable source text', linkedResearchText.ok, JSON.stringify(linkedResearchText))
+    if (!linkedResearchText.ok) throw new Error(`linked research PDF failed: ${JSON.stringify(linkedResearchText)}`)
     wc.send('app:command', 'space-notes')
     await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'return to research note' })
     await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes('research-argument-and-evidence.md')`, { label: 'research note restored' })
@@ -1859,10 +2007,6 @@ export async function runSmokeTest({ window, projectRoot }) {
     // Recognition is available directly from source text; deterministic exact
     // duplicates across PDF and EPUB accumulate separate contexts in one file.
     const expressionPdfPath = join(vaultDir, 'materials', 'books', 'book1', 'book1.pdf')
-    for (const title of ['Knowledge-and-Power.pdf', 'Mixed-Geometry.pdf']) {
-      await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab')).find((tab) => tab.textContent.includes(${JSON.stringify(title)}))?.querySelector('.doc-tab-close')?.click(); true`)
-      await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes(${JSON.stringify(title)}))`, { label: `close completed background PDF ${title}` })
-    }
     const selectPhrase = async (selector, phrase) => evaluate(wc, `(() => {
       const root = document.querySelector(${JSON.stringify(selector)})
       if (!root) return false
@@ -1922,6 +2066,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('.reader-toolbar') !== null`, { label: 'switch to reader for expression capture' })
     wc.send('app:open-paths', [expressionPdfPath])
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'vault source PDF opened' })
+    await waitFor(wc, `document.querySelector('.reader-scroll')?.clientWidth > 0 && document.querySelector('.pdf-page-shell .pdf-page')?.getBoundingClientRect().width > 0`, { label: 'vault source PDF has a measurable reader viewport' })
     const sourcePdfLayer = await ensureTextLayer(wc, 'vault source PDF')
     record('vault source PDF text layer is available for expression capture', sourcePdfLayer.ok, JSON.stringify(sourcePdfLayer))
     if (!sourcePdfLayer.ok) throw new Error(`vault source PDF text layer unavailable: ${JSON.stringify(sourcePdfLayer)}`)
@@ -1946,6 +2091,8 @@ export async function runSmokeTest({ window, projectRoot }) {
       document.querySelector('.right-tabs button')?.click()
       return true
     })()`)
+    const pdfWordSelection = await selectPhrase('.textLayer', 'stance')
+    await waitFor(wc, `document.querySelector('#query-term')?.value === 'stance'`, { label: 'single PDF word enters the query field' })
     const pdfQueryReady = await evaluate(wc, `({
       value: document.querySelector('#query-term')?.value || '',
       disabled: document.querySelector('.query-go')?.disabled ?? true,
@@ -1988,7 +2135,61 @@ export async function runSmokeTest({ window, projectRoot }) {
     await waitFor(wc, `document.querySelector('[data-testid="query-module-usage"]')`, { label: 'default usage module for PDF selection' })
     const usageModuleCall = await evaluate(wc, `window.__queryRequests?.at(-1) || null`)
     record('PDF language query sends surrounding source context to the combined default endpoint',
-      usageModuleCall?.task === 'default' && usageModuleCall.context.includes('The authors take a stance on language learning.'), JSON.stringify(usageModuleCall))
+      pdfWordSelection && usageModuleCall?.task === 'default' && usageModuleCall.term === 'stance'
+        && usageModuleCall.isSentence === false
+        && usageModuleCall.context.includes('The authors take a stance on language learning.'), JSON.stringify(usageModuleCall))
+    await waitFor(wc, `document.querySelector('.sense-meaning') !== null`, { label: 'contextual PDF word sense result' })
+    record('a single-word PDF query returns contextual meaning and usage together',
+      Boolean(await evaluate(wc, `document.querySelector('.sense-meaning')?.textContent && document.querySelector('[data-testid="query-module-usage"]')`)),
+      `wordSelected=${pdfWordSelection}; term=${usageModuleCall?.term}; sentence=${usageModuleCall?.isSentence}`)
+
+    const pdfPhraseRestored = await selectPhrase('.textLayer', 'The authors take a stance on language learning.')
+    await waitFor(wc, `document.querySelector('#query-term')?.value === 'The authors take a'`, { label: 'restore full PDF source selection before analysis' })
+    await evaluate(wc, `document.querySelector('[data-testid="assistant-mode-analysis"]').click(); true`)
+    record('the full source phrase remains selectable after the single-word PDF query', pdfPhraseRestored)
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('#analysis-instruction')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(input, '分析当前段落')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    const pageParagraphStart = await evaluate(wc, `window.__analysisRequests.length`)
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-run-button"]').click(); true`)
+    await waitFor(wc, `window.__analysisRequests.length > ${pageParagraphStart} && document.querySelector('[data-testid="analysis-translation"]')`, { label: 'PDF current paragraph analysis' })
+    const pdfParagraphEvidence = await evaluate(wc, `({ request: window.__analysisRequests?.at(-1) || null, pageText: document.querySelector('.pdf-page-shell[data-page-number="1"] .textLayer')?.textContent || '' })`)
+    record('the current-paragraph instruction limits PDF analysis to nearby text on the current page',
+      pdfParagraphEvidence.request?.source?.sourceKind === 'pdf'
+        && pdfParagraphEvidence.request?.source?.pageNumber === 1
+        && pdfParagraphEvidence.request?.scopeLabel?.includes('当前段落')
+        && pdfParagraphEvidence.request?.source?.text?.length > 0
+        && pdfParagraphEvidence.request.source.text.length < pdfParagraphEvidence.pageText.length,
+      JSON.stringify(pdfParagraphEvidence))
+
+    const pdfPageAnalysisStart = await evaluate(wc, `window.__analysisRequests.length`)
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('#analysis-instruction')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(input, '分析当前页')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    await evaluate(wc, `document.querySelector('[data-testid="analysis-run-button"]').click(); true`)
+    await waitFor(wc, `window.__analysisRequests.length > ${pdfPageAnalysisStart} && document.querySelector('[data-testid="analysis-translation"]')`, { label: 'current PDF page analysis' })
+    const requestedPdfPage = await evaluate(wc, `window.__analysisRequests?.at(-1) || null`)
+    record('the current-page instruction analyzes only the PDF page at the reading position',
+      requestedPdfPage?.source?.pageNumber === 1 && requestedPdfPage.source.text.includes('page 1 of 1'), JSON.stringify(requestedPdfPage))
+    await evaluate(wc, `document.querySelector('[data-testid="assistant-mode-query"]').click(); true`)
+    const queryAfterAnalysisStart = await evaluate(wc, `window.__queryRequests.length`)
+    await evaluate(wc, `(() => {
+      const input = document.querySelector('#query-term')
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'stance')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.querySelector('.query-go').click()
+      return true
+    })()`)
+    await waitFor(wc, `window.__queryRequests.length > ${queryAfterAnalysisStart} && document.querySelector('[data-testid="query-module-usage"]') !== null`, { label: 'PDF language query after returning from analysis' })
 
     await evaluate(wc, `document.querySelector('[data-testid="save-dictionary-links"]').click(); true`)
     await waitFor(wc, `document.querySelector('[data-testid="save-dictionary-links"]')?.disabled`, { label: 'dictionary links saved to the smoke Vault' })
@@ -2455,7 +2656,8 @@ export async function runSmokeTest({ window, projectRoot }) {
       source.click()
       return true
     })()`)
-    await waitFor(wc, `Array.from(document.querySelectorAll('.doc-tab-name')).some((n) => n.textContent.includes('book1'))`, { label: 'material opened in the reader' })
+    await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'material opened in the reader' })
+    await waitFor(wc, `document.querySelector('.reader-scroll')?.clientWidth > 0 && document.querySelector('.pdf-page-shell .pdf-page')?.getBoundingClientRect().width > 0`, { label: 'material reader viewport is measurable' })
     const materialText = await ensureTextLayer(wc, 'material text layer')
     record('a material from materials/ opens in the reading desk', materialText.ok, JSON.stringify(materialText))
 
@@ -3016,6 +3218,14 @@ export async function runSmokeTest({ window, projectRoot }) {
     const mergeCandidateCount = await evaluate(wc, `document.querySelectorAll('.semantic-merge-candidate').length`)
     await evaluate(wc, `document.querySelector('.semantic-merge-candidate .secondary-button').click(); true`)
     await waitFor(wc, `!document.querySelector('.semantic-merge-review') && document.querySelector('.sense-add.added')`, { label: 'confirmed semantic merge' })
+    await waitFor(wc, `(() => {
+      const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+      const atom = (state.notebook?.atoms || []).find((item) => item.id === 'within|preposition|inside-framework')
+      const contexts = atom?.contexts || []
+      return contexts.some((context) => context.sourcePath === ${JSON.stringify(bigPdf)})
+        && contexts.some((context) => context.sourcePath === ${JSON.stringify(expressionPdfPath)})
+        && (atom?.alternateSemanticIds || []).includes('within|preposition|limited-range')
+    })()`, { label: 'confirmed semantic contexts persist to app state' })
     const mergedWithin = await evaluate(wc, `(() => {
       const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
       const atoms = (state.notebook?.atoms || []).filter((atom) => atom.lemma === 'within')
@@ -3094,15 +3304,16 @@ export async function runSmokeTest({ window, projectRoot }) {
     await evaluate(wc, `Array.from(document.querySelectorAll('.vault-action-row .vault-button')).find((button) => button.textContent.includes('语义存入 vault')).click(); true`)
     const withinNotePath = join(vaultDir, 'notes', 'books', 'book1', 'within--inside-framework.md')
     let withinNote = ''
-    for (let attempt = 0; attempt < 30 && !withinNote; attempt += 1) {
+    const hasConfirmedContexts = () => withinNote.includes('alternateSemanticIds: [')
+      && withinNote.includes('within|preposition|limited-range')
+      && withinNote.includes('within|preposition|inside-framework-note')
+      && withinNote.includes('Foucault-liberal-political-economy.pdf') && withinNote.includes('book1.pdf')
+    for (let attempt = 0; attempt < 60 && !hasConfirmedContexts(); attempt += 1) {
       await sleep(200)
       try { withinNote = readFileSync(withinNotePath, 'utf8') } catch { withinNote = '' }
     }
     record('confirmed semantic IDs and source contexts persist in Vault Markdown',
-      withinNote.includes('alternateSemanticIds: [')
-        && withinNote.includes('within|preposition|limited-range')
-        && withinNote.includes('within|preposition|inside-framework-note')
-        && withinNote.includes('Foucault-liberal-political-economy.pdf') && withinNote.includes('book1.pdf'),
+      hasConfirmedContexts(),
       withinNote.split('\n').slice(0, 12).join(' | '))
     record('a V1 sense Markdown file upgrades in place without overwriting the user body',
       existsSync(legacySemanticPath)
