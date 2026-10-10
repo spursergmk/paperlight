@@ -32,6 +32,7 @@ import {
 import { openEpub, type EpubBook, type EpubOutlineItem } from './lib/epub'
 import { displayNameForPath, fileSystem } from './lib/fsaccess'
 import { isAbortError } from './lib/abort'
+import { markerRangeInElement } from './lib/markers'
 import {
   outlineFromBlocks, parseTextDocument, type MarkdownBlock, type TextOutlineItem,
 } from './lib/textdoc'
@@ -50,7 +51,7 @@ import {
 import { activeReadingInterval, recordReadingInterval, READING_TICK_INTERVAL_MS } from './lib/readingActivity'
 import {
   absoluteVaultPath, isValidTimeOfDay, localDateKey, mirrorFolderForMaterial, noteFolderPath,
-  readerAnswerPath, remapLegacyNotePath, semanticAnswerMarkdown,
+  readerAnswerPath, remapLegacyNotePath, resolveLegacyInboxPath, semanticAnswerMarkdown,
 } from './lib/vault'
 import {
   getApiConfigStatus, protocolForBaseUrl, removeApiKey, saveApiKey, translateSelection,
@@ -138,6 +139,80 @@ function captureFlowBookmark(scroller: HTMLElement): Pick<InputMarker, 'quote' |
     ...(bookmarkText(previous) ? { before: bookmarkText(previous).slice(-100) } : {}),
     ...(bookmarkText(next) ? { after: bookmarkText(next).slice(0, 100) } : {}),
     ...(blockIndex ? { blockIndex: Number(blockIndex) } : {}),
+  }
+}
+
+function capturePdfBookmark(scroller: HTMLElement, fallbackPage: number): Pick<InputMarker, 'quote' | 'before' | 'after' | 'pageNumber' | 'startOffset' | 'endOffset'> {
+  const area = scroller.getBoundingClientRect()
+  const probeY = area.top + Math.min(190, Math.max(85, scroller.clientHeight * 0.3))
+  const pages = Array.from(scroller.querySelectorAll<HTMLElement>('.pdf-page-shell[data-page-number]'))
+  const page = pages.find((candidate) => {
+    const rect = candidate.getBoundingClientRect()
+    return rect.top <= probeY && rect.bottom >= probeY
+  }) || pages.reduce<HTMLElement | null>((closest, candidate) => {
+    if (!closest) return candidate
+    const distance = (element: HTMLElement) => {
+      const rect = element.getBoundingClientRect()
+      return probeY < rect.top ? rect.top - probeY : probeY > rect.bottom ? probeY - rect.bottom : 0
+    }
+    return distance(candidate) < distance(closest) ? candidate : closest
+  }, null)
+  if (!page) return { pageNumber: fallbackPage }
+  const pageNumber = Number(page.dataset.pageNumber) || fallbackPage
+  const textLayer = page.querySelector<HTMLElement>('.textLayer')
+  if (!textLayer) return { pageNumber }
+  // PDF.js exposes positioned text runs instead of semantic paragraphs. Rebuild
+  // lines from their baselines, then use the larger vertical gaps as paragraph
+  // boundaries so a bookmark can still return to actual source text.
+  const spans = Array.from(textLayer.querySelectorAll<HTMLElement>('span'))
+    .map((element) => ({ text: tidyText(element.textContent || ''), rect: element.getBoundingClientRect() }))
+    .filter((item) => item.text && item.rect.width > 0 && item.rect.height > 0)
+  if (!spans.length) return { pageNumber }
+  const heights = spans.map((item) => item.rect.height).sort((a, b) => a - b)
+  const typicalLineHeight = heights[Math.floor(heights.length / 2)]
+  const lineTolerance = Math.max(2, typicalLineHeight * 0.45)
+  const lines: Array<{ top: number; bottom: number; height: number; parts: typeof spans }> = []
+  for (const item of [...spans].sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)) {
+    const line = lines.find((candidate) => Math.abs(candidate.top - item.rect.top) <= lineTolerance)
+    if (line) {
+      line.parts.push(item)
+      line.top = Math.min(line.top, item.rect.top)
+      line.bottom = Math.max(line.bottom, item.rect.bottom)
+      line.height = Math.max(line.height, item.rect.height)
+    } else lines.push({ top: item.rect.top, bottom: item.rect.bottom, height: item.rect.height, parts: [item] })
+  }
+  const orderedLines = lines.sort((a, b) => a.top - b.top)
+  const paragraphs: Array<{ top: number; bottom: number; lines: typeof orderedLines; text: string }> = []
+  for (const line of orderedLines) {
+    const previous = paragraphs[paragraphs.length - 1]
+    const lineText = line.parts.sort((a, b) => a.rect.left - b.rect.left).map((part) => part.text).join(' ')
+    const gap = previous ? line.top - previous.bottom : Number.POSITIVE_INFINITY
+    if (previous && gap <= Math.max(4, line.height * 0.7)) {
+      previous.lines.push(line)
+      previous.bottom = Math.max(previous.bottom, line.bottom)
+      previous.text = tidyText(`${previous.text} ${lineText}`)
+    } else paragraphs.push({ top: line.top, bottom: line.bottom, lines: [line], text: lineText })
+  }
+  const target = paragraphs.reduce((closest, item) => {
+    const distance = probeY < item.top ? item.top - probeY : probeY > item.bottom ? probeY - item.bottom : 0
+    const closestDistance = probeY < closest.top ? closest.top - probeY : probeY > closest.bottom ? probeY - closest.bottom : 0
+    return distance < closestDistance ? item : closest
+  })
+  const quote = target.text.slice(0, 1600)
+  const sourceText = paragraphs.map((item) => item.text).join(' ')
+  const startOffset = sourceText.indexOf(quote)
+  const targetIndex = paragraphs.indexOf(target)
+  const previous = paragraphs[targetIndex - 1]?.text || ''
+  const next = paragraphs[targetIndex + 1]?.text || ''
+  return {
+    pageNumber,
+    ...(quote ? { quote } : {}),
+    ...(startOffset >= 0 ? {
+      startOffset,
+      endOffset: startOffset + quote.length,
+      before: previous.slice(-100),
+      after: next.slice(0, 100),
+    } : {}),
   }
 }
 
@@ -465,13 +540,15 @@ function App() {
 
   /** Opens a vault note and brings the notes desk to the front. */
   const openNoteInNotesSpace = useCallback((path: string) => {
+    const known = new Set(vaultApi.files.filter((entry) => !entry.directory).map((entry) => entry.path))
+    const resolvedPath = resolveLegacyInboxPath(path, known)
     setNotesSpace((current) => ({
       ...current,
-      openPaths: current.openPaths.includes(path) ? current.openPaths : [...current.openPaths, path],
-      activePath: path,
+      openPaths: current.openPaths.includes(resolvedPath) ? current.openPaths : [...current.openPaths, resolvedPath],
+      activePath: resolvedPath,
     }))
     setState((prev) => ({ ...prev, activeSpace: 'notes' }))
-  }, [setNotesSpace])
+  }, [setNotesSpace, vaultApi.files])
 
   const openNote = useCallback((path: string, options?: { background?: boolean }) => {
     if (!path) return
@@ -937,7 +1014,10 @@ function App() {
       return
     }
     const existing = docsRef.current[path]
-    if (!force && existing?.status === 'ready' && existing.kind === kind) return
+    // Opening the same path again while its first load is still in flight must
+    // reuse that load. Starting a second PDF load for the same cache key races
+    // page metadata/render work and leaks the first cache reference.
+    if (!force && existing?.kind === kind && (existing.status === 'ready' || existing.status === 'loading')) return
 
     // A generation token per path: closing (and reopening) a tab while its file
     // is still loading must not let the stale load write into the new tab.
@@ -1542,13 +1622,19 @@ function App() {
     const scrollMax = scroller ? Math.max(0, scroller.scrollHeight - scroller.clientHeight) : 0
     const scrollRatio = scroller && scrollMax > 4 ? scroller.scrollTop / scrollMax : activeTab.scrollRatio ?? 0
     const sourceKind: InputMarker['sourceKind'] = activeDoc.kind === 'pdf' ? 'pdf' : activeDoc.kind === 'epub' ? 'epub' : 'text'
-    const position: Pick<InputMarker, 'quote' | 'before' | 'after' | 'blockIndex'> = sourceKind === 'pdf'
-      ? {}
+    const position: Pick<InputMarker, 'quote' | 'before' | 'after' | 'blockIndex' | 'pageNumber' | 'startOffset' | 'endOffset'> = sourceKind === 'pdf'
+      ? scroller ? capturePdfBookmark(scroller, activeTab.pageNumber || 1) : { pageNumber: activeTab.pageNumber || 1 }
       : scroller ? captureFlowBookmark(scroller) : {}
     const duplicate = activeInputMarkers.find((marker) => {
       if (marker.purpose !== 'progress' || marker.sourcePath !== activePath) return false
-      if (sourceKind === 'pdf') return marker.pageNumber === activeTab.pageNumber
       const quote = bookmarkText(position.quote || '')
+      if (sourceKind === 'pdf' && quote && marker.quote) {
+        return marker.pageNumber === (position.pageNumber || activeTab.pageNumber)
+          && bookmarkText(marker.quote) === quote
+          && (marker.startOffset === position.startOffset
+            || (bookmarkText(marker.before || '') === bookmarkText(position.before || '')
+              && bookmarkText(marker.after || '') === bookmarkText(position.after || '')))
+      }
       if (quote && marker.quote) return bookmarkText(marker.quote) === quote
       return marker.pageNumber === activeTab.pageNumber && Math.abs((marker.scrollRatio ?? -1) - scrollRatio) < 0.015
     })
@@ -1566,15 +1652,20 @@ function App() {
       sourcePath: activePath,
       sourceKind,
       purpose: 'progress',
-      pageNumber: activeTab.pageNumber || 1,
+      pageNumber: position.pageNumber || activeTab.pageNumber || 1,
       locationLabel,
-      ...(sourceKind === 'pdf' ? {} : { scrollRatio, ...position }),
+      scrollRatio,
+      ...position,
       comment: `阅读进度${locationLabel ? ` · ${locationLabel}` : position.quote ? ` · ${position.quote.slice(0, 44)}` : ''}`,
       createdAt: new Date().toISOString(),
     }
     setState((current) => ({ ...current, inputMarkers: [...current.inputMarkers, saved] }))
     setInputMarkerMenuOpen(true)
-    setInputMarkerNotice(position.quote ? '当前位置和段落已加入阅读书签。' : '阅读位置已加入书签。')
+    setInputMarkerNotice(position.quote
+      ? '当前位置和段落已加入阅读书签。'
+      : activeDoc.kind === 'pdf'
+        ? 'PDF 当前页已加入书签；该页没有可定位的文本层。'
+        : '阅读位置已加入书签。')
     window.setTimeout(() => setInputMarkerNotice(''), 3000)
   }
 
@@ -1623,6 +1714,32 @@ function App() {
     window.setTimeout(find, 60)
   }, [])
 
+  const restorePdfBookmark = useCallback((marker: InputMarker) => {
+    if (!marker.quote) return
+    pageApiRef.current?.scrollToPage(marker.pageNumber || 1)
+    let attempt = 0
+    const find = () => {
+      if (stateRef.current.session.activePath !== marker.sourcePath) return
+      const scroller = document.querySelector<HTMLElement>('.reader-scroll')
+      const page = scroller?.querySelector<HTMLElement>(`.pdf-page-shell[data-page-number="${marker.pageNumber || 1}"]`)
+      const textLayer = page?.querySelector<HTMLElement>('.textLayer')
+      const range = textLayer ? markerRangeInElement(textLayer, marker) : null
+      const rect = range?.getBoundingClientRect()
+      if (scroller && rect && rect.width > 0 && rect.height > 0) {
+        const offset = rect.top - scroller.getBoundingClientRect().top - 120
+        if (Math.abs(offset) > 4) scroller.scrollTop = Math.max(0, scroller.scrollTop + offset)
+        return
+      }
+      if (attempt++ < 36) {
+        window.setTimeout(find, 80)
+        return
+      }
+      setInputMarkerNotice('找不到书签中的原文行，已定位到所在页；材料内容可能已改变。')
+      window.setTimeout(() => setInputMarkerNotice(''), 4500)
+    }
+    window.setTimeout(find, 80)
+  }, [])
+
   const jumpToInputMarker = (marker: InputMarker) => {
     if (activeDoc?.kind === 'epub') setEpubAlignmentTail(null)
     setInputMarkerMenuOpen(false)
@@ -1650,7 +1767,10 @@ function App() {
       }
       return
     }
-    if (activeDoc?.kind === 'pdf') pageApiRef.current?.scrollToPage(marker.pageNumber || 1)
+    if (activeDoc?.kind === 'pdf') {
+      pageApiRef.current?.scrollToPage(marker.pageNumber || 1)
+      window.setTimeout(() => restorePdfBookmark(marker), 100)
+    }
     else if (activeDoc?.kind === 'epub') {
       handleChapterChange((marker.pageNumber || 1) - 1)
       window.setTimeout(() => restoreFlowBookmark(marker), 80)
@@ -2011,7 +2131,10 @@ function App() {
 
   useEffect(() => {
     if (!pendingSourceJump || pendingSourceJump.path !== activePath || activeDoc?.status !== 'ready') return
-    if (activeDoc.kind === 'pdf') pageApiRef.current?.scrollToPage(pendingSourceJump.position)
+    if (activeDoc.kind === 'pdf') {
+      pageApiRef.current?.scrollToPage(pendingSourceJump.position)
+      if (pendingSourceJump.marker) window.setTimeout(() => restorePdfBookmark(pendingSourceJump.marker!), 100)
+    }
     else if (activeDoc.kind === 'epub') {
       handleChapterChange(pendingSourceJump.position - 1)
       if (pendingSourceJump.marker) window.setTimeout(() => restoreFlowBookmark(pendingSourceJump.marker!), 80)
@@ -2027,7 +2150,7 @@ function App() {
       } else if (pendingSourceJump.position > 1) flowApiRef.current?.scrollBy((pendingSourceJump.position - 1) * 480)
     }
     setPendingSourceJump(null)
-  }, [activeDoc, activePath, handleChapterChange, pendingSourceJump, restoreFlowBookmark])
+  }, [activeDoc, activePath, handleChapterChange, pendingSourceJump, restoreFlowBookmark, restorePdfBookmark])
 
   // PDF reports a pixel offset; the reflowing readers report a ratio as well so
   // the position survives window/splitter resizes that change the text height.
@@ -2744,7 +2867,6 @@ function App() {
       {inputMarkerDraft && <section
         className="input-marker-composer"
         style={{ left: `${inputMarkerDraft.x}px`, top: `${inputMarkerDraft.y}px` }}
-        onMouseDown={(event) => event.preventDefault()}
         aria-label="创建输入标记"
       >
         <header><div><span className="eyebrow">INPUT MARK</span><h2>标记这段输入</h2></div><button type="button" className="tiny-icon" aria-label="关闭" onClick={() => setInputMarkerDraft(null)}><X size={13} /></button></header>

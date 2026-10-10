@@ -30,6 +30,21 @@ async function evaluate(webContents, expression) {
   return webContents.executeJavaScript(expression, true)
 }
 
+async function clickElement(webContents, selector) {
+  const point = await evaluate(webContents, `(() => {
+    const element = document.querySelector(${JSON.stringify(selector)})
+    if (!element) return null
+    const rect = element.getBoundingClientRect()
+    return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), visible: rect.width > 0 && rect.height > 0 }
+  })()`)
+  if (!point?.visible) throw new Error(`cannot click invisible element: ${selector}`)
+  webContents.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y })
+  webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: point.x, y: point.y })
+  webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: point.x, y: point.y })
+  await sleep(60)
+  return evaluate(webContents, `(() => { const active = document.activeElement; return Boolean(active && (active.matches(${JSON.stringify(selector)}) || active.closest(${JSON.stringify(selector)}))) })()`)
+}
+
 async function waitFor(webContents, expression, { timeout = 20000, interval = 120, label = expression } = {}) {
   const started = Date.now()
   let lastEvaluationError = null
@@ -341,14 +356,28 @@ export async function runSmokeTest({ window, projectRoot }) {
     errors: (window.__paperlightErrors || []).slice(-6),
   }))()`
 
-  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source') {
+  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source' || process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source-reactivation') {
     try {
       await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'target PDF welcome screen' })
       wc.send('app:open-paths', [sourcePdfPath])
       await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'target source PDF opened' })
+      if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source-reactivation') {
+        // A second open while the first request is still completing must reuse
+        // the in-flight document load instead of racing a second cache acquire.
+        wc.send('app:open-paths', [sourcePdfPath])
+      }
       const firstPage = await ensureTextLayer(wc, 'target source PDF first page', { timeout: 25000 })
       record('target source PDF first page has selectable text', firstPage.ok, JSON.stringify(firstPage))
       if (!firstPage.ok) throw new Error(`first page failed: ${JSON.stringify(firstPage)}`)
+      if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-source-reactivation') {
+        wc.send('app:command', 'space-notes')
+        await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'leave PDF reader for notes' })
+        wc.send('app:command', 'space-reader')
+        await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'return to the existing PDF tab' })
+        const reactivated = await ensureTextLayer(wc, 'reactivated source PDF first page', { timeout: 25000 })
+        record('the existing PDF text layer renders again after leaving and returning to the reader', reactivated.ok, JSON.stringify(reactivated))
+        if (!reactivated.ok) throw new Error(`reactivated PDF failed: ${JSON.stringify(reactivated)}`)
+      }
       await evaluate(wc, `(() => {
         const input = document.querySelector('.page-number-input')
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
@@ -362,6 +391,57 @@ export async function runSmokeTest({ window, projectRoot }) {
       record('target source PDF page 2 renders a selectable text layer', true)
     } catch (error) {
       record('target PDF render run completed', false, error instanceof Error ? error.stack || error.message : String(error))
+    }
+    const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
+    writeFileSync(join(artifacts, 'smoke-target-report.json'), JSON.stringify(report, null, 2))
+    console.log(`${failures === 0 ? 'TARGET SMOKE OK' : `TARGET SMOKE FAILED (${failures})`}`)
+    app.exit(failures === 0 ? 0 : 1)
+    return report
+  }
+
+  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'pdf-bookmark') {
+    try {
+      await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'target PDF bookmark welcome screen' })
+      wc.send('app:open-paths', [sourcePdfPath])
+      await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'target PDF bookmark source opened' })
+      const layer = await ensureTextLayer(wc, 'target PDF bookmark first page', { timeout: 25000 })
+      record('target PDF bookmark page has selectable text', layer.ok, JSON.stringify(layer))
+      if (!layer.ok) throw new Error(`PDF text layer failed: ${JSON.stringify(layer)}`)
+      await evaluate(wc, `(() => {
+        const scroller = document.querySelector('.reader-scroll')
+        const line = Array.from(document.querySelectorAll('.pdf-page-shell[data-page-number="1"] .textLayer span')).find((span) => span.textContent.includes('The authors take a stance on language learning.'))
+        if (!scroller || !line) throw new Error('unique PDF paragraph was not found')
+        const delta = line.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 150
+        scroller.scrollTop = Math.max(0, scroller.scrollTop + delta)
+        scroller.dispatchEvent(new Event('scroll', { bubbles: true }))
+        return true
+      })()`)
+      await sleep(120)
+      await evaluate(wc, `document.querySelector('.input-marker-menu-toggle').click(); true`)
+      await evaluate(wc, `document.querySelector('.input-marker-progress').click(); true`)
+      const saved = await waitFor(wc, `(() => {
+        const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}')
+        return (state.inputMarkers || []).find((item) => item.sourcePath === ${JSON.stringify(sourcePdfPath)} && item.purpose === 'progress') || null
+      })()`, { label: 'target PDF paragraph bookmark persisted' })
+      record('PDF bookmark stores the paragraph quote and page position', saved.pageNumber === 1 && saved.quote?.includes('The authors take a stance on language learning.'), JSON.stringify(saved))
+      await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
+      await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('book1.pdf'))`, { label: 'target PDF bookmark source closed' })
+      wc.send('app:open-paths', [sourcePdfPath])
+      await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'target PDF bookmark source reopened' })
+      await ensureTextLayer(wc, 'reopened target PDF bookmark page', { timeout: 25000 })
+      await evaluate(wc, `if (!document.querySelector('.input-marker-menu')) document.querySelector('.input-marker-menu-toggle').click(); true`)
+      await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.textContent.includes('The authors take a stance on language learning.'))`, { label: 'target PDF paragraph bookmark restored in menu' })
+      await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).find((item) => item.textContent.includes('The authors take a stance on language learning.')).querySelector('button:first-child').click(); true`)
+      const restored = await waitFor(wc, `(() => {
+        const scroller = document.querySelector('.reader-scroll')
+        const page = document.querySelector('.pdf-page-shell[data-page-number="1"]')
+        const span = Array.from(page?.querySelectorAll('.textLayer span') || []).find((item) => item.textContent.includes('The authors take a stance on language learning.'))
+        const top = span && scroller ? span.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null
+        return top !== null && top >= 50 && top <= 220 ? { top, page: document.querySelector('.page-number-input')?.value } : null
+      })()`, { label: 'target PDF bookmark restores the original passage in view', timeout: 8000 })
+      record('reopened PDF bookmark returns to and aligns the original paragraph', restored?.page === '1' && restored.top >= 50 && restored.top <= 220, JSON.stringify(restored))
+    } catch (error) {
+      record('target PDF paragraph bookmark run completed', false, error instanceof Error ? error.stack || error.message : String(error))
     }
     const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
     writeFileSync(join(artifacts, 'smoke-target-report.json'), JSON.stringify(report, null, 2))
@@ -384,6 +464,47 @@ export async function runSmokeTest({ window, projectRoot }) {
       record('target EPUB fragment entry scrolls from below to its heading', after.id === 'section-1' && before.top > 130 && after.top < 80 && after.scrollTop > before.scrollTop, JSON.stringify({ before, after }))
     } catch (error) {
       record('target EPUB outline run completed', false, error instanceof Error ? error.stack || error.message : String(error))
+    }
+    const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
+    writeFileSync(join(artifacts, 'smoke-target-report.json'), JSON.stringify(report, null, 2))
+    console.log(`${failures === 0 ? 'TARGET SMOKE OK' : `TARGET SMOKE FAILED (${failures})`}`)
+    app.exit(failures === 0 ? 0 : 1)
+    return report
+  }
+
+  if (process.env.PAPERLIGHT_SMOKE_TARGET === 'inbox-migration') {
+    try {
+      await waitFor(wc, `document.querySelector('.welcome-card') !== null`, { label: 'target inbox migration welcome screen' })
+      const migrationVault = join(library, 'paperlight-vault-inbox-migration')
+      const legacyDir = join(migrationVault, 'notes', '_inbox')
+      const canonicalDir = join(migrationVault, 'notes', 'inbox')
+      const movedNote = Buffer.from('# Move\n\n旧笔记正文。\n')
+      const duplicateNote = Buffer.from('# Duplicate\n\n完全相同。\n')
+      const legacyConflict = Buffer.from('# Collision\n\n旧内容。\n')
+      const canonicalConflict = Buffer.from('# Collision\n\n新内容。\n')
+      const unrecognizedFile = Buffer.from([0, 1, 2, 255])
+      mkdirSync(legacyDir, { recursive: true })
+      mkdirSync(canonicalDir, { recursive: true })
+      writeFileSync(join(legacyDir, 'Move.md'), movedNote)
+      writeFileSync(join(legacyDir, 'Duplicate.md'), duplicateNote)
+      writeFileSync(join(canonicalDir, 'Duplicate.md'), duplicateNote)
+      writeFileSync(join(legacyDir, 'Collision.md'), legacyConflict)
+      writeFileSync(join(canonicalDir, 'Collision.md'), canonicalConflict)
+      writeFileSync(join(legacyDir, 'archive.dat'), unrecognizedFile)
+      wc.send('app:set-vault', migrationVault)
+      await waitFor(wc, `document.querySelector('.vault-notice')?.textContent.includes('同名内容不同')`, { label: 'legacy inbox conflict handling notice' })
+      record('legacy Markdown migrates after copy verification and identical files deduplicate safely',
+        readFileSync(join(canonicalDir, 'Move.md')).equals(movedNote)
+          && !existsSync(join(legacyDir, 'Move.md'))
+          && readFileSync(join(canonicalDir, 'Duplicate.md')).equals(duplicateNote)
+          && !existsSync(join(legacyDir, 'Duplicate.md')))
+      record('conflicting legacy Markdown and unrecognized files remain intact without overwrite',
+        readFileSync(join(legacyDir, 'Collision.md')).equals(legacyConflict)
+          && readFileSync(join(canonicalDir, 'Collision.md')).equals(canonicalConflict)
+          && readFileSync(join(legacyDir, 'archive.dat')).equals(unrecognizedFile)
+          && existsSync(legacyDir))
+    } catch (error) {
+      record('target legacy inbox migration run completed', false, error instanceof Error ? error.stack || error.message : String(error))
     }
     const report = { ok: failures === 0, failures, results: RESULTS, artifacts }
     writeFileSync(join(artifacts, 'smoke-target-report.json'), JSON.stringify(report, null, 2))
@@ -454,14 +575,20 @@ export async function runSmokeTest({ window, projectRoot }) {
       await waitFor(wc, `document.querySelector('.input-mark-inline') !== null`, { label: 'target Markdown selection action' })
       await evaluate(wc, `document.querySelector('.input-mark-inline').click(); true`)
       await waitFor(wc, `document.querySelector('.input-marker-composer') !== null`, { label: 'target Markdown mark composer' })
+      const visualControlFocused = await clickElement(wc, '.input-marker-visual-choice select')
       await evaluate(wc, `(() => {
         const select = document.querySelector('.input-marker-visual-choice select')
         const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
-        setter.call(select, 'underline')
+        setter.call(select, 'highlight')
         select.dispatchEvent(new Event('change', { bubbles: true }))
-        document.querySelector('.input-marker-composer > footer .primary-button').click()
         return true
       })()`)
+      const commentControlFocused = await clickElement(wc, '.input-marker-comment textarea')
+      wc.insertText('回看时比较这里的措辞。')
+      const commentEntered = await evaluate(wc, `document.querySelector('.input-marker-comment textarea')?.value === '回看时比较这里的措辞。'`)
+      const purposeControlClicked = await clickElement(wc, '.input-marker-purpose button:last-child')
+      const contentPurposeSelected = await evaluate(wc, `document.querySelector('.input-marker-purpose button:last-child')?.classList.contains('active')`)
+      await clickElement(wc, '.input-marker-composer > footer .primary-button')
       await waitFor(wc, `Number(document.querySelector('.input-marker-overlay')?.dataset.renderedRects || 0) > 0 || Number(document.querySelector('.input-marker-overlay')?.dataset.unresolvedCount || 0) > 0`, { label: 'target marker overlay layout result' })
       const detail = await evaluate(wc, `(() => {
         const marker = (JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}').inputMarkers || []).find((item) => item.quote === 'reflowed reading position')
@@ -469,14 +596,15 @@ export async function runSmokeTest({ window, projectRoot }) {
         const rect = (() => { const range = document.createRange(); const node = Array.from(document.querySelectorAll('.flow-page *')).find((item) => item.childNodes.length === 1 && item.firstChild?.nodeType === Node.TEXT_NODE && item.textContent.includes(marker?.quote))?.firstChild; if (!node) return null; const start = node.textContent.indexOf(marker.quote); range.setStart(node, start); range.setEnd(node, start + marker.quote.length); const item = range.getBoundingClientRect(); return { width: item.width, height: item.height } })()
         return { selected: ${selected}, marker, rects: overlay?.dataset.renderedRects || '', unresolved: overlay?.dataset.unresolvedCount || '', rect }
       })()`)
-      record('target Markdown quote creates a rendered visual marker', Number(detail.rects) > 0, JSON.stringify(detail))
+      record('target mark form accepts visual style and comment through focused controls', visualControlFocused && commentControlFocused && commentEntered && purposeControlClicked && contentPurposeSelected && detail.marker?.purpose === 'content' && detail.marker?.visualStyle === 'highlight' && detail.marker?.comment === '回看时比较这里的措辞。', JSON.stringify({ visualControlFocused, commentControlFocused, commentEntered, purposeControlClicked, contentPurposeSelected, marker: detail.marker }))
+      record('target Markdown quote creates a rendered visual marker', Number(detail.rects) > 0 && Number(detail.unresolved) === 0, JSON.stringify(detail))
       await evaluate(wc, `document.querySelector('.doc-tab.active .doc-tab-close').click(); true`)
       await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab-name')).some((tab) => tab.textContent.includes('Reading-Notes.md'))`, { label: 'target marked Markdown closed' })
       wc.send('app:open-paths', [markdownPath])
       await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Reading-Notes.md')`, { label: 'target marked Markdown reopened' })
-      await waitFor(wc, `document.querySelector('.input-marker-visual.underline') !== null`, { label: 'target saved visual marker restored after reopening' })
+      await waitFor(wc, `document.querySelector('.input-marker-visual.highlight') !== null`, { label: 'target saved visual marker restored after reopening' })
       const restored = await evaluate(wc, `(() => ({ rects: document.querySelector('.input-marker-overlay')?.dataset.renderedRects || '0', unresolved: document.querySelector('.input-marker-overlay')?.dataset.unresolvedCount || '0' }))()`)
-      record('target saved source quote renders a visual mark after reopen', Number(restored.rects) > 0, JSON.stringify(restored))
+      record('target saved source quote renders a visual mark after reopen', Number(restored.rects) > 0 && Number(restored.unresolved) === 0, JSON.stringify(restored))
 
       wc.send('app:open-paths', [epubPath])
       await waitFor(wc, `document.querySelector('.epub-body h1')?.textContent === 'Alpha Chapter'`, { label: 'target EPUB Alpha chapter loaded' })
@@ -1410,7 +1538,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     const vaultBridge = await evaluate(wc, `Object.keys(window.paperlight.vault || {}).join(',')`)
     record(
       'the vault bridge is exposed to the renderer',
-      vaultBridge.includes('read') && vaultBridge.includes('write') && vaultBridge.includes('tree'),
+      vaultBridge.includes('read') && vaultBridge.includes('write') && vaultBridge.includes('tree') && vaultBridge.includes('removeEmptyDirectory'),
       vaultBridge,
     )
 
@@ -1418,6 +1546,36 @@ export async function runSmokeTest({ window, projectRoot }) {
     wc.send('app:set-vault', vaultDir)
     await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'notes desk' })
     await waitFor(wc, `document.querySelectorAll('.notes-tree-pane .vault-node').length >= 4`, { label: 'vault tree' })
+    const canonicalLegacyInboxFile = join(vaultDir, 'notes', 'inbox', 'Reading-Log.md')
+    record(
+      'legacy notes/_inbox is migrated byte-for-byte and removed when its files move safely',
+      existsSync(canonicalLegacyInboxFile)
+        && originalLegacyInbox.equals(readFileSync(canonicalLegacyInboxFile))
+        && !existsSync(join(vaultDir, 'notes', '_inbox')),
+      `canonical=${existsSync(canonicalLegacyInboxFile)} oldDirectory=${existsSync(join(vaultDir, 'notes', '_inbox'))}`,
+    )
+
+    const collisionVault = join(library, 'paperlight-vault-inbox-collision')
+    const collisionLegacyDir = join(collisionVault, 'notes', '_inbox')
+    const collisionCanonicalDir = join(collisionVault, 'notes', 'inbox')
+    const legacyCollision = Buffer.from('legacy user note must remain untouched\n')
+    const canonicalCollision = Buffer.from('newer note already at destination\n')
+    mkdirSync(collisionLegacyDir, { recursive: true })
+    mkdirSync(collisionCanonicalDir, { recursive: true })
+    writeFileSync(join(collisionLegacyDir, 'Collision.md'), legacyCollision)
+    writeFileSync(join(collisionLegacyDir, 'export.dat'), Buffer.from([0, 1, 2, 255]))
+    writeFileSync(join(collisionCanonicalDir, 'Collision.md'), canonicalCollision)
+    wc.send('app:set-vault', collisionVault)
+    await waitFor(wc, `document.querySelector('.vault-notice')?.textContent.includes('同名内容不同')`, { label: 'inbox migration collision warning' })
+    record(
+      'legacy inbox migration preserves both sides of a conflicting name and unrecognized files',
+      readFileSync(join(collisionLegacyDir, 'Collision.md')).equals(legacyCollision)
+        && readFileSync(join(collisionCanonicalDir, 'Collision.md')).equals(canonicalCollision)
+        && readFileSync(join(collisionLegacyDir, 'export.dat')).equals(Buffer.from([0, 1, 2, 255])),
+      'conflicting source, destination, and non-Markdown file remain byte-for-byte intact',
+    )
+    wc.send('app:set-vault', vaultDir)
+    await waitFor(wc, `document.querySelector('.notes-tree-pane h2')?.title === ${JSON.stringify(vaultDir)}`, { label: 'original smoke vault restored after inbox migration test' })
 
     // The workspace layout is created on demand: materials / notes / enlightenment / expressions / Daily.
     let scaffold = false
@@ -1462,6 +1620,15 @@ export async function runSmokeTest({ window, projectRoot }) {
         && !existsSync(join(library, 'vault-path-escape.md')),
       traversalWrite.message || 'write unexpectedly succeeded',
     )
+    const guardedDirectory = join(vaultDir, 'notes', 'guarded-empty-delete')
+    mkdirSync(guardedDirectory, { recursive: true })
+    writeFileSync(join(guardedDirectory, '.keep'), 'preserve hidden user data')
+    const nonRecursiveDelete = await evaluate(wc, `window.paperlight.vault.removeEmptyDirectory(${JSON.stringify(vaultDir)}, 'notes/guarded-empty-delete').then((result) => ({ removed: result.ok })).catch((error) => ({ removed: false, message: String(error) }))`)
+    record(
+      'legacy-folder cleanup refuses recursive deletion when an unlisted hidden file remains',
+      nonRecursiveDelete.removed === false && existsSync(join(guardedDirectory, '.keep')),
+      JSON.stringify(nonRecursiveDelete),
+    )
 
     const treeNames = await evaluate(wc, `Array.from(document.querySelectorAll('.notes-tree-pane .vault-node-name')).map((n) => n.textContent)`)
     const hasSource = await evaluate(wc, `document.querySelectorAll('.notes-tree-pane .vault-node.file.source').length`)
@@ -1474,7 +1641,7 @@ export async function runSmokeTest({ window, projectRoot }) {
     // A research note remains free-form Markdown. Existing material and note
     // links are written into the research record; source files stay untouched.
     const researchMaterialPath = 'materials/books/book1/book1.pdf'
-    const researchNotePath = 'notes/_inbox/Reading-Log.md'
+    const researchNotePath = 'notes/inbox/Reading-Log.md'
     const originalResearchMaterial = readFileSync(join(vaultDir, researchMaterialPath))
     await evaluate(wc, `Array.from(document.querySelectorAll('.notes-tree-toolbar button')).find((button) => button.textContent.includes('新建专项研究')).click(); true`)
     await waitFor(wc, `document.querySelector('.notes-create-row input') !== null`, { label: 'research title input' })
@@ -1522,7 +1689,9 @@ export async function runSmokeTest({ window, projectRoot }) {
       JSON.stringify({ researchLinksSaved, researchSourcesUntouched, path: researchPath }))
     await evaluate(wc, `Array.from(document.querySelectorAll('.note-sense-list button')).find((button) => button.title === ${JSON.stringify(researchMaterialPath)})?.click(); true`)
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('book1.pdf')`, { label: 'research link returns to original material' })
-    record('a linked research source opens the original material in the reader', true)
+    const researchSourcePdfLayer = await ensureTextLayer(wc, 'research-linked source PDF')
+    record('a linked research source opens and renders the original PDF text', researchSourcePdfLayer.ok, JSON.stringify(researchSourcePdfLayer))
+    if (!researchSourcePdfLayer.ok) throw new Error(`research-linked PDF failed: ${JSON.stringify(researchSourcePdfLayer)}`)
     wc.send('app:command', 'space-notes')
     await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'return to research note' })
     await waitFor(wc, `document.querySelector('.note-toolbar-path-text')?.textContent.includes('research-argument-and-evidence.md')`, { label: 'research note restored' })
@@ -1785,8 +1954,9 @@ export async function runSmokeTest({ window, projectRoot }) {
       highlight: Boolean(document.querySelector('.input-marker-visual[title="表达来源"]')),
       rendered: document.querySelector('.input-marker-visual[title="表达来源"]')?.closest('.input-marker-overlay')?.dataset.renderedRects,
       unresolved: document.querySelector('.input-marker-visual[title="表达来源"]')?.closest('.input-marker-overlay')?.dataset.unresolvedCount,
+      top: (() => { const scroller = document.querySelector('.reader-scroll'); const visual = document.querySelector('.input-marker-visual[title="表达来源"]'); return scroller && visual ? visual.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null })(),
     }))()`)
-    record('expression source return opens the original PDF and renders an exact quote highlight', openedPdfContext && expressionSourcePdfLayer.ok && pdfExpressionJump.quote && pdfExpressionJump.highlight && pdfExpressionJump.unresolved === '0', JSON.stringify({ ...pdfExpressionJump, textLayer: expressionSourcePdfLayer.ok }))
+    record('expression source return opens the original PDF and aligns an exact quote highlight', openedPdfContext && expressionSourcePdfLayer.ok && pdfExpressionJump.quote && pdfExpressionJump.highlight && pdfExpressionJump.unresolved === '0' && pdfExpressionJump.top >= 50 && pdfExpressionJump.top <= 220, JSON.stringify({ ...pdfExpressionJump, textLayer: expressionSourcePdfLayer.ok }))
     await evaluate(wc, `Array.from(document.querySelectorAll('.space-rail-button')).find((button) => button.textContent.includes('表达')).click(); true`)
     await waitFor(wc, `document.querySelector('.expression-workspace') !== null`, { label: 'return to expression pool after source trace' })
     await evaluate(wc, `Array.from(document.querySelectorAll('.expression-list-item')).find((button) => button.textContent.includes('The authors take a stance')).click(); true`)
@@ -2370,7 +2540,7 @@ export async function runSmokeTest({ window, projectRoot }) {
       groundedNote = files.map((name) => readFileSync(join(vaultDir, 'notes', 'interconnections', name), 'utf8'))
         .find((content) => content.includes('folder: interconnections') && content.includes('vault grounded')) || ''
     }
-    record('grounded Vault conversation notes are filed in notes/interconnections', Boolean(groundedNote) && groundedNote.includes('[[notes/_inbox/Reading-Log.md]]'), groundedNote ? groundedNote.slice(0, 180).replace(/\n/g, ' | ') : 'grounded note not found')
+    record('grounded Vault conversation notes are filed in notes/interconnections', Boolean(groundedNote) && groundedNote.includes('[[notes/inbox/Reading-Log.md]]'), groundedNote ? groundedNote.slice(0, 180).replace(/\n/g, ' | ') : 'grounded note not found')
 
     // Ungrounded mode is explicit, and an answer can be saved back as a note.
     await evaluate(wc, `(() => { document.querySelector('.grounding-chip button:last-child').click(); return true })()`)
@@ -2392,8 +2562,10 @@ export async function runSmokeTest({ window, projectRoot }) {
     const inboxFiles = existsSync(join(vaultDir, 'notes', 'inbox')) ? readdirSync(join(vaultDir, 'notes', 'inbox')) : []
     const inboxMarkdown = inboxFiles.map((name) => readFileSync(join(vaultDir, 'notes', 'inbox', name), 'utf8'))
     record(
-      'an ungrounded Vault answer is saved to notes/inbox and legacy notes/_inbox remains unchanged',
-      inboxMarkdown.some((content) => content.includes('一般回答')) && originalLegacyInbox.equals(readFileSync(legacyInboxFile)),
+      'an ungrounded Vault answer is saved to notes/inbox and migrated legacy content remains intact',
+      inboxMarkdown.some((content) => content.includes('一般回答'))
+        && originalLegacyInbox.equals(readFileSync(canonicalLegacyInboxFile))
+        && !existsSync(legacyInboxFile),
       inboxFiles.join(', '),
     )
 

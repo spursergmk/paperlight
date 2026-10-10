@@ -11,7 +11,7 @@
 // narrow preload bridge in electron/preload.cjs.
 
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
+  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync,
   statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:http'
@@ -360,6 +360,26 @@ function removeVaultEntry(rootValue, relative) {
   return { ok: true }
 }
 
+function removeEmptyVaultDirectory(rootValue, relative) {
+  const { root, target } = vaultTarget(rootValue, relative)
+  if (target === root) throw new Error('不能删除 vault 根目录。')
+  let info
+  try { info = lstatSync(target) } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true }
+    throw error
+  }
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('只能清理空文件夹。')
+  // rmdir is intentionally non-recursive: hidden or unsupported user files
+  // keep a legacy folder in place instead of being silently removed.
+  try {
+    rmdirSync(target)
+  } catch (error) {
+    if (error?.code === 'ENOTEMPTY' || error?.code === 'EEXIST') return { ok: false }
+    throw error
+  }
+  return { ok: true }
+}
+
 function quickAccessRoots() {
   const roots = []
   const push = (label, path) => {
@@ -507,6 +527,7 @@ function registerIpc() {
   })
 
   ipcMain.handle('vault:remove', (_event, rootValue, relative) => removeVaultEntry(rootValue, relative))
+  ipcMain.handle('vault:remove-empty-directory', (_event, rootValue, relative) => removeEmptyVaultDirectory(rootValue, relative))
 
   ipcMain.handle('vault:reveal', (_event, rootValue, relative) => {
     const { target } = vaultTarget(rootValue, relative)

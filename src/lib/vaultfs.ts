@@ -22,6 +22,7 @@ export interface VaultPort {
   write(root: string, path: string, content: string): Promise<void>
   mkdir(root: string, path: string): Promise<void>
   remove(root: string, path: string): Promise<void>
+  removeEmptyDirectory(root: string, path: string): Promise<void>
   reveal(root: string, path: string): Promise<boolean>
 }
 
@@ -61,6 +62,10 @@ function appPort(): VaultPort {
     },
     async remove(root, path) {
       await bridge.vault.remove(root, assertSafe(path))
+    },
+    async removeEmptyDirectory(root, path) {
+      const result = await bridge.vault.removeEmptyDirectory(root, assertSafe(path))
+      if (!result.ok) throw new Error('目录仍有内容。')
     },
     reveal: (root, path) => bridge.vault.reveal(root, assertSafe(path)),
   }
@@ -195,6 +200,11 @@ function browserPort(): VaultPort {
         }
       }
       if (removed) persist()
+    },
+    async removeEmptyDirectory(root, path) {
+      if (root !== VIRTUAL_ROOT) throw new Error('这个浏览器会话里没有打开 vault。')
+      const target = assertSafe(path)
+      if (Object.keys(vault().files).some((key) => key.startsWith(`${target}/`))) throw new Error('目录仍有内容。')
     },
     async reveal() {
       return false

@@ -11,6 +11,7 @@ import {
   dailySourceHash, dailySummarySection, dailyUserNotes, excerptForGrounding, frontmatterString, preserveDailyManagedEdits,
   findingNoteMarkdown, findingNotePath, findingEntries, researchNoteMarkdown, localDailySummary, localDateKey,
   markdownSection, markdownSectionAtLevel, materialMirrorFolders, notebookNoteMarkdown,
+  LEGACY_NOTES_INBOX_DIR, canonicalLegacyInboxPath, resolveLegacyInboxPath,
   mergeSemanticNoteMarkdown, notebookNotePath, parseNote, readerAnswerMarkdown, readerAnswerPath, reportSlotDate, safeFolderName, senseNoteMarkdown, senseNotePath,
   slugify, stringifyNote, titleFromMarkdown, uniquePath, vaultDirname, vaultJoin,
 } from '../lib/vault'
@@ -20,6 +21,7 @@ import {
 } from '../lib/vaultai'
 import { isAbortError } from '../lib/abort'
 import { isVirtualVault, vaultDisplayName, vaultErrorText, vaultFileSystem } from '../lib/vaultfs'
+import type { VaultPort } from '../lib/vaultfs'
 import {
   createExpressionRecord, expressionRecordMarkdown, expressionRecordPath, mergeExpressionRecord,
   normalizeExpression, parseExpressionRecord,
@@ -41,6 +43,65 @@ export interface ReportInfo {
   records: number
   /** The day's records changed after this report was written. */
   stale: boolean
+}
+
+interface LegacyInboxMigrationResult {
+  entries: VaultEntry[]
+  moved: number
+  conflicts: number
+  failed: number
+  cleanupBlocked: boolean
+}
+
+async function migrateLegacyInbox(port: VaultPort, root: string, listing: VaultEntry[]): Promise<LegacyInboxMigrationResult> {
+  const prefix = `${LEGACY_NOTES_INBOX_DIR}/`
+  const legacyDirectories = listing.filter((entry) => entry.directory
+    && (entry.path === LEGACY_NOTES_INBOX_DIR || entry.path.startsWith(prefix)))
+  const files = listing.filter((entry) => !entry.directory && entry.path.startsWith(prefix)
+    && /\.(?:md|markdown)$/i.test(entry.path))
+  if (legacyDirectories.length === 0 && files.length === 0) return { entries: listing, moved: 0, conflicts: 0, failed: 0, cleanupBlocked: false }
+
+  const destinationRoot = canonicalLegacyInboxPath(LEGACY_NOTES_INBOX_DIR)
+  try {
+    await port.mkdir(root, destinationRoot)
+  } catch {
+    return { entries: listing, moved: 0, conflicts: 0, failed: files.length, cleanupBlocked: true }
+  }
+  const occupied = new Map(listing.filter((entry) => !entry.directory)
+    .map((entry) => [entry.path.toLocaleLowerCase('en-US'), entry.path] as const))
+  let moved = 0
+  let conflicts = 0
+  let failed = 0
+  for (const file of files) {
+    const target = canonicalLegacyInboxPath(file.path)
+    try {
+      const original = await port.read(root, file.path)
+      const existingTarget = occupied.get(target.toLocaleLowerCase('en-US'))
+      if (existingTarget) {
+        if (await port.read(root, existingTarget) !== original) {
+          conflicts += 1
+          continue
+        }
+      } else {
+        await port.write(root, target, original)
+        if (await port.read(root, target) !== original) throw new Error('迁移后的 Markdown 校验失败。')
+        occupied.set(target.toLocaleLowerCase('en-US'), target)
+      }
+      await port.remove(root, file.path)
+      moved += 1
+    } catch {
+      // Keep the source file whenever copy, verification, or removal fails.
+      failed += 1
+    }
+  }
+
+  let cleanupBlocked = false
+  for (const directory of [...legacyDirectories].sort((a, b) => b.path.length - a.path.length)) {
+    try { await port.removeEmptyDirectory(root, directory.path) } catch { cleanupBlocked = true }
+  }
+  const entries = await port.tree(root)
+  if (entries.some((entry) => entry.path === LEGACY_NOTES_INBOX_DIR || entry.path.startsWith(prefix))) cleanupBlocked = true
+  return { entries, moved, conflicts, failed, cleanupBlocked }
 }
 
 interface DailySummary {
@@ -171,6 +232,8 @@ export function useVault(options: {
 
   const scaffolding = useRef(new Set<string>())
   const legacyChecked = useRef(new Set<string>())
+  const legacyInboxChecked = useRef(new Set<string>())
+  const legacyInboxTasks = useRef(new Map<string, Promise<LegacyInboxMigrationResult>>())
   const scheduledAttempts = useRef(new Set<string>())
   const reportGenerationInProgress = useRef(new Set<string>())
   const reportControllerRef = useRef<AbortController | null>(null)
@@ -281,14 +344,42 @@ export function useVault(options: {
       let listing = await port.tree(current)
       const afterScaffold = await ensureScaffold(listing)
       if (afterScaffold) listing = afterScaffold
+      let inboxMigration = legacyInboxTasks.current.get(current)
+      let ownsInboxMigration = false
+      if (!inboxMigration && !legacyInboxChecked.current.has(current)) {
+        ownsInboxMigration = true
+        inboxMigration = migrateLegacyInbox(port, current, listing)
+        legacyInboxTasks.current.set(current, inboxMigration)
+        legacyInboxChecked.current.add(current)
+      }
+      if (inboxMigration) {
+        try {
+          const result = await inboxMigration
+          listing = result.entries
+          if (ownsInboxMigration && result.failed > 0) legacyInboxChecked.current.delete(current)
+          if (ownsInboxMigration && (result.moved || result.conflicts || result.failed || result.cleanupBlocked)) {
+            const details = [
+              result.moved ? `${result.moved} 篇旧笔记已校验后移入 notes/inbox。` : '',
+              result.conflicts ? `${result.conflicts} 篇同名内容不同的笔记仍保留在 notes/_inbox，未覆盖新文件。` : '',
+              result.failed ? `${result.failed} 篇笔记迁移未完成，原文件仍保留。` : '',
+              result.cleanupBlocked && !result.conflicts && !result.failed
+                ? '旧文件夹仍含未识别内容，未递归删除。' : '',
+            ].filter(Boolean).join(' ')
+            if (details) flashNotice(details)
+          }
+        } finally {
+          if (legacyInboxTasks.current.get(current) === inboxMigration) legacyInboxTasks.current.delete(current)
+        }
+      }
       setEntries(listing)
       await refreshExpressions()
     } catch (caught) {
+      legacyInboxChecked.current.delete(current)
       setError(vaultErrorText(caught, '无法读取这个 vault。'))
     } finally {
       setLoading(false)
     }
-  }, [ensureScaffold, port, refreshExpressions])
+  }, [ensureScaffold, flashNotice, port, refreshExpressions])
 
   useEffect(() => { void refresh() }, [refresh, root])
 
@@ -315,6 +406,7 @@ export function useVault(options: {
       setError('')
       scaffolding.current.clear()
       legacyChecked.current.clear()
+      legacyInboxChecked.current.clear()
       onRootChange(path)
       return true
     } catch (caught) {
@@ -340,7 +432,14 @@ export function useVault(options: {
   const readNote = useCallback(async (path: string) => {
     const current = rootRef.current
     if (!current) throw new Error('尚未选择笔记 vault。')
-    return port.read(current, path)
+    try {
+      return await port.read(current, path)
+    } catch (error) {
+      const known = new Set(entriesRef.current.filter((entry) => !entry.directory).map((entry) => entry.path))
+      const canonical = resolveLegacyInboxPath(path, known)
+      if (canonical === path) throw error
+      return port.read(current, canonical)
+    }
   }, [port])
 
   const writeNote = useCallback(async (path: string, content: string) => {
@@ -626,7 +725,11 @@ export function useVault(options: {
     return path
   }, [readNote, writeNote])
 
-  const groundingContext = useCallback(async (paths: string[]) => buildGroundingContext(paths, readNote), [readNote])
+  const groundingContext = useCallback(async (paths: string[]) => {
+    const known = new Set(entriesRef.current.filter((entry) => !entry.directory).map((entry) => entry.path))
+    const compatiblePaths = paths.map((path) => resolveLegacyInboxPath(path, known))
+    return buildGroundingContext(compatiblePaths, readNote)
+  }, [readNote])
 
   // ------------------------------------------------------- day + report
 

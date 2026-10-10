@@ -7,7 +7,7 @@
 //     books/book1.pdf      a single material file
 //     books/book1/…        or a folder holding one material
 //   notes/<mirror>/…       senses and notes for that material (mirror of materials/)
-//   notes/_inbox/…         notes with no material context (chat answers, quick notes)
+//   notes/inbox/…          notes with no material context (chat answers, quick notes)
 //   enlightenment/…        the user's own "专项发现"
 //   Daily/<date>.md        the day's records and generated summary
 //   Daily/<date>-report.md legacy generated reports (read-only compatibility)
@@ -28,10 +28,11 @@ export const NOTES_DIR = 'notes'
 export const ENLIGHTENMENT_DIR = 'enlightenment'
 export const DAILY_DIR = 'Daily'
 export const EXPRESSIONS_DIR = 'expressions'
-/** Notes folder used when nothing tells us which material is being read. */
-export const INBOX_FOLDER = '_inbox'
-/** New notes from the reading assistant go here; `_inbox/` remains readable. */
-export const READER_INBOX_FOLDER = 'inbox'
+/** Canonical notes folder used when nothing tells us which material is being read. */
+export const INBOX_FOLDER = 'inbox'
+export const READER_INBOX_FOLDER = INBOX_FOLDER
+/** Old Paperlight V2 path; migrated without overwriting existing notes. */
+export const LEGACY_NOTES_INBOX_DIR = `${NOTES_DIR}/_inbox`
 /** Grounded conversations connect selected Vault material to a new note. */
 export const INTERCONNECTIONS_FOLDER = 'interconnections'
 /** Directory names the notes tree keeps visible even while they are empty. */
@@ -79,6 +80,24 @@ export function normalizeVaultPath(value: string): string {
     .split('/')
     .filter((part) => part && part !== '.')
     .join('/')
+}
+
+/** A compatibility alias for links and saved selections that still name `notes/_inbox/`. */
+export function canonicalLegacyInboxPath(path: string): string {
+  const normalized = normalizeVaultPath(path)
+  if (normalized === LEGACY_NOTES_INBOX_DIR) return `${NOTES_DIR}/${INBOX_FOLDER}`
+  if (normalized.startsWith(`${LEGACY_NOTES_INBOX_DIR}/`)) {
+    return `${NOTES_DIR}/${INBOX_FOLDER}/${normalized.slice(LEGACY_NOTES_INBOX_DIR.length + 1)}`
+  }
+  return normalized
+}
+
+/** Prefer an existing legacy path when present; otherwise follow its canonical inbox alias. */
+export function resolveLegacyInboxPath(path: string, existingPaths: ReadonlySet<string>): string {
+  const normalized = normalizeVaultPath(path)
+  if (existingPaths.has(normalized)) return normalized
+  const canonical = canonicalLegacyInboxPath(normalized)
+  return existingPaths.has(canonical) ? canonical : normalized
 }
 
 /**
@@ -224,7 +243,7 @@ export function mirrorFolderForMaterial(documentPath: string, vaultRoot: string 
   return vaultJoin(...inside.slice(0, -1).map((part) => safeFolderName(part)))
 }
 
-/** `notes/<mirror>` (or `notes/_inbox` when there is no material context). */
+/** `notes/<mirror>` (or `notes/inbox` when there is no material context). */
 export function noteFolderPath(notesFolder: string | null | undefined): string {
   const folder = String(notesFolder ?? '').trim()
   if (!folder) return vaultJoin(NOTES_DIR, INBOX_FOLDER)
@@ -241,7 +260,7 @@ export function noteFolderForDocument(documentPath: string, vaultRoot: string | 
 
 /** Stored on atoms/notes: the vault-relative folder inside `notes/`. */
 export function notesFolderFromPath(path: string): string {
-  const normalized = normalizeVaultPath(path)
+  const normalized = canonicalLegacyInboxPath(path)
   if (!normalized.startsWith(`${NOTES_DIR}/`)) return ''
   return normalized.slice(NOTES_DIR.length + 1)
 }

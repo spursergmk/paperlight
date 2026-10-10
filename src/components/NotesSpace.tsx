@@ -12,7 +12,7 @@ import type { AppSpace, ChatThread, NoteViewMode, NotebookNote, SenseAtom, Vault
 import {
   appendResearchChatLink, appendResearchSourceLink, countWords, dailyNotePath, filterVaultTree, frontmatterList, frontmatterString, isVaultNoteKind,
   localDateKey, noteFolderPath, notesFolderFromPath, noteTitleFromPath, parseNote, relativeTime,
-  vaultBasename, vaultDirname, wikiLinks,
+  resolveLegacyInboxPath, vaultBasename, vaultDirname, wikiLinks,
 } from '../lib/vault'
 
 const KIND_LABELS: Record<VaultNoteKind, string> = {
@@ -236,10 +236,14 @@ export default function NotesSpace({
   const linkedNotes = useMemo(() => {
     const seen = new Set<string>()
     const resolved: Array<{ path: string; title: string }> = []
+    const known = new Set(vaultFiles.filter((entry) => !entry.directory).map((entry) => entry.path))
     for (const target of wikiLinks(draft)) {
       if (target.startsWith('chat:')) continue
-      const lower = target.toLowerCase()
-      const match = vaultFiles.find((entry) => entry.path === target)
+      const compatibleTarget = resolveLegacyInboxPath(target, known)
+      const lower = compatibleTarget.toLowerCase()
+      const match = vaultFiles.find((entry) => entry.path === compatibleTarget)
+        || vaultFiles.find((entry) => entry.path === `${compatibleTarget}.md`)
+        || vaultFiles.find((entry) => entry.path === target)
         || vaultFiles.find((entry) => entry.path === `${target}.md`)
         || vaultFiles.find((entry) => entry.path.toLowerCase().endsWith(`/${lower}.md`))
         || vaultFiles.find((entry) => noteTitleFromPath(entry.path).toLowerCase() === lower)
@@ -274,7 +278,10 @@ export default function NotesSpace({
     const chatIds = new Set(chatThreads.map((thread) => thread.id))
     return wikiLinks(draft).filter((target) => target.startsWith('chat:')
       ? !chatIds.has(target.slice('chat:'.length))
-      : !known.has(target) && !known.has(`${target}.md`)).slice(0, 6)
+      : (() => {
+        const compatible = resolveLegacyInboxPath(target, known)
+        return !known.has(target) && !known.has(`${target}.md`) && !known.has(compatible) && !known.has(`${compatible}.md`)
+      })()).slice(0, 6)
   }, [chatThreads, draft, vaultFiles])
 
   const dayEntries = useMemo(
@@ -390,8 +397,12 @@ export default function NotesSpace({
       }
       return
     }
-    const lower = normalized.toLowerCase()
-    const direct = vaultFiles.find((entry) => entry.path === normalized)
+    const known = new Set(vaultFiles.filter((entry) => !entry.directory).map((entry) => entry.path))
+    const compatible = resolveLegacyInboxPath(normalized, known)
+    const lower = compatible.toLowerCase()
+    const direct = vaultFiles.find((entry) => entry.path === compatible)
+      || vaultFiles.find((entry) => entry.path === `${compatible}.md`)
+      || vaultFiles.find((entry) => entry.path === normalized)
       || vaultFiles.find((entry) => entry.path === `${normalized}.md`)
       || vaultFiles.find((entry) => entry.path.toLowerCase().endsWith(`/${lower}.md`))
       || vaultFiles.find((entry) => noteTitleFromPath(entry.path).toLowerCase() === lower)

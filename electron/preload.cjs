@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('paperlight', {
     write: (root, relativePath, content) => ipcRenderer.invoke('vault:write', root, relativePath, content),
     mkdir: (root, relativePath) => ipcRenderer.invoke('vault:mkdir', root, relativePath),
     remove: (root, relativePath) => ipcRenderer.invoke('vault:remove', root, relativePath),
+    removeEmptyDirectory: (root, relativePath) => ipcRenderer.invoke('vault:remove-empty-directory', root, relativePath),
     reveal: (root, relativePath) => ipcRenderer.invoke('vault:reveal', root, relativePath),
   },
   on: {

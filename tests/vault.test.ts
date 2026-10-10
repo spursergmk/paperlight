@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DAILY_DIR, ENLIGHTENMENT_DIR, INBOX_FOLDER, LEGACY_DAILY_DIR, MATERIALS_DIR, NOTES_DIR,
-  absoluteVaultPath, aiNoteMarkdown, aiNotePath, buildVaultTree, chatAnswerMarkdown, chatNotePath,
+  absoluteVaultPath, aiNoteMarkdown, aiNotePath, buildVaultTree, canonicalLegacyInboxPath, chatAnswerMarkdown, chatNotePath,
   collectFiles, countWords, dailyEntriesFromNotebook, dailyManagedBodyHash, dailyNoteMarkdown, dailyNotePath,
   dailyReportMarkdown, dailyReportPath, dailySourceHash, dailySummarySection, dailyUserNotes, excerptForGrounding, preserveDailyManagedEdits,
   filesUnderPath, filterVaultTree, findTreeNode, findingEntries, findingNoteMarkdown,
@@ -13,7 +13,7 @@ import {
   notebookNoteMarkdown, notebookNotePath, notesFolderFromPath, parseNote, parseTimeOfDay,
   appendResearchChatLink, appendResearchSourceLink, mergeSemanticNoteMarkdown, remapLegacyNotePath, reportSlotDate, researchNoteMarkdown,
   readerAnswerMarkdown, readerAnswerPath, safeFolderName, semanticAnswerMarkdown, senseNoteMarkdown, senseNotePath, slugify,
-  stringifyNote, titleFromMarkdown, uniquePath, vaultBasename, vaultDirname, vaultJoin, wikiLinks,
+  resolveLegacyInboxPath, stringifyNote, titleFromMarkdown, uniquePath, vaultBasename, vaultDirname, vaultJoin, wikiLinks,
 } from '../src/lib/vault.ts'
 import type { NotebookNote, SenseAtom, VaultEntry } from '../src/types.ts'
 
@@ -128,6 +128,10 @@ test('materials folders mirror into notes', () => {
   assert.equal(noteFolderPath('books/book1'), 'notes/books/book1')
   assert.equal(notesFolderFromPath('notes/books/book1'), 'books/book1')
   assert.equal(notesFolderFromPath('notes/_inbox'), INBOX_FOLDER)
+  assert.equal(INBOX_FOLDER, 'inbox')
+  assert.equal(canonicalLegacyInboxPath('notes/_inbox/Reading-Log.md'), 'notes/inbox/Reading-Log.md')
+  assert.equal(resolveLegacyInboxPath('notes/_inbox/Reading-Log.md', new Set(['notes/inbox/Reading-Log.md'])), 'notes/inbox/Reading-Log.md')
+  assert.equal(resolveLegacyInboxPath('notes/_inbox/Reading-Log.md', new Set(['notes/_inbox/Reading-Log.md'])), 'notes/_inbox/Reading-Log.md')
 
   assert.deepEqual(materialMirrorFolders(entries), ['books', 'books/book1'])
   assert.equal(safeFolderName('books/book 1'), 'books-book 1'.replace('/', '-'))
@@ -143,9 +147,9 @@ test('slugify keeps CJK readable and never returns an empty name', () => {
 })
 
 test('uniquePath never overwrites an existing note', () => {
-  const taken = new Set(['notes/_inbox/2026-02-14-x.md', 'notes/_inbox/2026-02-14-x-2.md'])
-  assert.equal(uniquePath('notes/_inbox/2026-02-14-x.md', taken), 'notes/_inbox/2026-02-14-x-3.md')
-  assert.equal(uniquePath('notes/_inbox/new.md', taken), 'notes/_inbox/new.md')
+  const taken = new Set(['notes/inbox/2026-02-14-x.md', 'notes/inbox/2026-02-14-x-2.md'])
+  assert.equal(uniquePath('notes/inbox/2026-02-14-x.md', taken), 'notes/inbox/2026-02-14-x-3.md')
+  assert.equal(uniquePath('notes/inbox/new.md', taken), 'notes/inbox/new.md')
 })
 
 test('frontmatter round-trips through the safe subset', () => {

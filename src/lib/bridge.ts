@@ -56,6 +56,7 @@ export interface PaperlightBridge {
     write(root: string, relativePath: string, content: string): Promise<{ ok: boolean }>
     mkdir(root: string, relativePath: string): Promise<{ ok: boolean }>
     remove(root: string, relativePath: string): Promise<{ ok: boolean }>
+    removeEmptyDirectory(root: string, relativePath: string): Promise<{ ok: boolean }>
     reveal(root: string, relativePath: string): Promise<boolean>
   }
   on: {
