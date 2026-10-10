@@ -1369,11 +1369,17 @@ export async function runSmokeTest({ window, projectRoot }) {
       scrollTop: document.querySelector('.reader-scroll')?.scrollTop || 0,
       readerPath: document.querySelector('.reader-toolbar-title')?.textContent || '',
     })`)
+    const nestedReturnChecks = {
+      nestedSourceContextPreserved: nestedContext.includes('These classifications operate'),
+      analysisRequestCountPreserved: returnEvidence.analysisCalls === nestedAnalysisRequestCount,
+      translationPreserved: returnEvidence.translation === parentAnalysis.translation,
+      meaningPreserved: returnEvidence.meaning === parentAnalysis.meaning,
+      readerPositionPreserved: returnEvidence.scrollTop === scrollBeforeReturn,
+      readerPathPreserved: returnEvidence.readerPath === parentAnalysis.readerPath,
+    }
     record('returning from nested query restores the parent analysis and reader position without another request',
-      nestedContext.includes('These classifications operate') && returnEvidence.analysisCalls === nestedAnalysisRequestCount
-        && returnEvidence.translation === parentAnalysis.translation && returnEvidence.meaning === parentAnalysis.meaning
-        && returnEvidence.scrollTop === scrollBeforeReturn && returnEvidence.readerPath === parentAnalysis.readerPath,
-      JSON.stringify(returnEvidence))
+      Object.values(nestedReturnChecks).every(Boolean),
+      JSON.stringify({ checks: nestedReturnChecks, scrollBeforeReturn, returnEvidence }))
 
     await evaluate(wc, `window.__holdNextAnalysis = true; document.querySelector('[data-testid="analysis-selected-button"]').click(); true`)
     await waitFor(wc, `document.querySelector('.analysis-command-actions') && document.querySelector('[data-testid="analysis-panel"] .analysis-instruction-actions .text-action')`, { label: 'analysis stop control' })
@@ -1522,11 +1528,14 @@ export async function runSmokeTest({ window, projectRoot }) {
     wc.send('app:open-paths', [textPath])
     await waitFor(wc, `document.querySelector('.reader-toolbar-title')?.textContent.includes('Plain-Notes.txt')`, { label: 'paragraph-bookmarked text reopened' })
     await waitFor(wc, `document.querySelector('.flow-page') && Array.from(document.querySelectorAll('.flow-paragraph')).some((node) => node.textContent.includes('unique text marker target'))`, { label: 'bookmarked TXT paragraphs loaded after reopening' })
+    // Let the newly mounted TextReader finish its initial scroll restoration
+    // and install its block-navigation API before the smoke clicks the marker.
+    await sleep(250)
     await evaluate(wc, `if (!document.querySelector('.input-marker-menu')) document.querySelector('.input-marker-menu-toggle').click(); true`)
     await waitFor(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).some((item) => item.querySelector('small')?.textContent.includes('进度') && item.textContent.includes('unique text marker target'))`, { label: 'saved paragraph bookmark available after reopen' })
     await evaluate(wc, `Array.from(document.querySelectorAll('.input-marker-list-item')).find((item) => item.querySelector('small')?.textContent.includes('进度') && item.textContent.includes('unique text marker target')).querySelector('button:first-child').click(); true`)
     await waitFor(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((node) => node.textContent.includes('unique text marker target')); return Boolean(scroller && paragraph && Math.abs(paragraph.getBoundingClientRect().top - scroller.getBoundingClientRect().top) < 180) })()`, { label: 'bookmark restores the original paragraph position' })
-    const bookmarkPosition = await evaluate(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((node) => node.textContent.includes('unique text marker target')); return { quote: paragraph?.textContent, top: paragraph && scroller ? Math.round(paragraph.getBoundingClientRect().top - scroller.getBoundingClientRect().top) : null } })()`)
+    const bookmarkPosition = await evaluate(wc, `(() => { const scroller = document.querySelector('.reader-scroll'); const paragraph = Array.from(document.querySelectorAll('.flow-paragraph')).find((node) => node.textContent.includes('unique text marker target')); const state = JSON.parse(localStorage.getItem('paperlight-state-v1') || '{}'); const marker = (state.inputMarkers || []).find((item) => item.sourcePath === ${JSON.stringify(textPath)} && item.purpose === 'progress' && item.quote?.includes('unique text marker target')); return { quote: paragraph?.textContent, top: paragraph && scroller ? Math.round(paragraph.getBoundingClientRect().top - scroller.getBoundingClientRect().top) : null, scrollTop: scroller?.scrollTop ?? null, blockIndex: marker?.blockIndex ?? null, notice: document.querySelector('.input-marker-notice')?.textContent || '' } })()`)
     record('closing and reopening TXT returns to the bookmarked paragraph itself', bookmarkPosition.quote?.includes('unique text marker target') && bookmarkPosition.top >= 0 && bookmarkPosition.top < 180, JSON.stringify(bookmarkPosition))
 
     // ------------------------------------------------------------------- EPUB
@@ -2429,6 +2438,18 @@ export async function runSmokeTest({ window, projectRoot }) {
     )
 
     // Back to the vault: reading a material notes its book context.
+    // Earlier PDF scenarios have already been checked. Release those completed
+    // tabs before opening another PDF so their workers do not contend with the
+    // later Vault-source and expression-return checks.
+    wc.send('app:command', 'space-reader')
+    await waitFor(wc, `document.querySelector('.tab-strip') !== null`, { label: 'reader before opening a Vault material' })
+    const completedPdfTabs = await evaluate(wc, `Array.from(document.querySelectorAll('.doc-tab')).map((tab) => tab.querySelector('.doc-tab-name')?.textContent || '').filter((name) => name.toLocaleLowerCase().endsWith('.pdf'))`)
+    for (const name of completedPdfTabs) {
+      await evaluate(wc, `(() => { const tab = Array.from(document.querySelectorAll('.doc-tab')).find((item) => item.querySelector('.doc-tab-name')?.textContent === ${JSON.stringify(name)}); tab?.querySelector('.doc-tab-close')?.click(); return true })()`)
+      await waitFor(wc, `!Array.from(document.querySelectorAll('.doc-tab')).some((tab) => tab.querySelector('.doc-tab-name')?.textContent === ${JSON.stringify(name)})`, { label: `release completed PDF tab ${name}` })
+    }
+    wc.send('app:command', 'space-notes')
+    await waitFor(wc, `document.querySelector('.notes-space') !== null`, { label: 'return to Vault before opening its material' })
     await evaluate(wc, `(() => {
       const source = document.querySelector('.notes-tree-pane .vault-node.file.source .vault-node-toggle')
       source.click()
@@ -2925,8 +2946,11 @@ export async function runSmokeTest({ window, projectRoot }) {
       return true
     })()`)
     await waitFor(wc, `document.querySelector('.note-textarea')?.value.includes(${JSON.stringify(`[[chat:${researchThread.id}|`)})`, { label: 'chat link added to research Markdown' })
-    await sleep(1500)
-    const linkedResearchMarkdown = readFileSync(join(vaultDir, researchPath), 'utf8')
+    let linkedResearchMarkdown = ''
+    for (let attempt = 0; attempt < 24 && !linkedResearchMarkdown.includes(`[[chat:${researchThread.id}|`); attempt += 1) {
+      await sleep(250)
+      linkedResearchMarkdown = readFileSync(join(vaultDir, researchPath), 'utf8')
+    }
     const chatLinkPersisted = linkedResearchMarkdown.includes(`[[chat:${researchThread.id}|`)
       && linkedResearchMarkdown.includes('# Argument and evidence')
       && (!researchThreadReply || !linkedResearchMarkdown.includes(researchThreadReply))

@@ -33,6 +33,21 @@ V2 开发批次在现有开发分支更新版本、记录变更、创建 commit 
 - 扩展 Electron 端到端冒烟：覆盖 PDF、EPUB、TXT、Markdown 查询上下文，Oxford/Collins 直达链接、篇章分析与嵌套查询、取消请求、模块/词典/分析保存、表达候选来源和本机精确匹配。
 - 本批 Electron 冒烟共 147 项检查通过；使用临时材料、临时 Vault 和本地 AI stub，不读取或写入真实用户 Vault，也不调用真实模型服务。
 
+## [3.0.0-rc.1] · V3.0 RC 1（开发分支；不是正式发布）
+
+### 发布候选
+
+- V3.0 阅读助手升级的首个发布候选，包含上下文查询、可选语言模块、词典入口、篇章分析、嵌套查询与安全写回 Vault。
+
+### 最终验证
+
+- `npm run check`：通过；生产构建成功、114 项单元测试通过、9 个 Node JavaScript 文件语法检查通过。
+- `npm run smoke`：通过；147 项 Electron 桌面检查全部通过，覆盖四类材料的查询上下文、词典入口、篇章分析、嵌套查询返回与取消、模块保存、表达候选来源、Vault 写入及现有 V2 阅读流程。
+- Smoke 使用临时材料、临时 Vault 和本地 AI stub；未读取或写入真实 Vault，也未调用真实模型服务。
+- `npm run app:mac`：通过；生成 universal（x86_64 + arm64）3.0.0-rc.1 `Paperlight.app`，`codesign --verify --deep --strict` 通过；隔离用户数据目录启动成功，并在新建空 Vault 中验证首次加载和 Daily 文件生成。App 为 ad-hoc 签名，未公证。
+- Vite 提示主 JS chunk 为 669.43 KB，超过 500 KB 建议阈值；本批没有调整代码拆分。
+- 本候选只推送到 `codex/paperlight-v3` 开发分支；没有生成安装包、版本标签或 GitHub Release。
+
 
 ## [2.5.0] · V2.5 Preview（开发分支；不是正式发布）
 
