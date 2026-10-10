@@ -72,6 +72,107 @@ test('the static handler serves the bundle and its SPA fallback', async () => {
   })
 })
 
+test('V3 query modules share one structured response and analysis keeps translation separate', async () => {
+  const originalFetch = globalThis.fetch
+  const originalKey = process.env.OPENAI_API_KEY
+  const originalBase = process.env.OPENAI_BASE_URL
+  process.env.OPENAI_API_KEY = 'test-only-paperlight-key'
+  process.env.OPENAI_BASE_URL = 'https://api.deepseek.com'
+  const providerBodies: Array<Record<string, any>> = []
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body || '{}')) as Record<string, any>
+    providerBodies.push(body)
+    const prompt = String(body.messages?.[1]?.content || '')
+    const content = prompt.includes('Original text:')
+      ? JSON.stringify({ translation: '他们终于达成了共识。', meaning: '这句话说明双方经过讨论后意见一致。' })
+      : prompt.includes('Compare 2 to 5')
+        ? JSON.stringify({ content: 'reach a consensus 更强调协商结果；agree 更宽泛。', expressions: [{ expression: 'reach a consensus', meaning: '达成共识', usageScenario: '正式讨论' }] })
+        : prompt.includes('"term":"bank"')
+          ? JSON.stringify({
+              status: 'ambiguous', explanation: '缺少语境时，bank 可指金融机构或河岸。',
+              sense: {
+                term: 'bank', lemma: 'bank', partOfSpeech: 'noun', senseId: 'financial-institution',
+                contextualMeaning: '银行', definition: 'a financial institution', contextSentence: 'They visited the bank.',
+                examples: [], guidance: { scenarios: [], advice: [], frequency: '', alternatives: [], synonyms: [], antonyms: [], morphology: {} },
+              },
+              syntax: '不应在词语查询中展示句法模块。',
+              usage: { summary: '取决于语境。' },
+            })
+        : JSON.stringify({
+            status: 'resolved', explanation: '',
+            sense: {
+              term: 'consensus', lemma: 'consensus', partOfSpeech: 'noun', senseId: 'shared-opinion',
+              contextualMeaning: '共识', definition: 'a generally accepted opinion', contextSentence: 'They reached a consensus.',
+              examples: [], guidance: { scenarios: [], advice: [], frequency: '', alternatives: [], synonyms: [], antonyms: [], morphology: {} },
+            },
+            syntax: 'reached 是谓语，a consensus 是宾语。',
+            usage: { summary: '常用于讨论后形成共同意见。', scenarios: ['协商'], collocations: ['reach a consensus'], advice: [], expressions: [{ expression: 'reach a consensus', meaning: '达成共识', usageScenario: '正式讨论' }] },
+          })
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 })
+  }) as typeof fetch
+  try {
+    await withServer(async (port) => {
+      const post = (path: string, body: unknown) => rawRequest(port, {
+        method: 'POST', path,
+        headers: { Host: `127.0.0.1:${port}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const query = await post('/api/query', {
+        task: 'default', term: 'They reached a consensus.', context: 'They reached a consensus after a long discussion.', isSentence: true,
+      })
+      assert.equal(query.status, 200)
+      const queryBody = JSON.parse(query.body)
+      assert.equal(queryBody.status, 'resolved')
+      assert.equal(queryBody.sense.contextualMeaning, '共识')
+      assert.deepEqual(queryBody.modules.map((module: { key: string }) => module.key), ['syntax', 'usage'])
+      assert.match(providerBodies[0].messages[1].content, /Do not present language intuition as measured frequency/)
+
+      const word = await post('/api/query', { task: 'default', term: 'consensus', context: 'They reached a consensus.', isSentence: false })
+      assert.equal(word.status, 200)
+      assert.deepEqual(JSON.parse(word.body).modules.map((module: { key: string }) => module.key), ['usage'])
+
+      const ambiguous = await post('/api/query', { task: 'default', term: 'bank', context: '', isSentence: false })
+      assert.equal(ambiguous.status, 200)
+      const ambiguousBody = JSON.parse(ambiguous.body)
+      assert.equal(ambiguousBody.status, 'ambiguous')
+      assert.equal('sense' in ambiguousBody, false, 'an uncertain sense must not be presented as a resolved answer')
+      assert.match(ambiguousBody.explanation, /bank/)
+
+      const optional = await post('/api/query', { task: 'synonyms', term: 'reach a consensus', context: 'They reached a consensus.' })
+      assert.equal(optional.status, 200)
+      assert.equal(JSON.parse(optional.body).modules[0].key, 'synonyms')
+
+      const analysis = await post('/api/analysis', {
+        source: { text: 'They finally reached a consensus.', sourceKind: 'pdf', pageNumber: 2, sourceName: 'sample.pdf' },
+        instruction: 'Explain the argument', scopeLabel: 'PDF 第 2 页',
+      })
+      assert.equal(analysis.status, 200)
+      assert.deepEqual(JSON.parse(analysis.body), { translation: '他们终于达成了共识。', meaning: '这句话说明双方经过讨论后意见一致。' })
+      assert.equal(providerBodies.length, 5)
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = originalKey
+    if (originalBase === undefined) delete process.env.OPENAI_BASE_URL
+    else process.env.OPENAI_BASE_URL = originalBase
+  }
+})
+
+test('V3 query and analysis endpoints reject foreign hosts and out-of-scope payloads', async () => {
+  await withServer(async (port) => {
+    const post = (path: string, body: unknown, host = `127.0.0.1:${port}`) => rawRequest(port, {
+      method: 'POST', path,
+      headers: { Host: host, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    assert.equal((await post('/api/query', { task: 'default', term: 'word' }, 'outside.example:80')).status, 403)
+    assert.equal((await post('/api/analysis', { source: { text: 'text' } }, 'outside.example:80')).status, 403)
+    assert.equal((await post('/api/query', { task: 'default', term: 'word', context: 'x'.repeat(5_001) })).status, 400)
+    assert.equal((await post('/api/analysis', { source: { text: 'x'.repeat(20_001) } })).status, 400)
+  })
+})
+
 test('path traversal cannot leave the bundle', async () => {
   await withServer(async (port) => {
     for (const path of [
@@ -205,6 +306,8 @@ test('disconnecting AI generation routes aborts the upstream provider call', asy
   process.env.OPENAI_API_KEY = 'test-only-paperlight-key'
   const cases = [
     ['/api/sense', { task: 'lookup', term: 'steady', context: 'a steady pace', model: 'test-model' }],
+    ['/api/query', { task: 'default', term: 'steady', context: 'a steady pace', isSentence: false, model: 'test-model' }],
+    ['/api/analysis', { source: { text: 'A steady pace.', sourceKind: 'text', pageNumber: 1 }, scopeLabel: '选区', model: 'test-model' }],
     ['/api/translate', { text: 'a steady pace', before: '', after: '', model: 'test-model' }],
     ['/api/expression-explore', { mode: 'intent', intent: '委婉地提出不同意见', model: 'test-model' }],
     ['/api/note', { task: 'topic', term: 'steady', question: 'steady', model: 'test-model' }],

@@ -23,6 +23,8 @@ export interface PaperlightApi {
 
 export declare const CONFIG_PATH: string
 export declare const SENSE_PATH: string
+export declare const QUERY_PATH: string
+export declare const ANALYSIS_PATH: string
 export declare const TRANSLATE_PATH: string
 export declare const VAULT_CHAT_PATH: string
 export declare const NOTE_PATH: string

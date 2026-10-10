@@ -4,6 +4,10 @@ export interface TextSelection {
   text: string
   before: string
   after: string
+  /** Stable source-context window; independent of visual line wrapping. */
+  contextText?: string
+  /** One bounded wider window offered only when the model reports insufficient context. */
+  expandedContextText?: string
   /** PDF page number, or 1-based chapter number in a reflowed document. */
   pageNumber: number
   startOffset?: number
@@ -46,6 +50,60 @@ export interface SensePayload {
   contextSentence: string
   examples: SenseExample[]
   guidance: SenseGuidance
+}
+
+export type QueryLookupStatus = 'resolved' | 'ambiguous' | 'insufficient_context' | 'unable_to_determine'
+export type QueryModuleKey = 'semantic' | 'syntax' | 'usage' | 'synonyms' | 'scenario-pack' | 'background'
+
+export interface QueryExpressionSuggestion {
+  expression: string
+  meaning: string
+  usageScenario: string
+}
+
+export interface QueryModuleResult {
+  key: QueryModuleKey
+  title: string
+  markdown: string
+  expressions?: QueryExpressionSuggestion[]
+}
+
+export interface LanguageQueryBundle {
+  status: QueryLookupStatus
+  explanation: string
+  sense?: SensePayload
+  /** M1/M3/M4.1 are returned together by one default model request. */
+  modules: QueryModuleResult[]
+}
+
+export type OptionalQueryTask = 'syntax' | 'synonyms' | 'scenario-pack' | 'background'
+
+export interface ReaderAnalysisSource {
+  text: string
+  sourceKind: 'pdf' | 'epub' | 'text'
+  sourcePath?: string
+  sourceName?: string
+  pageNumber: number
+  blockIndex?: number
+  locationLabel?: string
+}
+
+export interface ReaderAnalysisResult {
+  id: string
+  source: ReaderAnalysisSource
+  instruction: string
+  scopeLabel: string
+  translation: string
+  meaning: string
+  saved?: boolean
+}
+
+export interface ExistingLanguageMatch {
+  kind: 'semantic' | 'expression'
+  text: string
+  meaning: string
+  start: number
+  end: number
 }
 
 /** Canonical V2 name; the SensePayload alias keeps the V1 lookup contract. */
